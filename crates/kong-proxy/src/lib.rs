@@ -20,12 +20,13 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use uuid::Uuid;
 
-use kong_core::models::{Route, Service, Target, Upstream};
+use kong_core::models::{CaCertificate, Route, Service, Target, Upstream};
 use kong_core::traits::RequestCtx;
 use kong_router::{RequestContext, RouteMatch, Router};
 use kong_plugin_system::{PluginExecutor, PluginRegistry, ResolvedPlugin};
 
 use crate::balancer::LoadBalancer;
+use crate::tls::CertificateManager;
 
 /// 请求级上下文 — 在 Pingora 各阶段间传递
 pub struct KongCtx {
@@ -46,6 +47,7 @@ pub struct KongCtx {
 }
 
 /// Kong 代理服务 — 实现 Pingora ProxyHttp trait
+#[derive(Clone)]
 pub struct KongProxy {
     /// 路由器（可热更新）
     pub router: Arc<RwLock<Router>>,
@@ -57,6 +59,10 @@ pub struct KongProxy {
     pub services: Arc<RwLock<HashMap<Uuid, Service>>>,
     /// 所有插件配置
     pub plugins: Arc<RwLock<Vec<kong_core::models::Plugin>>>,
+    /// TLS 证书管理器（SNI 匹配 + 客户端证书查找）
+    pub cert_manager: Arc<CertificateManager>,
+    /// CA 证书列表（用于上游 TLS 验证）
+    pub ca_certificates: Arc<RwLock<Vec<CaCertificate>>>,
 }
 
 impl KongProxy {
@@ -64,6 +70,8 @@ impl KongProxy {
         routes: &[Route],
         router_flavor: &str,
         plugin_registry: PluginRegistry,
+        cert_manager: CertificateManager,
+        ca_certificates: Vec<CaCertificate>,
     ) -> Self {
         Self {
             router: Arc::new(RwLock::new(Router::new(routes, router_flavor))),
@@ -71,6 +79,8 @@ impl KongProxy {
             balancers: Arc::new(RwLock::new(HashMap::new())),
             services: Arc::new(RwLock::new(HashMap::new())),
             plugins: Arc::new(RwLock::new(Vec::new())),
+            cert_manager: Arc::new(cert_manager),
+            ca_certificates: Arc::new(RwLock::new(ca_certificates)),
         }
     }
 
@@ -110,6 +120,13 @@ impl KongProxy {
     pub fn update_plugins(&self, plugins: Vec<kong_core::models::Plugin>) {
         if let Ok(mut p) = self.plugins.write() {
             *p = plugins;
+        }
+    }
+
+    /// 热更新 CA 证书列表
+    pub fn update_ca_certificates(&self, cas: Vec<CaCertificate>) {
+        if let Ok(mut ca) = self.ca_certificates.write() {
+            *ca = cas;
         }
     }
 
@@ -343,9 +360,42 @@ impl ProxyHttp for KongProxy {
             peer.options.verify_cert = tls_verify;
             peer.options.verify_hostname = tls_verify;
 
-            // TODO: 当 tls_verify=true 时，从 Service.ca_certificates 加载 CA 构建信任链
-            // TODO: 支持 Service.tls_verify_depth
-            // TODO: 支持 Service.client_certificate (mTLS)
+            // CA 证书信任链：当 tls_verify=true 且 Service 配置了 ca_certificates 时加载
+            if tls_verify {
+                if let Some(ca_ids) = service.and_then(|s| s.ca_certificates.as_ref()) {
+                    if let Ok(cas) = self.ca_certificates.read() {
+                        let mut x509_cas = Vec::new();
+                        for ca_id in ca_ids {
+                            if let Some(ca) = cas.iter().find(|c| c.id == *ca_id) {
+                                match pingora_core::tls::x509::X509::from_pem(ca.cert.as_bytes()) {
+                                    Ok(x509) => x509_cas.push(x509),
+                                    Err(e) => tracing::warn!("CA 证书解析失败 ({}): {}", ca_id, e),
+                                }
+                            }
+                        }
+                        if !x509_cas.is_empty() {
+                            peer.options.ca = Some(Arc::new(x509_cas.into_boxed_slice()));
+                        }
+                    }
+                }
+            }
+
+            // mTLS 客户端证书：当 Service 配置了 client_certificate 时加载
+            if let Some(fk) = service.and_then(|s| s.client_certificate.as_ref()) {
+                if let Some(pair) = self.cert_manager.get_certificate_by_id(&fk.id) {
+                    match (
+                        pingora_core::tls::x509::X509::from_pem(pair.cert.as_bytes()),
+                        pingora_core::tls::pkey::PKey::private_key_from_pem(pair.key.as_bytes()),
+                    ) {
+                        (Ok(x509), Ok(pkey)) => {
+                            let cert_key = pingora_core::utils::tls::CertKey::new(vec![x509], pkey);
+                            peer.client_cert_key = Some(Arc::new(cert_key));
+                        }
+                        (Err(e), _) => tracing::warn!("客户端证书解析失败: {}", e),
+                        (_, Err(e)) => tracing::warn!("客户端私钥解析失败: {}", e),
+                    }
+                }
+            }
         }
 
         Ok(Box::new(peer))

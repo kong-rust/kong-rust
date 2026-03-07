@@ -5,7 +5,7 @@ use super::common::{ForeignKey, HashOn, LbAlgorithm};
 use crate::traits::Entity;
 
 /// 主动健康检查 — 健康阈值配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthyConfig {
     /// 检查间隔（秒），0 表示禁用
     #[serde(default)]
@@ -19,7 +19,7 @@ pub struct HealthyConfig {
 }
 
 /// 主动健康检查 — 不健康阈值配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UnhealthyConfig {
     /// 检查间隔（秒），0 表示禁用
     #[serde(default)]
@@ -63,9 +63,27 @@ pub struct ActiveHealthcheck {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::HashMap<String, Vec<String>>>,
     /// 健康阈值配置
+    #[serde(default)]
     pub healthy: HealthyConfig,
     /// 不健康阈值配置
+    #[serde(default)]
     pub unhealthy: UnhealthyConfig,
+}
+
+impl Default for ActiveHealthcheck {
+    fn default() -> Self {
+        Self {
+            check_type: "http".to_string(),
+            timeout: 1.0,
+            concurrency: 10,
+            http_path: "/".to_string(),
+            https_sni: None,
+            https_verify_certificate: true,
+            headers: None,
+            healthy: HealthyConfig::default(),
+            unhealthy: UnhealthyConfig::default(),
+        }
+    }
 }
 
 /// 被动健康检查配置
@@ -75,17 +93,31 @@ pub struct PassiveHealthcheck {
     #[serde(rename = "type", default = "default_check_type")]
     pub check_type: String,
     /// 健康阈值配置
+    #[serde(default)]
     pub healthy: HealthyConfig,
     /// 不健康阈值配置
+    #[serde(default)]
     pub unhealthy: UnhealthyConfig,
+}
+
+impl Default for PassiveHealthcheck {
+    fn default() -> Self {
+        Self {
+            check_type: "http".to_string(),
+            healthy: HealthyConfig::default(),
+            unhealthy: UnhealthyConfig::default(),
+        }
+    }
 }
 
 /// 健康检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthcheckConfig {
     /// 主动健康检查
+    #[serde(default)]
     pub active: ActiveHealthcheck,
     /// 被动健康检查
+    #[serde(default)]
     pub passive: PassiveHealthcheck,
     /// 健康阈值百分比（0-100），默认 0
     #[serde(default)]

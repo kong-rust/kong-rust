@@ -1397,6 +1397,7 @@ dependencies = [
  "kong-core",
  "kong-db",
  "kong-plugin-system",
+ "kong-proxy",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -267,7 +267,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     tracing::info!("路由风格: {}", config.router_flavor);
 
     // 阶段 1：用临时 tokio runtime 做异步初始化（DB 连接、数据加载）
-    let (kong_proxy, admin_state) = {
+    let (kong_proxy, admin_state, refresh_rx) = {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(init_proxy_and_admin(&config))?
     };
@@ -288,6 +288,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     let admin_bg = AdminBgService {
         state: admin_state,
         config: Arc::clone(&config),
+        refresh_rx: std::sync::Mutex::new(Some(refresh_rx)),
     };
     let admin_service =
         pingora_core::services::background::background_service("Admin API", admin_bg);
@@ -307,13 +308,18 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
 /// 异步初始化：连接 DB、加载数据、构建 KongProxy 和 AdminState
 async fn init_proxy_and_admin(
     config: &Arc<kong_config::KongConfig>,
-) -> anyhow::Result<(kong_proxy::KongProxy, kong_admin::AdminState)> {
+) -> anyhow::Result<(
+    kong_proxy::KongProxy,
+    kong_admin::AdminState,
+    tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+)> {
     use kong_core::models::*;
     use kong_core::traits::{Dao, PageParams};
     use kong_db::*;
 
     let plugin_registry = kong_plugin_system::PluginRegistry::new();
     let node_id = uuid::Uuid::new_v4();
+    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
     if config.is_dbless() {
         // db-less 模式：空路由表，内存存储
@@ -324,8 +330,13 @@ async fn init_proxy_and_admin(
             store.load_from_file(path)?;
         }
 
-        let kong_proxy =
-            kong_proxy::KongProxy::new(&[], &config.router_flavor, plugin_registry);
+        let kong_proxy = kong_proxy::KongProxy::new(
+            &[],
+            &config.router_flavor,
+            plugin_registry,
+            kong_proxy::tls::CertificateManager::new(),
+            Vec::new(),
+        );
 
         let admin_state = kong_admin::AdminState {
             services: Arc::new(DblessDao::<Service>::new(Arc::clone(&store))),
@@ -340,9 +351,11 @@ async fn init_proxy_and_admin(
             vaults: Arc::new(DblessDao::<Vault>::new(Arc::clone(&store))),
             node_id,
             config: Arc::clone(config),
+            proxy: kong_proxy.clone(),
+            refresh_tx,
         };
 
-        Ok((kong_proxy, admin_state))
+        Ok((kong_proxy, admin_state, refresh_rx))
     } else {
         // PostgreSQL 模式
         let db = Database::connect(config).await?;
@@ -368,27 +381,41 @@ async fn init_proxy_and_admin(
         let upstreams_dao = PgDao::<Upstream>::new(db.clone(), upstream_schema());
         let targets_dao = PgDao::<Target>::new(db.clone(), target_schema());
         let plugins_dao = PgDao::<Plugin>::new(db.clone(), plugin_schema());
+        let certificates_dao = PgDao::<Certificate>::new(db.clone(), certificate_schema());
+        let snis_dao = PgDao::<Sni>::new(db.clone(), sni_schema());
+        let ca_certificates_dao = PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema());
 
         let routes_page = routes_dao.page(&all_params).await?;
         let services_page = services_dao.page(&all_params).await?;
         let upstreams_page = upstreams_dao.page(&all_params).await?;
         let targets_page = targets_dao.page(&all_params).await?;
         let plugins_page = plugins_dao.page(&all_params).await?;
+        let certificates_page = certificates_dao.page(&all_params).await?;
+        let snis_page = snis_dao.page(&all_params).await?;
+        let ca_certificates_page = ca_certificates_dao.page(&all_params).await?;
 
         tracing::info!(
-            "从数据库加载: {} routes, {} services, {} upstreams, {} targets, {} plugins",
+            "从数据库加载: {} routes, {} services, {} upstreams, {} targets, {} plugins, {} certs, {} CAs",
             routes_page.data.len(),
             services_page.data.len(),
             upstreams_page.data.len(),
             targets_page.data.len(),
             plugins_page.data.len(),
+            certificates_page.data.len(),
+            ca_certificates_page.data.len(),
         );
+
+        // 构建 CertificateManager 并加载证书
+        let cert_manager = kong_proxy::tls::CertificateManager::new();
+        cert_manager.load_certificates(&certificates_page.data, &snis_page.data);
 
         // 构建 KongProxy 并填充数据
         let kong_proxy = kong_proxy::KongProxy::new(
             &routes_page.data,
             &config.router_flavor,
             plugin_registry,
+            cert_manager,
+            ca_certificates_page.data.clone(),
         );
         kong_proxy.update_services(services_page.data);
         kong_proxy.update_upstreams(upstreams_page.data, targets_page.data);
@@ -407,9 +434,11 @@ async fn init_proxy_and_admin(
             vaults: Arc::new(PgDao::<Vault>::new(db.clone(), vault_schema())),
             node_id,
             config: Arc::clone(config),
+            proxy: kong_proxy.clone(),
+            refresh_tx,
         };
 
-        Ok((kong_proxy, admin_state))
+        Ok((kong_proxy, admin_state, refresh_rx))
     }
 }
 
@@ -417,6 +446,8 @@ async fn init_proxy_and_admin(
 struct AdminBgService {
     state: kong_admin::AdminState,
     config: Arc<kong_config::KongConfig>,
+    /// 缓存刷新防抖接收端，用 Mutex<Option<...>> 包装以便在 &self 方法中 take
+    refresh_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<&'static str>>>,
 }
 
 #[async_trait::async_trait]
@@ -428,6 +459,13 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
             "0.0.0.0:8001".to_string()
         };
         tracing::info!("Admin API 监听于: {}", bind_addr);
+
+        // 启动缓存刷新防抖后台任务
+        if let Some(rx) = self.refresh_rx.lock().unwrap().take() {
+            let state = self.state.clone();
+            tokio::spawn(kong_admin::run_cache_refresher(rx, state));
+            tracing::info!("缓存刷新防抖任务已启动（100ms 窗口合并）");
+        }
 
         let app = kong_admin::build_admin_router(self.state.clone());
 

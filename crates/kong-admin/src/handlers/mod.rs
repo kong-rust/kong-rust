@@ -20,6 +20,67 @@ use kong_core::traits::{Dao, Entity, PageParams, PrimaryKey};
 
 use crate::AdminState;
 
+// ============ 缓存刷新 ============
+
+impl AdminState {
+    /// Admin API 写操作后异步刷新 KongProxy 内存缓存
+    pub async fn refresh_proxy_cache(&self, entity_type: &str) {
+        let all_params = kong_core::traits::PageParams {
+            size: 10000,
+            offset: None,
+            tags: None,
+        };
+
+        match entity_type {
+            "services" => {
+                match self.services.page(&all_params).await {
+                    Ok(page) => self.proxy.update_services(page.data),
+                    Err(e) => tracing::error!("刷新 services 缓存失败: {}", e),
+                }
+            }
+            "routes" => {
+                match self.routes.page(&all_params).await {
+                    Ok(page) => self.proxy.update_routes(&page.data),
+                    Err(e) => tracing::error!("刷新 routes 缓存失败: {}", e),
+                }
+            }
+            "plugins" => {
+                match self.plugins.page(&all_params).await {
+                    Ok(page) => self.proxy.update_plugins(page.data),
+                    Err(e) => tracing::error!("刷新 plugins 缓存失败: {}", e),
+                }
+            }
+            "upstreams" | "targets" => {
+                let upstreams = self.upstreams.page(&all_params).await;
+                let targets = self.targets.page(&all_params).await;
+                match (upstreams, targets) {
+                    (Ok(u), Ok(t)) => self.proxy.update_upstreams(u.data, t.data),
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::error!("刷新 upstreams 缓存失败: {}", e);
+                    }
+                }
+            }
+            "certificates" | "snis" => {
+                let certs = self.certificates.page(&all_params).await;
+                let snis = self.snis.page(&all_params).await;
+                match (certs, snis) {
+                    (Ok(c), Ok(s)) => self.proxy.cert_manager.load_certificates(&c.data, &s.data),
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::error!("刷新 certificates 缓存失败: {}", e);
+                    }
+                }
+            }
+            "ca_certificates" => {
+                match self.ca_certificates.page(&all_params).await {
+                    Ok(page) => self.proxy.update_ca_certificates(page.data),
+                    Err(e) => tracing::error!("刷新 ca_certificates 缓存失败: {}", e),
+                }
+            }
+            _ => {} // consumers / vaults 等代理流程不直接使用
+        }
+    }
+}
+
 // ============ 查询参数 ============
 
 #[derive(Debug, Deserialize)]
@@ -316,7 +377,7 @@ async fn do_delete<T: Entity + Send + Sync + 'static>(
 
 /// 为每个实体类型生成具体的 CRUD handler
 macro_rules! entity_handlers {
-    ($entity:ty, $dao_field:ident, $list:ident, $get:ident, $create:ident, $update:ident, $upsert:ident, $del:ident) => {
+    ($entity:ty, $dao_field:ident, $entity_name:expr, $list:ident, $get:ident, $create:ident, $update:ident, $upsert:ident, $del:ident) => {
         pub async fn $list(
             State(state): State<AdminState>,
             Query(params): Query<ListParams>,
@@ -335,7 +396,11 @@ macro_rules! entity_handlers {
             State(state): State<AdminState>,
             Json(body): Json<Value>,
         ) -> impl IntoResponse {
-            do_create::<$entity>(&state.$dao_field, body).await
+            let result = do_create::<$entity>(&state.$dao_field, body).await;
+            if result.0.is_success() && !$entity_name.is_empty() {
+                let _ = state.refresh_tx.send($entity_name);
+            }
+            result
         }
 
         pub async fn $update(
@@ -343,7 +408,11 @@ macro_rules! entity_handlers {
             Path(id_or_name): Path<String>,
             Json(body): Json<Value>,
         ) -> impl IntoResponse {
-            do_update::<$entity>(&state.$dao_field, &id_or_name, &body).await
+            let result = do_update::<$entity>(&state.$dao_field, &id_or_name, &body).await;
+            if result.0.is_success() && !$entity_name.is_empty() {
+                let _ = state.refresh_tx.send($entity_name);
+            }
+            result
         }
 
         pub async fn $upsert(
@@ -351,28 +420,36 @@ macro_rules! entity_handlers {
             Path(id_or_name): Path<String>,
             Json(body): Json<Value>,
         ) -> impl IntoResponse {
-            do_upsert::<$entity>(&state.$dao_field, &id_or_name, body).await
+            let result = do_upsert::<$entity>(&state.$dao_field, &id_or_name, body).await;
+            if result.0.is_success() && !$entity_name.is_empty() {
+                let _ = state.refresh_tx.send($entity_name);
+            }
+            result
         }
 
         pub async fn $del(
             State(state): State<AdminState>,
             Path(id_or_name): Path<String>,
         ) -> impl IntoResponse {
-            do_delete::<$entity>(&state.$dao_field, &id_or_name).await
+            let result = do_delete::<$entity>(&state.$dao_field, &id_or_name).await;
+            if !$entity_name.is_empty() {
+                let _ = state.refresh_tx.send($entity_name);
+            }
+            result
         }
     };
 }
 
 // 为每个实体类型生成 handler
-entity_handlers!(Service, services, list_services, get_service, create_service, update_service, upsert_service, delete_service);
-entity_handlers!(Route, routes, list_routes, get_route, create_route, update_route, upsert_route, delete_route);
-entity_handlers!(Consumer, consumers, list_consumers, get_consumer, create_consumer, update_consumer, upsert_consumer, delete_consumer);
-entity_handlers!(Plugin, plugins, list_plugins, get_plugin, create_plugin, update_plugin, upsert_plugin, delete_plugin);
-entity_handlers!(Upstream, upstreams, list_upstreams, get_upstream, create_upstream, update_upstream, upsert_upstream, delete_upstream);
-entity_handlers!(Certificate, certificates, list_certificates, get_certificate, create_certificate, update_certificate, upsert_certificate, delete_certificate);
-entity_handlers!(Sni, snis, list_snis, get_sni, create_sni, update_sni, upsert_sni, delete_sni);
-entity_handlers!(CaCertificate, ca_certificates, list_ca_certificates, get_ca_certificate, create_ca_certificate, update_ca_certificate, upsert_ca_certificate, delete_ca_certificate);
-entity_handlers!(Vault, vaults, list_vaults, get_vault, create_vault, update_vault, upsert_vault, delete_vault);
+entity_handlers!(Service, services, "services", list_services, get_service, create_service, update_service, upsert_service, delete_service);
+entity_handlers!(Route, routes, "routes", list_routes, get_route, create_route, update_route, upsert_route, delete_route);
+entity_handlers!(Consumer, consumers, "", list_consumers, get_consumer, create_consumer, update_consumer, upsert_consumer, delete_consumer);
+entity_handlers!(Plugin, plugins, "plugins", list_plugins, get_plugin, create_plugin, update_plugin, upsert_plugin, delete_plugin);
+entity_handlers!(Upstream, upstreams, "upstreams", list_upstreams, get_upstream, create_upstream, update_upstream, upsert_upstream, delete_upstream);
+entity_handlers!(Certificate, certificates, "certificates", list_certificates, get_certificate, create_certificate, update_certificate, upsert_certificate, delete_certificate);
+entity_handlers!(Sni, snis, "snis", list_snis, get_sni, create_sni, update_sni, upsert_sni, delete_sni);
+entity_handlers!(CaCertificate, ca_certificates, "ca_certificates", list_ca_certificates, get_ca_certificate, create_ca_certificate, update_ca_certificate, upsert_ca_certificate, delete_ca_certificate);
+entity_handlers!(Vault, vaults, "", list_vaults, get_vault, create_vault, update_vault, upsert_vault, delete_vault);
 
 // ============ 嵌套端点 ============
 
@@ -507,6 +584,7 @@ pub async fn create_nested_target(
 
     match state.targets.insert(&target).await {
         Ok(created) => {
+            let _ = state.refresh_tx.send("targets");
             let body = serde_json::to_value(&created).unwrap_or(json!(null));
             (StatusCode::CREATED, Json(body))
         }
@@ -557,6 +635,7 @@ pub async fn update_nested_target(
     let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
     match state.targets.update(&pk, &body).await {
         Ok(updated) => {
+            let _ = state.refresh_tx.send("targets");
             let body = serde_json::to_value(&updated).unwrap_or(json!(null));
             (StatusCode::OK, Json(body))
         }
@@ -574,7 +653,10 @@ pub async fn delete_nested_target(
 ) -> impl IntoResponse {
     let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
     match state.targets.delete(&pk).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            let _ = state.refresh_tx.send("targets");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = json!({"message": e.to_string()});

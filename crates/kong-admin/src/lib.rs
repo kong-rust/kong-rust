@@ -31,6 +31,48 @@ pub struct AdminState {
     pub vaults: Arc<dyn Dao<Vault>>,
     pub node_id: uuid::Uuid,
     pub config: Arc<kong_config::KongConfig>,
+    /// 代理引擎引用（Clone 语义，共享底层 Arc 数据），用于写操作后刷新内存缓存
+    pub proxy: kong_proxy::KongProxy,
+    /// 缓存刷新防抖信号发送端：CUD 操作后发送实体类型名，后台任务合并执行
+    pub refresh_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
+}
+
+/// 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
+pub async fn run_cache_refresher(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+    state: AdminState,
+) {
+    use std::collections::HashSet;
+    use tokio::time::{Duration, Instant};
+
+    loop {
+        // 阻塞等待第一个刷新信号
+        let Some(first) = rx.recv().await else {
+            break;
+        };
+        let mut pending = HashSet::new();
+        pending.insert(first);
+
+        // 100ms 窗口内收集所有待刷新实体类型
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Some(t) => { pending.insert(t); }
+                        None => return,
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        // 合并后一次性刷新
+        for entity_type in &pending {
+            state.refresh_proxy_cache(entity_type).await;
+        }
+        tracing::debug!("防抖刷新完成: {:?}", pending);
+    }
 }
 
 /// 构建 Admin API 路由

@@ -242,6 +242,30 @@
   - 自动创建日志目录，RUST_LOG 环境变量优先于配置文件
   - _Requirements: R6_
 
+- [x] 8.6 实现上游 TLS 完整功能（CA 验证 + mTLS 客户端证书）
+  - 文件：`crates/kong-proxy/src/lib.rs`, `crates/kong-server/src/main.rs`
+  - KongProxy 添加 cert_manager 和 ca_certificates 字段
+  - upstream_peer() 实现 CA 证书信任链构建（tls_verify + ca_certificates）
+  - upstream_peer() 实现 mTLS 客户端证书（client_certificate）
+  - kong-server DB 模式加载 certificates/snis/ca_certificates 传给 KongProxy
+  - _Requirements: R8_
+
+- [x] 8.7 Admin API 写操作后动态刷新 KongProxy 内存缓存
+  - 文件：`crates/kong-proxy/src/lib.rs`, `crates/kong-admin/Cargo.toml`, `crates/kong-admin/src/lib.rs`, `crates/kong-admin/src/handlers/mod.rs`, `crates/kong-server/src/main.rs`
+  - KongProxy 实现 Clone（所有字段 Arc 包装，clone 后共享底层数据）
+  - AdminState 添加 proxy 字段，持有 KongProxy 的 clone
+  - 实现 refresh_proxy_cache 方法，根据实体类型从 DAO 全量读取并刷新代理缓存
+  - 修改 entity_handlers! 宏，CUD 操作成功后 tokio::spawn 异步刷新
+  - 嵌套 target 端点同样触发缓存刷新
+  - _Requirements: R1, R3_
+
+- [x] 8.8 缓存刷新防抖（Debounce）— 合并批量 CUD 操作的刷新请求
+  - 文件：`crates/kong-admin/src/lib.rs`, `crates/kong-admin/src/handlers/mod.rs`, `crates/kong-server/src/main.rs`
+  - 使用 mpsc unbounded channel + debounce 循环替代 tokio::spawn 直接刷新
+  - handler 发送实体类型信号（纳秒级），后台任务收到第一个信号后等 100ms，HashSet 去重后一次性执行
+  - AdminBgService 在 Pingora runtime 的 start() 中 spawn refresher，避免临时 runtime 生命周期问题
+  - _Requirements: R1, R3_
+
 ## 阶段 9：Hybrid 模式和集群通信
 
 - [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动
