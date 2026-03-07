@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kong-core",
+    "crates/kong-config",
+    "crates/kong-db",
+    "crates/kong-router",
+    "crates/kong-proxy",
+    "crates/kong-plugin-system",
+    "crates/kong-lua-bridge",
+    "crates/kong-admin",
+    "crates/kong-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# 核心依赖
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+bytes = "1"
+
+# HTTP / Web
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# 数据库
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "json"] }
+
+# 缓存
+moka = { version = "0.12", features = ["future", "sync"] }
+
+# Lua
+mlua = { version = "0.10", features = ["luajit", "async", "serialize"] }
+
+# Pingora
+pingora = "0.8"
+pingora-core = "0.8"
+pingora-proxy = "0.8"
+pingora-load-balancing = "0.8"
+pingora-cache = "0.8"
+pingora-http = "0.8"
+
+# 工具
+regex = "1"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+indexmap = { version = "2", features = ["serde"] }
+
+# Workspace crates
+kong-core = { path = "crates/kong-core" }
+kong-config = { path = "crates/kong-config" }
+kong-db = { path = "crates/kong-db" }
+kong-router = { path = "crates/kong-router" }
+kong-proxy = { path = "crates/kong-proxy" }
+kong-plugin-system = { path = "crates/kong-plugin-system" }
+kong-lua-bridge = { path = "crates/kong-lua-bridge" }
+kong-admin = { path = "crates/kong-admin" }

@@ -1,0 +1,19 @@
+[package]
+name = "kong-admin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kong-core = { workspace = true }
+kong-config = { workspace = true }
+kong-db = { workspace = true }
+kong-plugin-system = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

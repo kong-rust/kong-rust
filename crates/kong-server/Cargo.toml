@@ -1,0 +1,25 @@
+[package]
+name = "kong-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kong-rust"
+path = "src/main.rs"
+
+[dependencies]
+kong-core = { workspace = true }
+kong-config = { workspace = true }
+kong-db = { workspace = true }
+kong-router = { workspace = true }
+kong-proxy = { workspace = true }
+kong-plugin-system = { workspace = true }
+kong-lua-bridge = { workspace = true }
+kong-admin = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }

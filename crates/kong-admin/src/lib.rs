@@ -1,0 +1,88 @@
+//! Kong Admin API — 100% 兼容 Kong 的 REST Admin API
+//!
+//! 基于 axum 实现，支持:
+//! - 所有核心实体的 CRUD
+//! - 分页、标签过滤
+//! - 嵌套端点（如 /services/{service}/routes）
+//! - 特殊端点（/, /status, /config）
+
+pub mod handlers;
+
+use std::sync::Arc;
+
+use axum::routing::get;
+use axum::Router;
+
+use kong_core::models::*;
+use kong_core::traits::Dao;
+
+/// Admin API 应用状态
+#[derive(Clone)]
+pub struct AdminState {
+    pub services: Arc<dyn Dao<Service>>,
+    pub routes: Arc<dyn Dao<Route>>,
+    pub consumers: Arc<dyn Dao<Consumer>>,
+    pub plugins: Arc<dyn Dao<Plugin>>,
+    pub upstreams: Arc<dyn Dao<Upstream>>,
+    pub targets: Arc<dyn Dao<Target>>,
+    pub certificates: Arc<dyn Dao<Certificate>>,
+    pub snis: Arc<dyn Dao<Sni>>,
+    pub ca_certificates: Arc<dyn Dao<CaCertificate>>,
+    pub vaults: Arc<dyn Dao<Vault>>,
+    pub node_id: uuid::Uuid,
+    pub config: Arc<kong_config::KongConfig>,
+}
+
+/// 构建 Admin API 路由
+pub fn build_admin_router(state: AdminState) -> Router {
+    use handlers::*;
+
+    Router::new()
+        // 根信息端点
+        .route("/", get(root_info))
+        .route("/status", get(status_info))
+        // Services
+        .route("/services", get(list_services).post(create_service))
+        .route("/services/{id_or_name}",
+            get(get_service).patch(update_service).put(upsert_service).delete(delete_service))
+        // Routes
+        .route("/routes", get(list_routes).post(create_route))
+        .route("/routes/{id_or_name}",
+            get(get_route).patch(update_route).put(upsert_route).delete(delete_route))
+        // 嵌套: Service 下的 Routes
+        .route("/services/{service_id_or_name}/routes", get(list_nested_routes))
+        // Consumers
+        .route("/consumers", get(list_consumers).post(create_consumer))
+        .route("/consumers/{id_or_name}",
+            get(get_consumer).patch(update_consumer).put(upsert_consumer).delete(delete_consumer))
+        // Plugins
+        .route("/plugins", get(list_plugins).post(create_plugin))
+        .route("/plugins/{id_or_name}",
+            get(get_plugin).patch(update_plugin).put(upsert_plugin).delete(delete_plugin))
+        // Upstreams
+        .route("/upstreams", get(list_upstreams).post(create_upstream))
+        .route("/upstreams/{id_or_name}",
+            get(get_upstream).patch(update_upstream).put(upsert_upstream).delete(delete_upstream))
+        // Targets (nested under upstreams)
+        .route("/upstreams/{upstream_id_or_name}/targets",
+            get(list_nested_targets).post(create_nested_target))
+        .route("/upstreams/{upstream_id_or_name}/targets/{id_or_name}",
+            get(get_nested_target).patch(update_nested_target).delete(delete_nested_target))
+        // Certificates
+        .route("/certificates", get(list_certificates).post(create_certificate))
+        .route("/certificates/{id}",
+            get(get_certificate).patch(update_certificate).put(upsert_certificate).delete(delete_certificate))
+        // SNIs
+        .route("/snis", get(list_snis).post(create_sni))
+        .route("/snis/{id_or_name}",
+            get(get_sni).patch(update_sni).put(upsert_sni).delete(delete_sni))
+        // CA Certificates
+        .route("/ca_certificates", get(list_ca_certificates).post(create_ca_certificate))
+        .route("/ca_certificates/{id}",
+            get(get_ca_certificate).patch(update_ca_certificate).put(upsert_ca_certificate).delete(delete_ca_certificate))
+        // Vaults
+        .route("/vaults", get(list_vaults).post(create_vault))
+        .route("/vaults/{id_or_name}",
+            get(get_vault).patch(update_vault).put(upsert_vault).delete(delete_vault))
+        .with_state(state)
+}

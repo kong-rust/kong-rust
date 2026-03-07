@@ -1,0 +1,53 @@
+# ========================
+# Rust / Cargo
+# ========================
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock 对于二进制项目应提交，对于库项目应忽略
+# Kong-Rust 是二进制项目，保留 Cargo.lock
+# Cargo.lock
+
+# ========================
+# IDE / 编辑器
+# ========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ========================
+# 环境和密钥
+# ========================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!crates/kong-cluster/tests/fixtures/*.pem
+!crates/kong-cluster/tests/fixtures/*.key
+
+# ========================
+# 构建产物和运行时
+# ========================
+*.log
+*.pid
+kong_prefix/
+servroot/
+
+# ========================
+# 测试和覆盖率
+# ========================
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# ========================
+# Claude Code（工具配置保留，对话记录忽略）
+# ========================
+.claude/projects/
+.claude/todos/

@@ -1,0 +1,30 @@
+{
+  "filePath": ".spec-workflow/specs/kong-rust/requirements.md",
+  "currentVersion": 3,
+  "snapshots": [
+    {
+      "version": 1,
+      "filename": "snapshot-001.json",
+      "timestamp": "2026-03-06T16:39:44.496Z",
+      "trigger": "initial",
+      "approvalId": "approval_1772815184494_77vn76bvv",
+      "approvalTitle": "Kong-Rust 需求文档 - 使用 Rust/Pingora 重写 Kong API 网关"
+    },
+    {
+      "version": 2,
+      "filename": "snapshot-002.json",
+      "timestamp": "2026-03-06T16:42:15.116Z",
+      "trigger": "revision_requested",
+      "approvalId": "approval_1772815184494_77vn76bvv",
+      "approvalTitle": "Kong-Rust 需求文档 - 使用 Rust/Pingora 重写 Kong API 网关"
+    },
+    {
+      "version": 3,
+      "filename": "snapshot-003.json",
+      "timestamp": "2026-03-06T16:52:14.672Z",
+      "trigger": "revision_requested",
+      "approvalId": "approval_1772815461749_m8i2zsbqc",
+      "approvalTitle": "Kong-Rust 需求文档（已修订）- 关键词中文化"
+    }
+  ]
+}

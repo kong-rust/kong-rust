@@ -1,0 +1,597 @@
+//! Admin API 兼容性集成测试
+//!
+//! 使用 db-less 模式（内存存储）+ axum 测试客户端，
+//! 验证所有 Admin API 端点的请求/响应格式与 Kong 兼容
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{self, Request, StatusCode};
+use serde_json::{json, Value};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+use kong_admin::{build_admin_router, AdminState};
+use kong_core::models::*;
+use kong_db::{DblessDao, DblessStore};
+
+/// 创建测试用的 Admin API 应用
+fn create_test_app() -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+
+    let config = kong_config::KongConfig::default();
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config: Arc::new(config),
+    };
+
+    build_admin_router(state)
+}
+
+/// 创建预加载数据的测试应用
+fn create_test_app_with_data() -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+
+    // 预加载测试数据
+    let test_data = json!({
+        "_format_version": "3.0",
+        "services": [
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "name": "test-service",
+                "host": "httpbin.org",
+                "port": 80,
+                "protocol": "http",
+                "retries": 5,
+                "connect_timeout": 60000,
+                "write_timeout": 60000,
+                "read_timeout": 60000,
+                "enabled": true,
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            },
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440099",
+                "name": "another-service",
+                "host": "example.com",
+                "port": 443,
+                "protocol": "https",
+                "retries": 5,
+                "connect_timeout": 60000,
+                "write_timeout": 60000,
+                "read_timeout": 60000,
+                "enabled": true,
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ],
+        "routes": [
+            {
+                "id": "660e8400-e29b-41d4-a716-446655440001",
+                "name": "test-route",
+                "paths": ["/test"],
+                "protocols": ["http", "https"],
+                "strip_path": true,
+                "preserve_host": false,
+                "regex_priority": 0,
+                "path_handling": "v0",
+                "https_redirect_status_code": 426,
+                "request_buffering": true,
+                "response_buffering": true,
+                "service": { "id": "550e8400-e29b-41d4-a716-446655440000" },
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ],
+        "consumers": [
+            {
+                "id": "770e8400-e29b-41d4-a716-446655440002",
+                "username": "test-consumer",
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ],
+        "upstreams": [
+            {
+                "id": "880e8400-e29b-41d4-a716-446655440003",
+                "name": "test-upstream",
+                "algorithm": "round-robin",
+                "hash_on": "none",
+                "hash_fallback": "none",
+                "slots": 10000,
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ],
+        "targets": [
+            {
+                "id": "990e8400-e29b-41d4-a716-446655440004",
+                "target": "10.0.0.1:80",
+                "weight": 100,
+                "upstream": { "id": "880e8400-e29b-41d4-a716-446655440003" },
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ]
+    });
+
+    store.load_from_json(&test_data).unwrap();
+
+    let config = kong_config::KongConfig::default();
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config: Arc::new(config),
+    };
+
+    build_admin_router(state)
+}
+
+// ========== 特殊端点测试 ==========
+
+#[tokio::test]
+async fn test_root_info() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // 验证 Kong 兼容的根信息格式
+    assert!(json.get("version").is_some());
+    assert!(json.get("tagline").is_some());
+    assert!(json.get("node_id").is_some());
+    assert!(json.get("configuration").is_some());
+    assert!(json.get("plugins").is_some());
+
+    let config = json.get("configuration").unwrap();
+    assert!(config.get("database").is_some());
+    assert!(config.get("router_flavor").is_some());
+}
+
+#[tokio::test]
+async fn test_status_endpoint() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // 验证 Kong 兼容的状态格式
+    assert!(json.get("server").is_some());
+    assert!(json.get("database").is_some());
+    assert!(json.get("memory").is_some());
+
+    let db = json.get("database").unwrap();
+    assert!(db.get("reachable").is_some());
+}
+
+// ========== Service CRUD 测试 ==========
+
+#[tokio::test]
+async fn test_list_services_empty() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // Kong 格式：{ "data": [], "offset": null, "next": null }
+    assert!(json.get("data").is_some());
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert!(data.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_services_with_data() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 2);
+}
+
+#[tokio::test]
+async fn test_get_service_by_id() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/550e8400-e29b-41d4-a716-446655440000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json.get("name").unwrap().as_str().unwrap(), "test-service");
+    assert_eq!(json.get("host").unwrap().as_str().unwrap(), "httpbin.org");
+    assert_eq!(json.get("port").unwrap().as_u64().unwrap(), 80);
+    assert_eq!(json.get("protocol").unwrap().as_str().unwrap(), "http");
+}
+
+#[tokio::test]
+async fn test_get_service_by_name() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/test-service")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json.get("name").unwrap().as_str().unwrap(), "test-service");
+}
+
+#[tokio::test]
+async fn test_get_service_not_found() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // Kong 兼容的 404 错误格式
+    assert!(json.get("message").is_some());
+    assert_eq!(json.get("name").unwrap().as_str().unwrap(), "not found");
+    assert_eq!(json.get("code").unwrap().as_u64().unwrap(), 3);
+}
+
+// ========== DB-less 写操作测试 ==========
+
+#[tokio::test]
+async fn test_create_service_dbless_rejected() {
+    let app = create_test_app();
+
+    let body = json!({
+        "name": "new-service",
+        "host": "newhost.com",
+        "port": 80,
+        "protocol": "http"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/services")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // db-less 模式下写操作应返回错误
+    assert_ne!(response.status(), StatusCode::CREATED);
+}
+
+// ========== Route 端点测试 ==========
+
+#[tokio::test]
+async fn test_list_routes() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+
+    let route = &data[0];
+    assert_eq!(route.get("name").unwrap().as_str().unwrap(), "test-route");
+}
+
+#[tokio::test]
+async fn test_get_route_by_id() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/routes/660e8400-e29b-41d4-a716-446655440001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json.get("name").unwrap().as_str().unwrap(), "test-route");
+    let paths = json.get("paths").unwrap().as_array().unwrap();
+    assert_eq!(paths[0].as_str().unwrap(), "/test");
+}
+
+// ========== Consumer 端点测试 ==========
+
+#[tokio::test]
+async fn test_list_consumers() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/consumers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(
+        data[0].get("username").unwrap().as_str().unwrap(),
+        "test-consumer"
+    );
+}
+
+// ========== 嵌套端点测试 ==========
+
+#[tokio::test]
+async fn test_nested_service_routes() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/550e8400-e29b-41d4-a716-446655440000/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+}
+
+#[tokio::test]
+async fn test_nested_service_routes_by_name() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/test-service/routes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+}
+
+#[tokio::test]
+async fn test_nested_upstream_targets() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/upstreams/880e8400-e29b-41d4-a716-446655440003/targets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(
+        data[0].get("target").unwrap().as_str().unwrap(),
+        "10.0.0.1:80"
+    );
+}
+
+// ========== 分页测试 ==========
+
+#[tokio::test]
+async fn test_pagination_params() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services?size=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let data = json.get("data").unwrap().as_array().unwrap();
+    assert_eq!(data.len(), 1);
+
+    // 应该有 next 分页指示
+    assert!(json.get("next").is_some());
+}
+
+// ========== 错误格式验证 ==========
+
+#[tokio::test]
+async fn test_not_found_error_format() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/nonexistent-uuid-value")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // Kong 兼容的错误格式
+    assert!(json.get("message").is_some());
+    assert_eq!(json.get("name").unwrap().as_str().unwrap(), "not found");
+    assert_eq!(json.get("code").unwrap().as_u64().unwrap(), 3);
+}
