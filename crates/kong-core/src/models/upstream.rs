@@ -161,6 +161,7 @@ impl Default for HealthcheckConfig {
 
 /// Upstream 实体 — 与 Kong upstreams 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Upstream {
     pub id: Uuid,
     pub created_at: i64,

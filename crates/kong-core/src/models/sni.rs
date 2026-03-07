@@ -6,6 +6,7 @@ use crate::traits::Entity;
 
 /// SNI 实体 — 与 Kong snis 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Sni {
     pub id: Uuid,
     /// SNI 名称（支持通配符如 *.example.com），唯一

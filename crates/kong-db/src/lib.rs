@@ -12,6 +12,7 @@ pub mod cache;
 pub mod dao;
 pub mod database;
 pub mod dbless;
+pub mod migrations;
 
 pub use cache::{CacheConfig, KongCache};
 pub use dao::postgres::{
@@ -21,3 +22,4 @@ pub use dao::postgres::{
 };
 pub use database::Database;
 pub use dbless::{DblessDao, DblessStore};
+pub use migrations::MigrationState;

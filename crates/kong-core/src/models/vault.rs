@@ -6,6 +6,7 @@ use crate::traits::Entity;
 /// Vault 实体 — 与 Kong sm_vaults 表完全一致
 /// 注意：Kong 中 table_name 为 "sm_vaults"，但 admin_api_name 为 "vaults"
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Vault {
     pub id: Uuid,
     /// Vault 前缀标识符，唯一，格式要求 [a-z][a-z0-9-]-[a-z0-9]+

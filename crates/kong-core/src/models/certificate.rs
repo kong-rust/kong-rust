@@ -5,6 +5,7 @@ use crate::traits::Entity;
 
 /// Certificate 实体 — 与 Kong certificates 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Certificate {
     pub id: Uuid,
     pub created_at: i64,

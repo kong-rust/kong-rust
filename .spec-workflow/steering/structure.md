@@ -40,11 +40,15 @@ kong-rust/
 │   │       ├── parser.rs         # kong.conf 文件解析器（key=value, # 注释）
 │   │       └── listen.rs         # ListenAddr 类型（解析 "0.0.0.0:8000 ssl" 格式）
 │   │
-│   ├── kong-db/                  # 数据库 DAO 层 + 缓存
+│   ├── kong-db/                  # 数据库 DAO 层 + 缓存 + Migration
 │   │   ├── Cargo.toml
+│   │   ├── migrations/           # SQL migration 文件
+│   │   │   └── core/
+│   │   │       └── 000_base.sql  # 初始建表：schema_meta + 10 个核心表 + 索引
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── database.rs       # Database 结构体（PgPool 管理，DAO 工厂方法）
+│   │       ├── database.rs       # Database 结构体（PgPool 管理，仅负责连接池）
+│   │       ├── migrations.rs     # Migration 引擎（schema_state/bootstrap/up/finish/reset）
 │   │       ├── cache.rs          # KongCache（moka 缓存，模拟 kong.cache）
 │   │       ├── dbless.rs         # db-less 模式（声明式配置加载到内存）
 │   │       └── dao/
@@ -127,6 +131,15 @@ kong-rust/
 │   ├── vite.config.ts            # Vite 构建配置（dev 端口 8080）
 │   ├── src/                      # Vue 前端源码
 │   └── dist/                     # 构建产物（gitignore）
+│
+├── kong.conf.default             # 开发环境默认配置（兼容 Kong 的 kong.conf 格式）
+│
+├── scripts/                      # 开发和测试脚本
+│   └── dependency_services/      # 依赖服务管理（参考原版 Kong 结构）
+│       ├── docker-compose-test-services.yml  # Docker Compose 服务定义
+│       ├── common.sh             # 核心逻辑（启动/停止、端口提取、环境变量导出）
+│       ├── up.sh                 # 入口脚本（source 调用，提供 stop_services）
+│       └── 00-create-pg-db.sh    # PG 初始化脚本（创建 kong + kong_tests 库）
 │
 ├── .claude/                      # Claude Code 配置
 │   └── settings.local.json       # 本地权限设置

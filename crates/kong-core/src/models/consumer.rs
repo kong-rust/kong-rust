@@ -5,6 +5,7 @@ use crate::traits::Entity;
 
 /// Consumer 实体 — 与 Kong consumers 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Consumer {
     pub id: Uuid,
     pub created_at: i64,

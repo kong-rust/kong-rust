@@ -6,6 +6,7 @@ use crate::traits::Entity;
 
 /// Service 实体 — 与 Kong services 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Service {
     pub id: Uuid,
     pub created_at: i64,

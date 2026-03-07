@@ -1,0 +1,36 @@
+# Kong-Rust 开发环境配置
+# ========================
+# 此文件用于本地开发，生产环境请自行调整。
+#
+# 配置优先级: 默认值 < 本文件 < KONG_* 环境变量
+# 例如 `make dev` 会通过 KONG_PG_PORT 环境变量覆盖 pg_port。
+
+# ---------- 数据库 ----------
+database = postgres
+pg_host = 127.0.0.1
+pg_port = 5432
+pg_database = kong
+pg_user = kong
+pg_password = kong
+
+# ---------- 监听器 ----------
+proxy_listen = 0.0.0.0:8000, 0.0.0.0:8443 ssl
+admin_listen = 127.0.0.1:8001
+
+# ---------- 路由 ----------
+router_flavor = traditional
+
+# ---------- 日志 ----------
+# 日志级别: debug, info, notice, warn, error, crit
+log_level = info
+
+# 错误日志路径（设为 off 禁用文件输出，仅输出到 stderr）
+proxy_error_log = logs/error.log
+
+# 访问日志路径（设为 off 禁用）
+proxy_access_log = logs/access.log
+admin_access_log = logs/admin_access.log
+admin_error_log = logs/error.log
+
+# ---------- 插件 ----------
+plugins = bundled

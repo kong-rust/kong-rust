@@ -6,6 +6,7 @@ use crate::traits::Entity;
 
 /// Target 实体 — 与 Kong targets 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Target {
     pub id: Uuid,
     /// 注意：Target 使用毫秒时间戳（与其他实体的秒级不同）

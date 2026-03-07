@@ -32,7 +32,7 @@
 | **Lua 集成** | `mlua` | 0.10 | LuaJIT 绑定（运行 Lua 插件） |
 | **序列化** | `serde` + `serde_json` | workspace | JSON 序列化/反序列化 |
 | **CLI** | `clap` | workspace | 命令行参数解析 |
-| **日志** | `tracing` + `tracing-subscriber` | workspace | 结构化日志和追踪 |
+| **日志** | `tracing` + `tracing-subscriber` + `tracing-appender` | workspace | 结构化日志、追踪和文件输出 |
 | **错误处理** | `thiserror` / `anyhow` | workspace | 错误类型定义和传播 |
 | **工具** | `uuid`, `regex`, `chrono`, `indexmap`, `rand`, `sha2`, `base64` | workspace | 通用工具库 |
 
@@ -126,11 +126,22 @@ kong-server（入口）
 | `make ADMIN_API=http://10.0.0.1:8001 manager-dev` | 指定 Admin API 地址启动 |
 | `make manager-preview` | 预览生产构建效果 |
 
+**依赖服务管理：**
+
+| 命令 | 作用 |
+|------|------|
+| `make services-up` | 启动依赖服务（PostgreSQL 等） |
+| `make services-down` | 停止依赖服务并清理数据卷 |
+| `make services-logs` | 查看服务日志 |
+| `source scripts/dependency_services/up.sh` | 交互式启动服务并导出环境变量（提供 `stop_services` 清理函数） |
+
 **全栈启动：**
 
 | 命令 | 作用 |
 |------|------|
-| `make dev` | 同时启动 kong-server（后台）+ kong-manager（前台） |
+| `make dev` | 一键启动：依赖服务（PG）→ db bootstrap → cargo run（使用 kong.conf.default） |
+| `make dev-dbless` | db-less 模式启动，无需 docker |
+| `make dev-full` | 同时启动 kong-server（后台）+ kong-manager（前台） |
 
 **清理：**
 
@@ -164,9 +175,11 @@ kong-server（入口）
 - **目标平台**：Linux（主要）、macOS（开发）
 - **分发方式**：单一二进制文件（`kong-server`）
 - **安装要求**：PostgreSQL 15+（数据库模式），或无数据库（db-less 模式）
+- **配置文件**：`kong.conf.default`（开发默认配置，兼容 Kong 格式）
 - **启动方式**：
-  - 开发：`make run` 或 `make run-conf conf=./kong.conf`
+  - 开发：`make dev`（自动 bootstrap + 启动）或 `cargo run -- -c kong.conf.default`
   - 生产：`./target/release/kong-server -c /path/to/kong.conf`
+- **数据库初始化**：`cargo run -- -c kong.conf.default db bootstrap`（必须在首次启动前执行）
 
 ## 技术约束
 

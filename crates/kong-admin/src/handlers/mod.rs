@@ -163,6 +163,45 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     dao: &Arc<dyn Dao<T>>,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
+    // 自动注入 id 和时间戳（Kong 兼容：创建时这些字段可选）
+    let mut body = body;
+    if let Some(obj) = body.as_object_mut() {
+        if !obj.contains_key("id") {
+            obj.insert("id".to_string(), json!(uuid::Uuid::new_v4()));
+        }
+        let now = chrono::Utc::now().timestamp();
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), json!(now));
+        }
+        if !obj.contains_key("updated_at") {
+            obj.insert("updated_at".to_string(), json!(now));
+        }
+        // Kong 兼容：url 字段是 protocol + host + port + path 的快捷方式
+        if let Some(url_val) = obj.remove("url") {
+            if let Some(url_str) = url_val.as_str() {
+                if let Ok(parsed) = url::Url::parse(url_str) {
+                    if !obj.contains_key("protocol") {
+                        obj.insert("protocol".to_string(), json!(parsed.scheme()));
+                    }
+                    if !obj.contains_key("host") {
+                        if let Some(host) = parsed.host_str() {
+                            obj.insert("host".to_string(), json!(host));
+                        }
+                    }
+                    if !obj.contains_key("port") {
+                        if let Some(port) = parsed.port_or_known_default() {
+                            obj.insert("port".to_string(), json!(port));
+                        }
+                    }
+                    let path = parsed.path();
+                    if !obj.contains_key("path") && path != "/" && !path.is_empty() {
+                        obj.insert("path".to_string(), json!(path));
+                    }
+                }
+            }
+        }
+    }
+
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {

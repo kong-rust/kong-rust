@@ -5,6 +5,7 @@ use crate::traits::Entity;
 
 /// CA Certificate 实体 — 与 Kong ca_certificates 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CaCertificate {
     pub id: Uuid,
     pub created_at: i64,

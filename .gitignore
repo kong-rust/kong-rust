@@ -45,6 +45,7 @@ servroot/
 lcov.info
 tarpaulin-report.html
 coverage/
+logs/
 
 # ========================
 # Kong Manager GUI（前端）

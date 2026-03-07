@@ -7,6 +7,7 @@ use crate::traits::Entity;
 
 /// Route 实体 — 与 Kong routes 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Route {
     pub id: Uuid,
     pub created_at: i64,

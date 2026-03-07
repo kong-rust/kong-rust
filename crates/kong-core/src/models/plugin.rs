@@ -6,6 +6,7 @@ use crate::traits::Entity;
 
 /// Plugin 实体 — 与 Kong plugins 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Plugin {
     pub id: Uuid,
     /// 插件名称，必填

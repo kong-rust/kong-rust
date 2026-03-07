@@ -109,11 +109,44 @@ manager-dev:
 manager-preview:
 	cd $(MANAGER_DIR) && pnpm preview
 
+# ---------- 依赖服务管理 ----------
+
+SERVICES_DIR = scripts/dependency_services
+
+# 启动依赖服务（PostgreSQL 等）
+services-up:
+	@bash $(SERVICES_DIR)/common.sh /dev/null up
+
+# 停止依赖服务并清理数据卷
+services-down:
+	@bash $(SERVICES_DIR)/common.sh /dev/null down
+
+# 查看服务日志
+services-logs:
+	@COMPOSE_FILE=$(SERVICES_DIR)/docker-compose-test-services.yml \
+		COMPOSE_PROJECT_NAME=kong-rust-dev \
+		docker compose logs -f
+
 # ---------- 全栈启动 ----------
 
-# 同时启动 kong-server（后台）+ kong-manager（前台）
-# 用法: make dev
+# 一键启动：依赖服务 → db bootstrap → cargo run（postgres 模式）
+# 端口由 docker 动态分配，通过环境变量传递
 dev:
+	@export KONG_SERVICE_ENV_FILE=$$(mktemp); \
+		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE up && \
+		. $$KONG_SERVICE_ENV_FILE && \
+		echo "PostgreSQL 端口: $$KONG_PG_PORT" && \
+		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server -- -c kong.conf.default db bootstrap; \
+		. $$KONG_SERVICE_ENV_FILE && \
+		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server -- -c kong.conf.default; \
+		rm -f $$KONG_SERVICE_ENV_FILE
+
+# db-less 模式，无需 docker
+dev-dbless:
+	KONG_DATABASE=off RUST_LOG=info cargo run -p kong-server
+
+# 同时启动 kong-server（后台）+ kong-manager（前台）
+dev-full:
 	@echo "启动 kong-server (后台)..."
 	@RUST_LOG=info cargo run -p kong-server &
 	@sleep 2
@@ -149,4 +182,6 @@ members:
         run run-conf run-debug run-trace run-mod-debug \
         fmt fmt-check lint quality \
         manager-install manager-build manager-dev manager-preview \
-        dev clean manager-clean clean-all deps members
+        services-up services-down services-logs \
+        dev dev-dbless dev-full \
+        clean manager-clean clean-all deps members

@@ -949,8 +949,9 @@ fn build_select_exprs(schema: &EntitySchema) -> String {
         .iter()
         .map(|col| match col.col_type {
             ColumnType::Timestamp | ColumnType::TimestampMs => {
+                // EXTRACT 返回 numeric 类型，需显式转为 float8 以便 sqlx 解码为 f64
                 format!(
-                    "EXTRACT(EPOCH FROM \"{}\" AT TIME ZONE 'UTC') AS \"epoch_{}\"",
+                    "EXTRACT(EPOCH FROM \"{}\" AT TIME ZONE 'UTC')::float8 AS \"epoch_{}\"",
                     col.db_column, col.db_column
                 )
             }

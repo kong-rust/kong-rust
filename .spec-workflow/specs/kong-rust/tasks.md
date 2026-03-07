@@ -61,7 +61,23 @@
   - 格式与 Kong 的 declarative config 完全兼容
   - _Leverage: /Users/dawxy/proj/kong/kong/db/declarative/_
   - _Requirements: R4_
+
+- [x] 2.5 实现 Database Migration 机制（kong-db）
+  - 文件：`crates/kong-db/migrations/core/000_base.sql`（新建）, `crates/kong-db/src/migrations.rs`（新建）, `crates/kong-db/src/database.rs`（修改）, `crates/kong-db/src/lib.rs`（修改）, `crates/kong-server/src/main.rs`（修改）
+  - 实现 SQL migration 引擎：schema_meta 版本追踪表 + run_migrations() 执行逻辑
+  - 000_base.sql 创建 10 个核心实体表（按外键依赖排序）+ 索引
+  - Database::connect() 成功后自动执行 migration
+  - SQL 通过 include_str! 编译期嵌入，与 Kong 的 schema_meta 表结构兼容
+  - _Requirements: R4_
   - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust 工程师，擅长数据序列化 | Task: 在 kong-db crate 中实现 db-less 模式。参考 /Users/dawxy/proj/kong/kong/db/declarative/ 了解 Kong 的声明式配置格式。1) DeclarativeConfig 结构体：解析 YAML/JSON 格式的声明式配置。2) 支持 _format_version 字段。3) 将所有实体加载到内存中的 HashMap 结构。4) 实现只读的 Dao trait（insert/update/delete 返回错误）。5) 通过 /config POST 端点支持运行时更新。 | Restrictions: 配置格式必须与 Kong 的声明式配置完全兼容。db-less 模式下写操作应返回明确错误。 | Success: 能正确加载 Kong 导出的声明式配置文件。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
+
+- [x] 2.6 实现完整的 migrations 命令集（kong-db + kong-server）
+  - 重构 migrations.rs：删除 run_migrations()，新增 schema_state/bootstrap/up/finish/reset 公开 API
+  - 移除 Database::connect() 中的自动 migration
+  - 扩展 kong-server 的 db 子命令：Bootstrap/Up/Finish/List/Reset/Status
+  - start 启动时增加 schema 状态检查，未 bootstrap 或有新 migration 时报错
+  - 文件：`crates/kong-db/src/migrations.rs`, `crates/kong-db/src/database.rs`, `crates/kong-db/src/lib.rs`, `crates/kong-server/src/main.rs`
+  - _Requirements: R4_
 
 ## 阶段 3：路由引擎
 
@@ -217,6 +233,14 @@
   - 测试各种路由匹配场景、重试、超时、健康检查
   - _Requirements: R1, R2, R7_
   - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust 测试工程师 | Task: 编写端到端代理测试。1) 启动测试上游 HTTP 服务。2) 通过 Admin API 配置 Service + Route。3) 发送代理请求验证转发正确。4) 测试路由匹配：host 匹配、path 匹配、method 匹配、header 匹配、通配符匹配。5) 测试 strip_path 和 preserve_host 行为。6) 测试负载均衡：多 Target 轮询。7) 测试重试：上游失败后自动重试其他 Target。8) 测试超时：connect_timeout、read_timeout。9) 测试健康检查：标记 Target 不健康后不再转发。 | Restrictions: 测试应模拟真实场景，使用真实的 HTTP 请求。 | Success: 所有代理功能正确工作。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
+
+- [x] 8.5 日志输出到文件，通过 kong.conf 配置
+  - 文件：`Cargo.toml`, `crates/kong-server/Cargo.toml`, `crates/kong-server/src/main.rs`, `kong.conf.default`
+  - 重构 tracing 初始化，支持从 kong.conf 读取 `log_level` 和 `proxy_error_log` 配置
+  - 支持文件 + stderr 双写，`proxy_error_log = off` 时仅 stderr
+  - 使用 tracing-appender 的 rolling::never（不轮转，与 Kong/Nginx 行为一致）
+  - 自动创建日志目录，RUST_LOG 环境变量优先于配置文件
+  - _Requirements: R6_
 
 ## 阶段 9：Hybrid 模式和集群通信
 
