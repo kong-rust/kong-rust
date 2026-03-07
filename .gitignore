@@ -1,7 +1,7 @@
 # ========================
 # Rust / Cargo
 # ========================
-/target/
+/target/*
 **/*.rs.bk
 *.pdb
 
@@ -45,6 +45,13 @@ servroot/
 lcov.info
 tarpaulin-report.html
 coverage/
+
+# ========================
+# Kong Manager GUI（前端）
+# ========================
+kong-manager/node_modules/
+kong-manager/dist/
+kong-manager/bundle-analyzer/
 
 # ========================
 # Claude Code（工具配置保留，对话记录忽略）

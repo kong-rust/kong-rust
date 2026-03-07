@@ -122,6 +122,12 @@ kong-rust/
 │       └── src/
 │           └── main.rs           # 启动入口（配置加载 → DB → 路由 → 插件 → Proxy + Admin）
 │
+├── kong-manager/                 # Kong Manager GUI（官方开源前端）
+│   ├── package.json              # 依赖定义（Vue + TypeScript + Vite）
+│   ├── vite.config.ts            # Vite 构建配置（dev 端口 8080）
+│   ├── src/                      # Vue 前端源码
+│   └── dist/                     # 构建产物（gitignore）
+│
 ├── .claude/                      # Claude Code 配置
 │   └── settings.local.json       # 本地权限设置
 │

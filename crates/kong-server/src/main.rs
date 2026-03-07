@@ -111,19 +111,15 @@ async fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<(
     tracing::info!("数据库模式: {}", config.database);
     tracing::info!("路由风格: {}", config.router_flavor);
 
-    // 获取 Admin API 绑定地址
-    let admin_bind = if let Some(addr) = config.admin_listen.first() {
-        format!("{}:{}", addr.ip, addr.port)
-    } else {
-        "0.0.0.0:8001".to_string()
-    };
-
-    let admin_bind_clone = admin_bind.clone();
+    let admin_config = Arc::clone(&config);
     let admin_handle = tokio::spawn(async move {
-        start_admin_api(&admin_bind_clone).await
+        start_admin_api(admin_config).await
     });
 
-    tracing::info!("Admin API 监听于: {}", admin_bind);
+    tracing::info!(
+        "Admin API 监听于: {}",
+        format_listen_addrs(&config.admin_listen)
+    );
     tracing::info!(
         "Proxy 监听于: {}",
         format_listen_addrs(&config.proxy_listen)
@@ -140,24 +136,63 @@ async fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<(
     Ok(())
 }
 
-async fn start_admin_api(bind_addr: &str) -> anyhow::Result<()> {
+async fn start_admin_api(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
+    use kong_core::models::*;
+    use kong_db::*;
+
+    let bind_addr = if let Some(addr) = config.admin_listen.first() {
+        format!("{}:{}", addr.ip, addr.port)
+    } else {
+        "0.0.0.0:8001".to_string()
+    };
     tracing::info!("Admin API 绑定到: {}", bind_addr);
 
-    let app = axum::Router::new()
-        .route("/", axum::routing::get(|| async {
-            axum::Json(serde_json::json!({
-                "version": "0.1.0",
-                "tagline": "Welcome to kong-rust",
-            }))
-        }))
-        .route("/status", axum::routing::get(|| async {
-            axum::Json(serde_json::json!({
-                "server": {"connections_active": 0},
-                "database": {"reachable": true},
-            }))
-        }));
+    let state = if config.is_dbless() {
+        // db-less 模式：内存存储
+        let store = Arc::new(DblessStore::new());
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+        // 如果配置了声明式配置文件，加载它
+        if let Some(ref path) = config.declarative_config {
+            tracing::info!("加载声明式配置: {}", path);
+            store.load_from_file(path)?;
+        }
+
+        kong_admin::AdminState {
+            services: Arc::new(DblessDao::<Service>::new(Arc::clone(&store))),
+            routes: Arc::new(DblessDao::<Route>::new(Arc::clone(&store))),
+            consumers: Arc::new(DblessDao::<Consumer>::new(Arc::clone(&store))),
+            plugins: Arc::new(DblessDao::<Plugin>::new(Arc::clone(&store))),
+            upstreams: Arc::new(DblessDao::<Upstream>::new(Arc::clone(&store))),
+            targets: Arc::new(DblessDao::<Target>::new(Arc::clone(&store))),
+            certificates: Arc::new(DblessDao::<Certificate>::new(Arc::clone(&store))),
+            snis: Arc::new(DblessDao::<Sni>::new(Arc::clone(&store))),
+            ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(Arc::clone(&store))),
+            vaults: Arc::new(DblessDao::<Vault>::new(Arc::clone(&store))),
+            node_id: uuid::Uuid::new_v4(),
+            config: Arc::clone(&config),
+        }
+    } else {
+        // PostgreSQL 模式
+        let db = Database::connect(&config).await?;
+        kong_admin::AdminState {
+            services: Arc::new(PgDao::<Service>::new(db.clone(), service_schema())),
+            routes: Arc::new(PgDao::<Route>::new(db.clone(), route_schema())),
+            consumers: Arc::new(PgDao::<Consumer>::new(db.clone(), consumer_schema())),
+            plugins: Arc::new(PgDao::<Plugin>::new(db.clone(), plugin_schema())),
+            upstreams: Arc::new(PgDao::<Upstream>::new(db.clone(), upstream_schema())),
+            targets: Arc::new(PgDao::<Target>::new(db.clone(), target_schema())),
+            certificates: Arc::new(PgDao::<Certificate>::new(db.clone(), certificate_schema())),
+            snis: Arc::new(PgDao::<Sni>::new(db.clone(), sni_schema())),
+            ca_certificates: Arc::new(PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema())),
+            vaults: Arc::new(PgDao::<Vault>::new(db.clone(), vault_schema())),
+            node_id: uuid::Uuid::new_v4(),
+            config: Arc::clone(&config),
+        }
+    };
+
+    let app = kong_admin::build_admin_router(state);
+
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

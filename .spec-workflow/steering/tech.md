@@ -72,14 +72,85 @@ kong-server（入口）
 
 ### 构建工具
 
-- **构建系统**：Cargo（`cargo build --workspace`）
+- **构建系统**：Cargo（workspace 模式）+ Makefile 封装常用命令
 - **包管理**：Cargo + crates.io
-- **开发流程**：`cargo check` 快速检查 → `cargo test` 测试 → `cargo build --release` 发布构建
+- **开发流程**：`make check` 快速检查 → `make test` 测试 → `make release` 发布构建
+
+### 常用开发命令（Makefile）
+
+**构建：**
+
+| 命令 | 作用 |
+|------|------|
+| `make build` | 编译整个 workspace（debug） |
+| `make release` | Release 构建 |
+| `make check` | 快速类型检查（不生成二进制，比 build 快） |
+| `make build-crate crate=kong-router` | 编译单个 crate |
+
+**测试：**
+
+| 命令 | 作用 |
+|------|------|
+| `make test` | 运行所有测试 |
+| `make test-crate crate=kong-router` | 运行单个 crate 的测试 |
+| `make test-name name=test_route_match` | 按名称匹配运行测试 |
+| `make test-verbose` | 运行测试并显示 stdout/stderr |
+| `make test-integration` | 只运行集成测试 |
+
+**启动 / 调试：**
+
+| 命令 | 作用 |
+|------|------|
+| `make run` | 默认配置启动 |
+| `make run-conf conf=./kong.conf` | 指定配置文件启动 |
+| `make run-debug` | Debug 级别日志启动（`RUST_LOG=debug`） |
+| `make run-trace` | Trace 级别日志启动（最详细） |
+| `make run-mod-debug mod=kong_router` | 仅对指定模块开启 debug 日志 |
+
+**代码质量：**
+
+| 命令 | 作用 |
+|------|------|
+| `make fmt` | 格式化所有代码 |
+| `make lint` | Clippy 静态分析（`-D warnings`） |
+| `make quality` | 格式化 + lint 一起跑 |
+| `make fmt-check` | 格式检查（CI 用，不修改文件） |
+
+**Kong Manager GUI（前端）：**
+
+| 命令 | 作用 |
+|------|------|
+| `make manager-install` | 安装前端依赖（pnpm install） |
+| `make manager-build` | 构建静态文件到 `kong-manager/dist/` |
+| `make manager-dev` | 开发模式启动（热更新，http://localhost:8080） |
+| `make ADMIN_API=http://10.0.0.1:8001 manager-dev` | 指定 Admin API 地址启动 |
+| `make manager-preview` | 预览生产构建效果 |
+
+**全栈启动：**
+
+| 命令 | 作用 |
+|------|------|
+| `make dev` | 同时启动 kong-server（后台）+ kong-manager（前台） |
+
+**清理：**
+
+| 命令 | 作用 |
+|------|------|
+| `make clean` | 清理 Rust 构建产物 |
+| `make manager-clean` | 清理前端依赖和构建产物 |
+| `make clean-all` | 清理所有 |
+
+**其他：**
+
+| 命令 | 作用 |
+|------|------|
+| `make deps` | 查看依赖树 |
+| `make members` | 列出 workspace 成员 |
 
 ### 代码质量
 
-- **静态分析**：`cargo clippy`
-- **格式化**：`cargo fmt`（rustfmt）
+- **静态分析**：`cargo clippy`（通过 `make lint`）
+- **格式化**：`cargo fmt` / rustfmt（通过 `make fmt`）
 - **测试框架**：Rust 内置测试（`#[test]`、`#[tokio::test]`）
 - **集成测试**：各 crate 的 `tests/` 目录
 
@@ -93,7 +164,9 @@ kong-server（入口）
 - **目标平台**：Linux（主要）、macOS（开发）
 - **分发方式**：单一二进制文件（`kong-server`）
 - **安装要求**：PostgreSQL 15+（数据库模式），或无数据库（db-less 模式）
-- **运行命令**：`kong-server -c /path/to/kong.conf`
+- **启动方式**：
+  - 开发：`make run` 或 `make run-conf conf=./kong.conf`
+  - 生产：`./target/release/kong-server -c /path/to/kong.conf`
 
 ## 技术约束
 

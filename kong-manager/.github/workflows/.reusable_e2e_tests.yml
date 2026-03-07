@@ -1,0 +1,151 @@
+# This is a BASE reusable workflow used by other workflows for E2E testing with Gateway CE
+
+name: Run E2E Tests
+
+on:
+  workflow_call:
+    inputs:
+      base-url:
+        type: string
+        default: http://localhost:8002
+      gateway-image:
+        type: string
+      retries:
+        type: number
+        default: 0
+      load-test-image-from-artifact:
+        type: boolean
+        default: false
+      enable-csp-header:
+        type: boolean
+        default: false
+
+jobs:
+  e2e-tests:
+    strategy:
+      matrix:
+        suite:
+          - consumers
+          - certificates
+          - ca-certificates
+          # - data-plane-nodes
+          - keys
+          - key-sets
+          - misc
+          - plugins
+          - routes
+          - services
+          - snis
+          - upstreams
+          - vaults
+        router-flavor: [traditional_compatible]
+        include:
+          - suite: routes-expressions
+            router-flavor: expressions
+      fail-fast: false
+    name: ${{ matrix.suite }}
+    runs-on: ${{ vars.RUNS_ON }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0 version is determined from the packageManager field in package.json by default.
+
+      - name: Download release
+        timeout-minutes: 5
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+
+      - name: Unpack release
+        run: tar xzvf ./release.tar.gz
+
+      - id: setup-node
+        name: Setup Node
+        timeout-minutes: 5
+        uses: actions/setup-node@v3
+        with:
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      - name: Install Playwright
+        timeout-minutes: 10
+        run: |
+          pnpm install:e2e
+          pnpm playwright install chromium
+
+      - name: Download test image
+        if: ${{ inputs.load-test-image-from-artifact }}
+        timeout-minutes: 5
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-test-image
+
+      - name: Load test image
+        if: ${{ inputs.load-test-image-from-artifact }}
+        run: |
+          gunzip -c docker-test-image.tar.gz | docker load
+
+      - name: Select Gateway image
+        if: ${{ !inputs.load-test-image-from-artifact }}
+        id: select-gateway-image
+        uses: ./.github/actions/select-gateway-image
+        with:
+          current-image: ${{ inputs.gateway-image }}
+
+      - name: Start Kong traditional
+        if: ${{ matrix.suite != 'data-plane-nodes' }}
+        timeout-minutes: 10
+        working-directory: ${{ github.workspace }}
+        env:
+          GATEWAY_IMAGE: ${{ inputs.gateway-image }}
+          KONG_ROUTER_FLAVOR: ${{ matrix.router-flavor }}
+          KONG_ADMIN_GUI_CSP_HEADER: ${{ inputs.enable-csp-header && 'on' || 'off' }}
+        run: |
+          _compose_exit=0
+          docker compose -f .ci/docker-compose.yml up -d kong --wait || _compose_exit=$?
+          docker compose -f .ci/docker-compose.yml logs
+          exit $_compose_exit
+
+      - name: Start Kong hybrid
+        if: ${{ matrix.suite == 'data-plane-nodes' }}
+        timeout-minutes: 10
+        working-directory: ${{ github.workspace }}
+        env:
+          GATEWAY_IMAGE: ${{ inputs.gateway-image }}
+        run: |
+          mkdir -p hybrid
+          chmod a+w ./hybrid
+          docker compose -f .ci/docker-compose.yml up kong-gen-cert
+          _compose_exit=0
+          docker compose -f .ci/docker-compose.yml up -d kong-hybrid-dp --scale kong-hybrid-dp=3 --wait || _compose_exit=$?
+          docker compose -f .ci/docker-compose.yml logs
+          exit $_compose_exit
+
+      - name: Ensure CSP header
+        if: ${{ inputs.enable-csp-header }}
+        run: |
+          header_lines=$(curl -s -D - -o /dev/null http://localhost:8002/index.html)
+          echo $header_lines
+          echo $header_lines | grep -q "Content-Security-Policy: default-src 'self';"
+
+      - name: Run E2E tests
+        timeout-minutes: 10
+        env:
+          KM_TEST_GUI_URL: ${{ inputs.base-url }}
+        run: |
+          pnpm test:e2e \
+            --pass-with-no-tests \
+            --retries ${{ inputs.retries }} \
+            --reporter=list \
+            ${{ format('specs/{0}/', matrix.suite) }}
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.suite }}
+          path: tests/playwright/test-results/
+          retention-days: 1

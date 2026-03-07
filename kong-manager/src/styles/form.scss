@@ -1,0 +1,56 @@
+.kong-ui-entity-base-form {
+  @media screen and (min-width: 1280px) {
+    .form-section-wrapper {
+      column-gap: $kui-space-130 !important;
+    }
+  }
+
+  .k-input-switch {
+    margin-bottom: 0;
+  }
+}
+
+.kong-ui-entities-route-form .kong-ui-entity-base-form {
+  .k-select .k-select-selected-item-label {
+    margin-left: 0;
+  }
+}
+
+fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+// styleClasses
+.kong-form-field-wrapper {
+  width: 100%;
+}
+
+.kong-form-hidden-field-wrapper {
+  display: none;
+}
+
+// fieldClasses
+.kong-form-array-field,
+.kong-form-array-string-field {
+  width: 100%;
+}
+
+// fieldItemsClasses
+.kong-form-array-field-item {
+  display: flex;
+  margin-top: $kui-space-40;
+}
+
+.kong-form-array-string-field-item {
+  display: flex;
+  margin-top: $kui-space-40;
+}
+
+// newElementButtonLabelClasses
+.kong-form-new-element-button-label {
+  margin-top: $kui-space-80 !important;
+  margin-bottom: $kui-space-80 !important;
+}

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
-
+use tower_http::cors::CorsLayer;
 use kong_core::models::*;
 use kong_core::traits::Dao;
 
@@ -84,5 +84,6 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/vaults", get(list_vaults).post(create_vault))
         .route("/vaults/{id_or_name}",
             get(get_vault).patch(update_vault).put(upsert_vault).delete(delete_vault))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }

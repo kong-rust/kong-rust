@@ -1,0 +1,22 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.json",
+  "compilerOptions": {
+    "target": "es2017",
+    "allowSyntheticDefaultImports": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "tests/*": ["tests/*"],
+      "config": ["src/config.ts"]
+    },
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "noImplicitAny": false,
+    "types": [
+      "vite/client",
+      "monaco-editor",
+    ]
+  },
+  "exclude": ["node_modules", "dist", "coverage", "tests"]
+}
