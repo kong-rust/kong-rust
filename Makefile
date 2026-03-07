@@ -87,7 +87,7 @@ quality: fmt lint
 # ---------- Kong Manager GUI ----------
 
 MANAGER_DIR = kong-manager
-MANAGER_PORT ?= 8080
+MANAGER_PORT ?= 8002
 ADMIN_API ?= http://127.0.0.1:8001
 
 # 安装 kong-manager 前端依赖

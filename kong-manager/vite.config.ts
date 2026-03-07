@@ -40,13 +40,10 @@ export default defineConfig({
     }),
   ],
   server: {
-    proxy: {
-      '/kconfig.js': process.env.KONG_GUI_URL || 'http://127.0.0.1:8002',
-    },
-    port: 8080,
+    port: 8002,
   },
   preview: {
-    port: 8080,
+    port: 8002,
   },
   css: {
     preprocessorOptions: {

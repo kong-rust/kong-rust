@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, AllowMethods, AllowHeaders, CorsLayer};
 use kong_core::models::*;
 use kong_core::traits::Dao;
 
@@ -84,6 +84,16 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/vaults", get(list_vaults).post(create_vault))
         .route("/vaults/{id_or_name}",
             get(get_vault).patch(update_vault).put(upsert_vault).delete(delete_vault))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::mirror_request())
+                .allow_methods(AllowMethods::mirror_request())
+                .allow_headers(AllowHeaders::mirror_request())
+                .allow_credentials(true)
+                .expose_headers(tower_http::cors::ExposeHeaders::list([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::CONTENT_LENGTH,
+                ]))
+        )
         .with_state(state)
 }
