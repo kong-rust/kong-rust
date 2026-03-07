@@ -5,6 +5,7 @@
 //! - expressions: 基于 ATC 表达式语法的优先级匹配
 
 pub mod expressions;
+pub mod stream;
 pub mod traditional;
 
 use std::collections::HashMap;

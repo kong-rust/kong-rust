@@ -51,6 +51,10 @@ pub enum ColumnType {
     Jsonb,
     /// TEXT[] 数组类型（如 tags、methods）
     TextArray,
+    /// JSONB[] 数组类型（如 routes.sources、routes.destinations）
+    JsonbArray,
+    /// UUID[] 数组类型（如 services.ca_certificates）
+    UuidArray,
     /// UUID 外键（JSON 中为 { "id": "uuid" }，DB 中为 <field>_id UUID 列）
     ForeignKey,
 }
@@ -166,6 +170,16 @@ impl EntitySchema {
     /// 快捷方法: 添加文本数组列
     pub fn text_array(self, name: &str) -> Self {
         self.column(name, name, ColumnType::TextArray, true)
+    }
+
+    /// 快捷方法: 添加 JSONB[] 数组列
+    pub fn jsonb_array(self, name: &str) -> Self {
+        self.column(name, name, ColumnType::JsonbArray, true)
+    }
+
+    /// 快捷方法: 添加 UUID[] 数组列
+    pub fn uuid_array(self, name: &str) -> Self {
+        self.column(name, name, ColumnType::UuidArray, true)
     }
 
     /// 快捷方法: 添加浮点列
@@ -296,6 +310,22 @@ fn extract_column_value(row: &PgRow, col: &ColumnDef) -> Result<Value> {
                 .map(|v| Value::Array(v.into_iter().map(Value::String).collect()))
                 .unwrap_or(Value::Null))
         }
+        ColumnType::JsonbArray => {
+            let val: Option<Vec<Value>> = row
+                .try_get(db_col)
+                .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
+            Ok(val
+                .map(|v| Value::Array(v))
+                .unwrap_or(Value::Null))
+        }
+        ColumnType::UuidArray => {
+            let val: Option<Vec<Uuid>> = row
+                .try_get(db_col)
+                .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
+            Ok(val
+                .map(|v| Value::Array(v.into_iter().map(|u| Value::String(u.to_string())).collect()))
+                .unwrap_or(Value::Null))
+        }
         ColumnType::ForeignKey => {
             // DB 中存储为 UUID 列，JSON 中需要包装为 { "id": "uuid" }
             let val: Option<Uuid> = row
@@ -339,6 +369,8 @@ pub enum SqlParam {
     Boolean(Option<bool>),
     Jsonb(Option<Value>),
     TextArray(Option<Vec<String>>),
+    JsonbArray(Option<Vec<Value>>),
+    UuidArray(Option<Vec<Uuid>>),
     /// epoch 秒时间戳
     TimestampEpoch(Option<i64>),
     /// epoch 毫秒时间戳（f64）
@@ -357,6 +389,8 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
             ColumnType::TimestampMs => SqlParam::TimestampEpochMs(None),
             ColumnType::Jsonb => SqlParam::Jsonb(None),
             ColumnType::TextArray => SqlParam::TextArray(None),
+            ColumnType::JsonbArray => SqlParam::JsonbArray(None),
+            ColumnType::UuidArray => SqlParam::UuidArray(None),
         });
     }
 
@@ -430,6 +464,28 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
             Ok(SqlParam::TimestampEpochMs(Some(n)))
         }
         ColumnType::Jsonb => Ok(SqlParam::Jsonb(Some(value.clone()))),
+        ColumnType::JsonbArray => {
+            let arr = value.as_array().ok_or_else(|| {
+                KongError::ValidationError("JSONB[] 字段必须是 JSON 数组".to_string())
+            })?;
+            Ok(SqlParam::JsonbArray(Some(arr.clone())))
+        }
+        ColumnType::UuidArray => {
+            let arr = value.as_array().ok_or_else(|| {
+                KongError::ValidationError("UUID[] 字段必须是 JSON 数组".to_string())
+            })?;
+            let uuids: std::result::Result<Vec<Uuid>, _> = arr
+                .iter()
+                .map(|v| {
+                    let s = v.as_str().ok_or_else(|| {
+                        KongError::ValidationError("UUID 数组元素必须是字符串".to_string())
+                    })?;
+                    Uuid::parse_str(s)
+                        .map_err(|e| KongError::ValidationError(format!("无效的 UUID: {}", e)))
+                })
+                .collect();
+            Ok(SqlParam::UuidArray(Some(uuids?)))
+        }
         ColumnType::TextArray => {
             let arr = value.as_array().ok_or_else(|| {
                 KongError::ValidationError("数组字段必须是 JSON 数组".to_string())
@@ -981,6 +1037,8 @@ fn bind_param<'q>(
         SqlParam::Boolean(v) => query.bind(v),
         SqlParam::Jsonb(v) => query.bind(v),
         SqlParam::TextArray(v) => query.bind(v),
+        SqlParam::JsonbArray(v) => query.bind(v),
+        SqlParam::UuidArray(v) => query.bind(v),
         SqlParam::TimestampEpoch(v) => {
             // 绑定 f64 用于 TO_TIMESTAMP()
             query.bind(v.map(|n| n as f64))
@@ -1045,7 +1103,7 @@ pub fn service_schema() -> EntitySchema {
         .foreign_key("client_certificate")
         .boolean_opt("tls_verify")
         .integer_opt("tls_verify_depth")
-        .jsonb("ca_certificates")
+        .uuid_array("ca_certificates")
         .boolean("enabled")
 }
 
@@ -1055,7 +1113,7 @@ pub fn route_schema() -> EntitySchema {
         .pk()
         .timestamps()
         .text_opt("name")
-        .jsonb("protocols")
+        .text_array("protocols")
         .text_array("methods")
         .text_array("hosts")
         .text_array("paths")
@@ -1069,9 +1127,9 @@ pub fn route_schema() -> EntitySchema {
         .boolean("response_buffering")
         .tags()
         .foreign_key("service")
-        .jsonb("snis")
-        .jsonb("sources")
-        .jsonb("destinations")
+        .text_array("snis")
+        .jsonb_array("sources")
+        .jsonb_array("destinations")
         .text_opt("expression")
         .integer_opt("priority")
 }
@@ -1093,7 +1151,7 @@ pub fn upstream_schema() -> EntitySchema {
         .timestamps()
         .text("name")
         .text("algorithm")
-        .integer("hash_on_cookie_path")
+        .text_opt("hash_on_cookie_path")
         .text("hash_on")
         .text("hash_fallback")
         .text_opt("hash_on_header")
@@ -1119,6 +1177,7 @@ pub fn target_schema() -> EntitySchema {
         .column("updated_at", "updated_at", ColumnType::TimestampMs, false)
         .text("target")
         .float("weight")
+        .text_opt("cache_key")
         .tags()
         .foreign_key_required("upstream")
 }
@@ -1132,12 +1191,12 @@ pub fn plugin_schema() -> EntitySchema {
         .jsonb("config")
         .boolean("enabled")
         .text_opt("instance_name")
-        .jsonb("protocols")
+        .text_array("protocols")
+        .text_opt("cache_key")
         .tags()
         .foreign_key("route")
         .foreign_key("service")
         .foreign_key("consumer")
-        .jsonb("ordering")
 }
 
 /// 创建 Certificate 实体的 Schema

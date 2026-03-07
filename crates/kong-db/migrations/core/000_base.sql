@@ -72,8 +72,8 @@ CREATE TABLE IF NOT EXISTS services (
     tags                 TEXT[],
     client_certificate_id UUID                    REFERENCES certificates(id),
     tls_verify           BOOLEAN,
-    tls_verify_depth     BIGINT,
-    ca_certificates      JSONB,
+    tls_verify_depth     SMALLINT,
+    ca_certificates      UUID[],
     enabled              BOOLEAN                  DEFAULT true
 );
 
@@ -85,12 +85,12 @@ CREATE TABLE IF NOT EXISTS routes (
     created_at                  TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(0) AT TIME ZONE 'UTC'),
     updated_at                  TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(0) AT TIME ZONE 'UTC'),
     name                        TEXT                     UNIQUE,
-    protocols                   JSONB,
+    protocols                   TEXT[],
     methods                     TEXT[],
     hosts                       TEXT[],
     paths                       TEXT[],
     headers                     JSONB,
-    https_redirect_status_code  BIGINT,
+    https_redirect_status_code  INTEGER,
     regex_priority              BIGINT,
     strip_path                  BOOLEAN                  NOT NULL,
     path_handling               TEXT                     DEFAULT 'v0',
@@ -99,9 +99,9 @@ CREATE TABLE IF NOT EXISTS routes (
     response_buffering          BOOLEAN                  DEFAULT true,
     tags                        TEXT[],
     service_id                  UUID                     REFERENCES services(id),
-    snis                        JSONB,
-    sources                     JSONB,
-    destinations                JSONB,
+    snis                        TEXT[],
+    sources                     JSONB[],
+    destinations                JSONB[],
     expression                  TEXT,
     priority                    BIGINT
 );
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
     updated_at                 TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(0) AT TIME ZONE 'UTC'),
     name                       TEXT                     NOT NULL UNIQUE,
     algorithm                  TEXT,
-    hash_on_cookie_path        BIGINT,
+    hash_on_cookie_path        TEXT,
     hash_on                    TEXT,
     hash_fallback              TEXT,
     hash_on_header             TEXT,
@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS targets (
     created_at  TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(3) AT TIME ZONE 'UTC'),
     updated_at  TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(3) AT TIME ZONE 'UTC'),
     target      TEXT                     NOT NULL,
-    weight      DOUBLE PRECISION         DEFAULT 100,
+    weight      INTEGER                  DEFAULT 100,
+    cache_key   TEXT                     UNIQUE,
     tags        TEXT[],
     upstream_id UUID                     NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE
 );
@@ -169,12 +170,12 @@ CREATE TABLE IF NOT EXISTS plugins (
     config          JSONB                    NOT NULL,
     enabled         BOOLEAN                  DEFAULT true,
     instance_name   TEXT,
-    protocols       JSONB,
+    protocols       TEXT[],
+    cache_key       TEXT                     UNIQUE,
     tags            TEXT[],
     route_id        UUID                     REFERENCES routes(id) ON DELETE CASCADE,
     service_id      UUID                     REFERENCES services(id) ON DELETE CASCADE,
-    consumer_id     UUID                     REFERENCES consumers(id) ON DELETE CASCADE,
-    ordering        JSONB
+    consumer_id     UUID                     REFERENCES consumers(id) ON DELETE CASCADE
 );
 
 -- ============================================================

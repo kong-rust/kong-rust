@@ -30,6 +30,9 @@ pub struct Plugin {
     /// 插件适用的协议
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocols: Option<Vec<Protocol>>,
+    /// 缓存键（由 Kong 自动生成，用于唯一标识插件配置）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     /// 是否启用，默认 true
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +55,7 @@ impl Default for Plugin {
             consumer: None,
             config: serde_json::Value::Object(serde_json::Map::new()),
             protocols: None,
+            cache_key: None,
             enabled: true,
             tags: None,
             ordering: None,

@@ -18,6 +18,9 @@ pub struct Target {
     pub target: String,
     /// 权重，默认 100，范围 0-65535
     pub weight: i32,
+    /// 缓存键（由 Kong 自动生成）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
 }
@@ -31,6 +34,7 @@ impl Default for Target {
             upstream: ForeignKey::new(Uuid::nil()),
             target: String::new(),
             weight: 100,
+            cache_key: None,
             tags: None,
         }
     }

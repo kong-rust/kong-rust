@@ -45,6 +45,7 @@ fn create_test_app() -> axum::Router {
         config: Arc::new(config),
         proxy,
         refresh_tx,
+        stream_router: None,
     };
 
     build_admin_router(state)
@@ -165,6 +166,7 @@ fn create_test_app_with_data() -> axum::Router {
         config: Arc::new(config),
         proxy,
         refresh_tx,
+        stream_router: None,
     };
 
     build_admin_router(state)

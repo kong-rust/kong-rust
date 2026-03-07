@@ -26,14 +26,18 @@ pub struct KongConfig {
     pub stream_listen: Vec<ListenAddr>,
     /// Admin GUI（Kong Manager）监听器列表
     pub admin_gui_listen: Vec<ListenAddr>,
+    /// Admin GUI URL（Kong Manager 访问地址）
+    pub admin_gui_url: String,
 
-    // ========== 日��配置 ==========
+    // ========== 日志配置 ==========
     pub proxy_access_log: String,
     pub proxy_error_log: String,
     pub admin_access_log: String,
     pub admin_error_log: String,
     pub status_access_log: String,
     pub status_error_log: String,
+    pub proxy_stream_access_log: String,
+    pub proxy_stream_error_log: String,
 
     // ========== 数据库配置 ==========
     /// 数据库类型: postgres, off
@@ -213,6 +217,7 @@ impl Default for KongConfig {
             admin_gui_listen: parse_listen_addresses(
                 "0.0.0.0:8002, 0.0.0.0:8445 ssl",
             ).unwrap_or_default(),
+            admin_gui_url: "http://localhost:8002".to_string(),
 
             // 日志
             proxy_access_log: "logs/access.log".to_string(),
@@ -221,6 +226,8 @@ impl Default for KongConfig {
             admin_error_log: "logs/error.log".to_string(),
             status_access_log: "off".to_string(),
             status_error_log: "logs/status_error.log".to_string(),
+            proxy_stream_access_log: "logs/stream_access.log".to_string(),
+            proxy_stream_error_log: "logs/stream_error.log".to_string(),
 
             // 数据库
             database: "postgres".to_string(),
@@ -410,6 +417,7 @@ impl KongConfig {
             "admin_gui_listen" => {
                 self.admin_gui_listen = parse_listen_addresses(value).unwrap_or_default()
             }
+            "admin_gui_url" => self.admin_gui_url = value.to_string(),
 
             // 日志
             "proxy_access_log" => self.proxy_access_log = value.to_string(),
@@ -418,6 +426,8 @@ impl KongConfig {
             "admin_error_log" => self.admin_error_log = value.to_string(),
             "status_access_log" => self.status_access_log = value.to_string(),
             "status_error_log" => self.status_error_log = value.to_string(),
+            "proxy_stream_access_log" => self.proxy_stream_access_log = value.to_string(),
+            "proxy_stream_error_log" => self.proxy_stream_error_log = value.to_string(),
 
             // 数据库
             "database" => self.database = value.to_string(),

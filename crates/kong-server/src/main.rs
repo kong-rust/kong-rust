@@ -270,7 +270,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     // 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
     // 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
-    let (mut kong_proxy, admin_state, refresh_rx) =
+    let (mut kong_proxy, mut admin_state, refresh_rx) =
         rt.block_on(init_proxy_and_admin(&config))?;
 
     // 初始化 access log 独立文件
@@ -281,12 +281,80 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
 
     // 阶段 3：创建 Proxy Service，绑定所有 proxy_listen 地址
     let mut proxy_service =
-        pingora_proxy::http_proxy_service(&server.configuration, kong_proxy);
+        pingora_proxy::http_proxy_service(&server.configuration, kong_proxy.clone());
     for addr in &config.proxy_listen {
         let listen_addr = format!("{}:{}", addr.ip, addr.port);
-        proxy_service.add_tcp(&listen_addr);
-        tracing::info!("Proxy 监听于: {}", listen_addr);
+        if addr.ssl {
+            // SSL 端口：使用 add_tls 注册，Pingora 负责 TLS 终止
+            if let (Some(cert), Some(key)) = (config.ssl_cert.first(), config.ssl_cert_key.first())
+            {
+                match proxy_service.add_tls(&listen_addr, cert, key) {
+                    Ok(_) => tracing::info!("Proxy 监听于: {} (TLS)", listen_addr),
+                    Err(e) => {
+                        tracing::error!("Proxy TLS 监听失败 {}: {}", listen_addr, e);
+                        // 回退到 TCP
+                        proxy_service.add_tcp(&listen_addr);
+                        tracing::warn!("Proxy 回退为 TCP 监听: {}", listen_addr);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Proxy SSL 端口 {} 缺少 ssl_cert/ssl_cert_key 配置，回退为 TCP",
+                    listen_addr
+                );
+                proxy_service.add_tcp(&listen_addr);
+            }
+        } else {
+            proxy_service.add_tcp(&listen_addr);
+            tracing::info!("Proxy 监听于: {}", listen_addr);
+        }
     }
+
+    // 阶段 3.5：创建 Stream Proxy Service（L4 TCP/TLS 代理）
+    // 获取初始路由列表用于 StreamRouter 构建（从 KongProxy 的路由器中获取不便，
+    // 直接从 AdminState 的 DAO 重新加载，init 阶段数据已在 DB 中）
+    let stream_router_ref = if !config.stream_listen.is_empty() {
+        // 从 AdminState 获取路由数据初始化 Stream 路由
+        let routes = rt.block_on(async {
+            use kong_core::traits::PageParams;
+            let params = PageParams { size: 10000, offset: None, tags: None };
+            match admin_state.routes.page(&params).await {
+                Ok(page) => page.data,
+                Err(e) => {
+                    tracing::error!("加载 Stream 路由失败: {}", e);
+                    Vec::new()
+                }
+            }
+        });
+
+        let mut stream_proxy = kong_proxy::stream::KongStreamProxy::new(
+            &routes,
+            kong_proxy.balancers.clone(),
+            kong_proxy.services.clone(),
+            kong_proxy.cert_manager.clone(),
+        );
+        stream_proxy.init_access_log(&config.proxy_stream_access_log);
+
+        // 保存 stream_router 的 Arc 引用，后续传给 AdminState 用于热更新
+        let stream_router = stream_proxy.stream_router.clone();
+
+        let mut stream_service = pingora_core::services::listening::Service::new(
+            "Stream Proxy".to_string(),
+            stream_proxy,
+        );
+        for addr in &config.stream_listen {
+            let listen_addr = format!("{}:{}", addr.ip, addr.port);
+            stream_service.add_tcp(&listen_addr);
+            tracing::info!("Stream Proxy 监听于: {}", listen_addr);
+        }
+        server.add_service(stream_service);
+        Some(stream_router)
+    } else {
+        None
+    };
+
+    // 将 stream_router 引用注入 AdminState，使路由热更新同步到 Stream Proxy
+    admin_state.stream_router = stream_router_ref;
 
     // 阶段 4：创建 Admin API BackgroundService
     let admin_bg = AdminBgService {
@@ -357,6 +425,7 @@ async fn init_proxy_and_admin(
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
             refresh_tx,
+            stream_router: None, // start_gateway 中按需设置
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
@@ -440,6 +509,7 @@ async fn init_proxy_and_admin(
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
             refresh_tx,
+            stream_router: None, // start_gateway 中按需设置
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))

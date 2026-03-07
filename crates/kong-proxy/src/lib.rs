@@ -10,6 +10,8 @@
 pub mod balancer;
 pub mod health;
 pub mod phases;
+pub mod stream;
+pub mod stream_tls;
 pub mod tls;
 
 use std::collections::HashMap;

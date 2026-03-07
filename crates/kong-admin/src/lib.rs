@@ -11,11 +11,14 @@ pub mod handlers;
 
 use std::sync::Arc;
 
+use std::sync::RwLock;
+
 use axum::routing::get;
 use axum::Router;
 use tower_http::cors::{AllowOrigin, AllowMethods, AllowHeaders, CorsLayer};
 use kong_core::models::*;
 use kong_core::traits::Dao;
+use kong_router::stream::StreamRouter;
 
 /// Admin API 应用状态
 #[derive(Clone)]
@@ -36,6 +39,8 @@ pub struct AdminState {
     pub proxy: kong_proxy::KongProxy,
     /// 缓存刷新防抖信号发送端：CUD 操作后发送实体类型名，后台任务合并执行
     pub refresh_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    /// Stream 路由器引用（与 Stream Proxy 共享），路由变更时同步更新
+    pub stream_router: Option<Arc<RwLock<StreamRouter>>>,
 }
 
 /// 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行

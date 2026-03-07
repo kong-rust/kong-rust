@@ -294,6 +294,38 @@
   - 扩展 `crates/kong-lua-bridge/tests/lua_plugin_compat.rs` — 新增 20+ PDK 真实数据测试（验证不再硬编码）
   - 修复 `crates/kong-admin/tests/admin_api_compat.rs` — 补全缺失的 proxy 和 refresh_tx 字段
 
+## 阶段 8c：L4 Stream 代理
+
+- [x] 8.13 实现 Stream 路由引擎（kong-router/src/stream.rs）
+  - 新建 `crates/kong-router/src/stream.rs` — StreamRouter、StreamRequestContext、StreamRouteMatch
+  - 支持 source/dest IP:Port 匹配（CIDR 范围）、SNI 匹配（含通配符 *.example.com）
+  - 优先级：匹配维度越多越优先，同级按 created_at 排序
+  - 仅索引 protocols 包含 tcp/tls/tls_passthrough 的路由
+  - 8 个单元测试覆盖各种匹配场景
+  - _Requirements: R1_
+
+- [x] 8.14 实现 TLS ClientHello SNI 解析器（kong-proxy/src/stream_tls.rs）
+  - 新建 `crates/kong-proxy/src/stream_tls.rs` — 手动解析 TLS record 提取 SNI
+  - 解析路径：TLS Record Header → Handshake Header → ClientHello → Extensions → SNI Extension
+  - CLIENT_HELLO_PEEK_SIZE = 1024 字节推荐 peek 缓冲区
+  - 4 个单元测试（含构造 ClientHello 辅助函数）
+  - _Requirements: R1_
+
+- [x] 8.15 实现 Stream 代理核心（kong-proxy/src/stream.rs）
+  - 新建 `crates/kong-proxy/src/stream.rs` — KongStreamProxy 实现 Pingora ServerApp trait
+  - 支持 TCP 明文转发、TLS Passthrough（peek SNI 不终止 TLS）、TLS Termination（暂作 TCP 透传）
+  - 共享 HTTP 代理的 balancers/services/cert_manager（Arc<RwLock<...>>）
+  - peek 首字节判断 TLS → 解析 SNI → 路由匹配 → 解析上游 → 双向转发
+  - Stream access log 输出
+  - _Requirements: R1_
+
+- [x] 8.16 注册 Stream Service + 路由热更新
+  - 修改 `crates/kong-server/src/main.rs` — 创建 Stream Proxy Service，绑定 stream_listen 端口
+  - 用实际 DB 路由数据初始化 StreamRouter（非空 Vec）
+  - AdminState 添加 stream_router 字段，路由 CUD 操作同步更新 Stream 路由表
+  - 修改 `crates/kong-admin/src/lib.rs` + `handlers/mod.rs` — 路由刷新时同步 rebuild StreamRouter
+  - _Requirements: R1_
+
 ## 阶段 9：Hybrid 模式和集群通信
 
 - [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动

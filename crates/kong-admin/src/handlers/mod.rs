@@ -40,7 +40,16 @@ impl AdminState {
             }
             "routes" => {
                 match self.routes.page(&all_params).await {
-                    Ok(page) => self.proxy.update_routes(&page.data),
+                    Ok(page) => {
+                        self.proxy.update_routes(&page.data);
+                        // 同步更新 Stream 路由器（L4 路由表）
+                        if let Some(ref sr) = self.stream_router {
+                            if let Ok(mut router) = sr.write() {
+                                router.rebuild(&page.data);
+                                tracing::debug!("Stream 路由表已刷新: {} 条路由", router.route_count());
+                            }
+                        }
+                    }
                     Err(e) => tracing::error!("刷新 routes 缓存失败: {}", e),
                 }
             }
@@ -155,11 +164,14 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
             "proxy_listen": listen_addrs_to_strings(&config.proxy_listen),
             "admin_listen": listen_addrs_to_strings(&config.admin_listen),
             "admin_gui_listen": listen_addrs_to_strings(&config.admin_gui_listen),
+            "admin_gui_url": &config.admin_gui_url,
             "status_listen": listen_addrs_to_strings(&config.status_listen),
             "proxy_access_log": &config.proxy_access_log,
             "proxy_error_log": &config.proxy_error_log,
             "admin_access_log": &config.admin_access_log,
             "admin_error_log": &config.admin_error_log,
+            "proxy_stream_access_log": &config.proxy_stream_access_log,
+            "proxy_stream_error_log": &config.proxy_stream_error_log,
             "prefix": &config.prefix,
             "log_level": &config.log_level,
             "plugins": &config.plugins,

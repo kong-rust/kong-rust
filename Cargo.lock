@@ -1409,6 +1409,7 @@ dependencies = [
  "kong-db",
  "kong-plugin-system",
  "kong-proxy",
+ "kong-router",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
