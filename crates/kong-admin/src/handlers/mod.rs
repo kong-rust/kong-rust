@@ -118,26 +118,90 @@ fn error_response(err: KongError) -> impl IntoResponse {
 
 // ============ 特殊端点 ============
 
-/// GET / — 节点信息
+/// 将 ListenAddr 列表序列化为 Kong 兼容的字符串数组
+fn listen_addrs_to_strings(addrs: &[kong_config::ListenAddr]) -> Vec<String> {
+    addrs.iter().map(|a| {
+        let mut s = format!("{}:{}", a.ip, a.port);
+        if a.ssl { s.push_str(" ssl"); }
+        if a.http2 { s.push_str(" http2"); }
+        if a.reuseport { s.push_str(" reuseport"); }
+        if a.proxy_protocol { s.push_str(" proxy_protocol"); }
+        if let Some(bl) = a.backlog { s.push_str(&format!(" backlog={}", bl)); }
+        s
+    }).collect()
+}
+
+/// GET / — 节点信息（兼容 Kong）
 pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
+    let config = &state.config;
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+
+    // 将监听地址转为前端期望的 [{port, ssl}] 格式
+    let to_listeners = |addrs: &[kong_config::ListenAddr]| -> Vec<Value> {
+        addrs.iter().map(|a| json!({"port": a.port, "ssl": a.ssl})).collect()
+    };
+
     Json(json!({
         "version": "0.1.0",
+        "edition": "community",
         "lua_version": "LuaJIT 2.1.0-beta3",
         "tagline": "Welcome to kong-rust",
-        "hostname": std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string()),
+        "hostname": hostname,
         "node_id": state.node_id.to_string(),
         "configuration": {
-            "database": if state.config.database == "off" { "off" } else { "postgres" },
-            "router_flavor": &state.config.router_flavor,
-            "role": &state.config.role,
+            "database": if config.database == "off" { "off" } else { "postgres" },
+            "router_flavor": &config.router_flavor,
+            "role": &config.role,
+            "proxy_listen": listen_addrs_to_strings(&config.proxy_listen),
+            "admin_listen": listen_addrs_to_strings(&config.admin_listen),
+            "admin_gui_listen": listen_addrs_to_strings(&config.admin_gui_listen),
+            "status_listen": listen_addrs_to_strings(&config.status_listen),
+            "proxy_access_log": &config.proxy_access_log,
+            "proxy_error_log": &config.proxy_error_log,
+            "admin_access_log": &config.admin_access_log,
+            "admin_error_log": &config.admin_error_log,
+            "prefix": &config.prefix,
+            "log_level": &config.log_level,
+            "plugins": &config.plugins,
+            "pg_host": &config.pg_host,
+            "pg_port": config.pg_port,
+            "pg_database": &config.pg_database,
+            "pg_user": &config.pg_user,
+            "pg_ssl": config.pg_ssl,
+            "pg_ssl_verify": config.pg_ssl_verify,
+            "pg_timeout": config.pg_timeout,
+            "ssl_cipher_suite": &config.ssl_cipher_suite,
+            "ssl_protocols": &config.ssl_protocols,
+            "dns_resolver": &config.dns_resolver,
+            "worker_consistency": &config.worker_consistency,
+            "worker_state_update_frequency": config.worker_state_update_frequency,
+            "db_update_frequency": config.db_update_frequency,
+            "db_cache_ttl": config.db_cache_ttl,
+            "db_resurrect_ttl": config.db_resurrect_ttl,
+            "nginx_worker_processes": &config.nginx_worker_processes,
+            "upstream_keepalive_pool_size": config.upstream_keepalive_pool_size,
+            "upstream_keepalive_max_requests": config.upstream_keepalive_max_requests,
+            "upstream_keepalive_idle_timeout": config.upstream_keepalive_idle_timeout,
+            "mem_cache_size": &config.mem_cache_size,
+            "error_default_type": &config.error_default_type,
+            "headers": &config.headers,
+            "trusted_ips": &config.trusted_ips,
+            "real_ip_header": &config.real_ip_header,
+            "proxy_listeners": to_listeners(&config.proxy_listen),
+            "admin_gui_listeners": to_listeners(&config.admin_gui_listen),
         },
         "plugins": {
             "available_on_server": {},
+            "enabled_in_cluster": [],
         },
         "timers": {
             "running": 0,
             "pending": 0,
-        }
+        },
+        "pids": {
+            "master": std::process::id(),
+            "workers": [std::process::id()],
+        },
     }))
 }
 
@@ -494,6 +558,78 @@ pub async fn list_nested_routes(
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"message": e.to_string()})),
         ),
+    }
+}
+
+/// GET /services/:service_id/plugins
+pub async fn list_service_plugins(
+    State(state): State<AdminState>,
+    Path(service_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "service not found"})));
+        }
+        Err(e) => {
+            return (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})));
+        }
+    };
+    match state.plugins.select_by_foreign_key("service", &service.id, &params.to_page_params()).await {
+        Ok(page) => (StatusCode::OK, Json(json!({"data": page.data, "offset": page.offset, "next": page.next}))),
+        Err(e) => (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()}))),
+    }
+}
+
+/// GET /routes/:route_id/plugins
+pub async fn list_route_plugins(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "route not found"})));
+        }
+        Err(e) => {
+            return (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})));
+        }
+    };
+    match state.plugins.select_by_foreign_key("route", &route.id, &params.to_page_params()).await {
+        Ok(page) => (StatusCode::OK, Json(json!({"data": page.data, "offset": page.offset, "next": page.next}))),
+        Err(e) => (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()}))),
+    }
+}
+
+/// GET /consumers/:consumer_id/plugins
+pub async fn list_consumer_plugins(
+    State(state): State<AdminState>,
+    Path(consumer_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "consumer not found"})));
+        }
+        Err(e) => {
+            return (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})));
+        }
+    };
+    match state.plugins.select_by_foreign_key("consumer", &consumer.id, &params.to_page_params()).await {
+        Ok(page) => (StatusCode::OK, Json(json!({"data": page.data, "offset": page.offset, "next": page.next}))),
+        Err(e) => (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()}))),
     }
 }
 

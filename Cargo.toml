@@ -66,6 +66,7 @@ sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
+gethostname = "1"
 
 # Workspace crates
 kong-core = { path = "crates/kong-core" }

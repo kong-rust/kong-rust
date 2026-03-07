@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Kong Admin API — 100% 兼容 Kong 的 REST Admin API
 //!
 //! 基于 axum 实现，支持:
@@ -91,12 +92,17 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/routes", get(list_routes).post(create_route))
         .route("/routes/{id_or_name}",
             get(get_route).patch(update_route).put(upsert_route).delete(delete_route))
-        // 嵌套: Service 下的 Routes
+        // 嵌套: Service 下的 Routes 和 Plugins
         .route("/services/{service_id_or_name}/routes", get(list_nested_routes).post(create_nested_route))
+        .route("/services/{service_id_or_name}/plugins", get(list_service_plugins))
+        // 嵌套: Route 下的 Plugins
+        .route("/routes/{route_id_or_name}/plugins", get(list_route_plugins))
         // Consumers
         .route("/consumers", get(list_consumers).post(create_consumer))
         .route("/consumers/{id_or_name}",
             get(get_consumer).patch(update_consumer).put(upsert_consumer).delete(delete_consumer))
+        // 嵌套: Consumer 下的 Plugins
+        .route("/consumers/{consumer_id_or_name}/plugins", get(list_consumer_plugins))
         // Plugins
         .route("/plugins", get(list_plugins).post(create_plugin))
         .route("/plugins/{id_or_name}",

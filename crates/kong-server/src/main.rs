@@ -266,11 +266,12 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     tracing::info!("数据库模式: {}", config.database);
     tracing::info!("路由风格: {}", config.router_flavor);
 
-    // 阶段 1：用临时 tokio runtime 做异步初始化（DB 连接、数据加载）
-    let (mut kong_proxy, admin_state, refresh_rx) = {
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(init_proxy_and_admin(&config))?
-    };
+    // 阶段 1：用 tokio runtime 做异步初始化（DB 连接、数据加载）
+    // 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
+    // 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
+    let rt = tokio::runtime::Runtime::new()?;
+    let (mut kong_proxy, admin_state, refresh_rx) =
+        rt.block_on(init_proxy_and_admin(&config))?;
 
     // 初始化 access log 独立文件
     kong_proxy.init_access_log(&config.proxy_access_log);
