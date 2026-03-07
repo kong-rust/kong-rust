@@ -21,6 +21,15 @@ fn create_test_app() -> axum::Router {
 
     let config = kong_config::KongConfig::default();
 
+    let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+    );
+
     let state = AdminState {
         services: Arc::new(DblessDao::<Service>::new(store.clone())),
         routes: Arc::new(DblessDao::<Route>::new(store.clone())),
@@ -34,6 +43,8 @@ fn create_test_app() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         node_id: Uuid::new_v4(),
         config: Arc::new(config),
+        proxy,
+        refresh_tx,
     };
 
     build_admin_router(state)
@@ -130,6 +141,15 @@ fn create_test_app_with_data() -> axum::Router {
 
     let config = kong_config::KongConfig::default();
 
+    let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+    );
+
     let state = AdminState {
         services: Arc::new(DblessDao::<Service>::new(store.clone())),
         routes: Arc::new(DblessDao::<Route>::new(store.clone())),
@@ -143,6 +163,8 @@ fn create_test_app_with_data() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         node_id: Uuid::new_v4(),
         config: Arc::new(config),
+        proxy,
+        refresh_tx,
     };
 
     build_admin_router(state)

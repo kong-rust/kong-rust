@@ -1486,6 +1486,7 @@ name = "kong-plugin-system"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "kong-core",
  "serde",
  "serde_json",

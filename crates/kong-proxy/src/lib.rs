@@ -9,6 +9,7 @@
 
 pub mod balancer;
 pub mod health;
+pub mod phases;
 pub mod tls;
 
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
@@ -27,6 +29,7 @@ use kong_router::{RequestContext, RouteMatch, Router};
 use kong_plugin_system::{PluginExecutor, PluginRegistry, ResolvedPlugin};
 
 use crate::balancer::LoadBalancer;
+use crate::phases::PhaseRunner;
 use crate::tls::CertificateManager;
 
 /// 请求级上下文 — 在 Pingora 各阶段间传递
@@ -171,8 +174,6 @@ impl KongProxy {
             .unwrap_or("localhost")
             .to_string();
 
-        // Pingora 不直接提供 is_https() 方法
-        // 通过 digest 判断是否 TLS 连接
         let is_tls = session
             .digest()
             .map(|d| d.ssl_digest.is_some())
@@ -190,14 +191,67 @@ impl KongProxy {
             }
         }
 
+        // Pingora 0.8 的 SslDigest 不直接暴露 server_name 字段
+        // SNI 信息通过路由匹配中的 host 头间接获取
+        let sni: Option<String> = None;
+
         RequestContext {
             method,
             uri,
             host,
             scheme,
             headers,
-            sni: None, // TODO: 从 TLS session 获取
+            sni,
         }
+    }
+
+    /// 填充 RequestCtx 的请求快照（供 PDK 使用）
+    fn populate_request_ctx(session: &Session, ctx: &mut RequestCtx) {
+        let req = session.req_header();
+        ctx.request_method = req.method.as_str().to_string();
+        ctx.request_path = req.uri.path().to_string();
+        ctx.request_query_string = req.uri.query().unwrap_or("").to_string();
+
+        let is_tls = session
+            .digest()
+            .map(|d| d.ssl_digest.is_some())
+            .unwrap_or(false);
+        ctx.request_scheme = if is_tls { "https".to_string() } else { "http".to_string() };
+
+        // host 和 port
+        let host_header = req
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost");
+
+        if let Some(colon_pos) = host_header.rfind(':') {
+            let (h, p) = host_header.split_at(colon_pos);
+            ctx.request_host = h.to_string();
+            ctx.request_port = p[1..].parse().unwrap_or(if is_tls { 443 } else { 80 });
+        } else {
+            ctx.request_host = host_header.to_string();
+            ctx.request_port = if is_tls { 443 } else { 80 };
+        }
+
+        // 请求头快照
+        ctx.request_headers.clear();
+        for (name, value) in req.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                ctx.request_headers
+                    .insert(name.as_str().to_lowercase(), v.to_string());
+            }
+        }
+
+        // 客户端 IP
+        ctx.client_ip = session
+            .client_addr()
+            .map(|a| {
+                // 去掉端口部分
+                let s = a.to_string();
+                s.split(':').next().unwrap_or(&s).to_string()
+            })
+            .unwrap_or_default();
     }
 
     /// 解析上游地址
@@ -228,6 +282,45 @@ impl KongProxy {
         let addr = format!("{}:{}", service.host, service.port);
         let sni = service.host.clone();
         Ok((addr, use_tls, sni))
+    }
+
+    /// 发送短路响应（支持自定义 status + headers + body）
+    async fn send_short_circuit_response(
+        session: &mut Session,
+        ctx: &mut RequestCtx,
+    ) -> pingora_core::Result<bool> {
+        let status_code = ctx.exit_status.unwrap_or(200);
+        let body = ctx.exit_body.take();
+        let headers = ctx.exit_headers.take();
+
+        // 构造响应头
+        let body_bytes = body.as_deref().unwrap_or("").as_bytes();
+        let mut resp = ResponseHeader::build(status_code, Some(4))?;
+        resp.insert_header("content-length", body_bytes.len().to_string())?;
+        resp.insert_header("content-type", "application/json; charset=utf-8")?;
+        resp.insert_header("server", "kong-rust/0.1.0")?;
+
+        // 应用自定义响应头
+        if let Some(hdrs) = headers {
+            for (name, value) in hdrs {
+                if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                    if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
+                        resp.headers.insert(header_name, header_value);
+                    }
+                }
+            }
+        }
+
+        session.write_response_header(Box::new(resp), false).await?;
+        if !body_bytes.is_empty() {
+            session
+                .write_response_body(Some(Bytes::copy_from_slice(body_bytes)), true)
+                .await?;
+        } else {
+            session.write_response_body(None, true).await?;
+        }
+
+        Ok(true)
     }
 }
 
@@ -266,7 +359,6 @@ impl ProxyHttp for KongProxy {
         let route_match = match route_match {
             Some(rm) => rm,
             None => {
-                // 无匹配路由，返回 404
                 let _ = session.respond_error(404).await;
                 return Ok(true);
             }
@@ -290,7 +382,6 @@ impl ProxyHttp for KongProxy {
             }
         };
 
-        // 检查 Service 是否启用
         if !service.enabled {
             let _ = session.respond_error(503).await;
             return Ok(true);
@@ -306,7 +397,10 @@ impl ProxyHttp for KongProxy {
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
         ctx.plugin_ctx.service_id = route_match.service_id;
 
-        // 5. 解析插件链
+        // 5. 填充请求快照（供 PDK 读取真实数据）
+        Self::populate_request_ctx(session, &mut ctx.plugin_ctx);
+
+        // 6. 解析插件链
         let resolved_plugins = {
             let plugins = self.plugins.read().map_err(|_| {
                 pingora_core::Error::new_str("插件配置读取失败")
@@ -320,44 +414,31 @@ impl ProxyHttp for KongProxy {
             )
         };
 
-        // 6. 执行 rewrite 阶段
-        if let Err(e) = PluginExecutor::execute_phase(
-            &resolved_plugins,
-            kong_core::traits::Phase::Rewrite,
-            &mut ctx.plugin_ctx,
-        )
-        .await
-        {
+        // 7. 执行 rewrite 阶段
+        if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
             let _ = session.respond_error(500).await;
             return Ok(true);
         }
 
-        // 7. 检查短路
+        // 8. 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
-            let status = ctx.plugin_ctx.exit_status.unwrap_or(200);
-            let _ = session.respond_error(status).await;
-            return Ok(true);
+            // 保存插件链供 log 阶段使用
+            ctx.resolved_plugins = resolved_plugins;
+            return Self::send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
         }
 
-        // 8. 执行 access 阶段
-        if let Err(e) = PluginExecutor::execute_phase(
-            &resolved_plugins,
-            kong_core::traits::Phase::Access,
-            &mut ctx.plugin_ctx,
-        )
-        .await
-        {
+        // 9. 执行 access 阶段
+        if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
             let _ = session.respond_error(500).await;
             return Ok(true);
         }
 
-        // 9. 检查短路
+        // 10. 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
-            let status = ctx.plugin_ctx.exit_status.unwrap_or(200);
-            let _ = session.respond_error(status).await;
-            return Ok(true);
+            ctx.resolved_plugins = resolved_plugins;
+            return Self::send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
         }
 
         // 保存到上下文
@@ -381,7 +462,7 @@ impl ProxyHttp for KongProxy {
             pingora_core::Error::new_str("上游地址未设置")
         })?;
 
-        // 确保地址包含端口，不带端口时根据协议补全默认端口
+        // 确保地址包含端口
         let addr_with_port = if raw_addr.contains(':') {
             raw_addr.to_string()
         } else {
@@ -389,7 +470,7 @@ impl ProxyHttp for KongProxy {
             format!("{}:{}", raw_addr, default_port)
         };
 
-        // DNS 解析：将域名转为 IP:port，避免 HttpPeer::new 内部 unwrap panic
+        // DNS 解析
         let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&addr_with_port.as_str())
             .map_err(|e| {
                 tracing::error!("上游地址解析失败: {} ({})", addr_with_port, e);
@@ -407,15 +488,13 @@ impl ProxyHttp for KongProxy {
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
-        // 与 Kong 保持一致：上游 TLS 验证默认关闭
-        // 仅当 Service 显式设置 tls_verify = true 时才启用验证
+        // 上游 TLS 配置
         if ctx.upstream_tls {
             let service = ctx.service.as_ref();
             let tls_verify = service.and_then(|s| s.tls_verify).unwrap_or(false);
             peer.options.verify_cert = tls_verify;
             peer.options.verify_hostname = tls_verify;
 
-            // CA 证书信任链：当 tls_verify=true 且 Service 配置了 ca_certificates 时加载
             if tls_verify {
                 if let Some(ca_ids) = service.and_then(|s| s.ca_certificates.as_ref()) {
                     if let Ok(cas) = self.ca_certificates.read() {
@@ -435,7 +514,6 @@ impl ProxyHttp for KongProxy {
                 }
             }
 
-            // mTLS 客户端证书：当 Service 配置了 client_certificate 时加载
             if let Some(fk) = service.and_then(|s| s.client_certificate.as_ref()) {
                 if let Some(pair) = self.cert_manager.get_certificate_by_id(&fk.id) {
                     match (
@@ -466,13 +544,10 @@ impl ProxyHttp for KongProxy {
         // 1. preserve_host 处理
         if let Some(ref rm) = ctx.route_match {
             if rm.preserve_host {
-                // preserve_host=true：保持客户端原始 Host 头
                 if let Some(host) = session.req_header().headers.get("host") {
                     let _ = upstream_request.insert_header("host", host);
                 }
             } else {
-                // preserve_host=false：使用上游实际主机名
-                // 优先级：upstream.host_header > SNI（target 域名） > service.host:port
                 let host_header = if !ctx.upstream_sni.is_empty() {
                     ctx.upstream_sni.clone()
                 } else if let Some(ref service) = ctx.service {
@@ -518,7 +593,6 @@ impl ProxyHttp for KongProxy {
                         stripped.to_string()
                     };
 
-                    // 拼接 service path
                     let final_path = if let Some(ref service) = ctx.service {
                         if let Some(ref svc_path) = service.path {
                             let svc_path = svc_path.trim_end_matches('/');
@@ -534,7 +608,6 @@ impl ProxyHttp for KongProxy {
                         new_path
                     };
 
-                    // 保留 query string
                     let query = session.req_header().uri.query();
                     let new_uri = if let Some(q) = query {
                         format!("{}?{}", final_path, q)
@@ -560,23 +633,27 @@ impl ProxyHttp for KongProxy {
         Ok(())
     }
 
-    /// 上游响应处理
+    /// 上游响应头处理 — header_filter 阶段
     async fn upstream_response_filter(
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
+        // 填充响应快照到 RequestCtx
+        ctx.plugin_ctx.response_status = Some(upstream_response.status.as_u16());
+        ctx.plugin_ctx.response_headers.clear();
+        for (name, value) in upstream_response.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                ctx.plugin_ctx
+                    .response_headers
+                    .insert(name.as_str().to_lowercase(), v.to_string());
+            }
+        }
+
         // 执行 header_filter 阶段
-        // 需要临时 clone plugins 以避免同时借用 ctx 的不同字段
         let plugins = ctx.resolved_plugins.clone();
-        if let Err(e) = PluginExecutor::execute_phase(
-            &plugins,
-            kong_core::traits::Phase::HeaderFilter,
-            &mut ctx.plugin_ctx,
-        )
-        .await
-        {
+        if let Err(e) = PhaseRunner::run_header_filter(&plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("HeaderFilter 阶段执行失败: {}", e);
         }
 
@@ -602,6 +679,47 @@ impl ProxyHttp for KongProxy {
         Ok(())
     }
 
+    /// 响应体过滤 — body_filter 阶段
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora_core::Result<Option<std::time::Duration>> {
+        if ctx.resolved_plugins.is_empty() {
+            return Ok(None);
+        }
+
+        // body_filter 需要同步执行（Pingora 的 response_body_filter 是同步的）
+        // 使用 block_on 适配异步插件接口
+        if let Some(ref mut body_bytes) = body {
+            let plugins = ctx.resolved_plugins.clone();
+            // 在当前 tokio 运行时中阻塞执行
+            let handle = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = handle {
+                let mut body_clone = body_bytes.clone();
+                let result = handle.block_on(async {
+                    PhaseRunner::run_body_filter(
+                        &plugins,
+                        &mut ctx.plugin_ctx,
+                        &mut body_clone,
+                        end_of_stream,
+                    )
+                    .await
+                });
+
+                if let Err(e) = result {
+                    tracing::error!("BodyFilter 阶段执行失败: {}", e);
+                } else {
+                    *body_bytes = body_clone;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// 日志阶段
     async fn logging(
         &self,
@@ -609,7 +727,7 @@ impl ProxyHttp for KongProxy {
         error: Option<&pingora_core::Error>,
         ctx: &mut Self::CTX,
     ) {
-        // Access Log：写入独立文件（与 Kong/Nginx combined 格式类似）
+        // Access Log
         let req = session.req_header();
         let method = req.method.as_str();
         let uri = req.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
@@ -649,17 +767,10 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 同时输出到 error log（debug 级别，方便调试）
         tracing::debug!("access: {} {} {} -> {} upstream={}", host, method, uri, status, upstream);
 
-        // 执行插件 log 阶段
-        if let Err(e) = PluginExecutor::execute_phase(
-            &ctx.resolved_plugins,
-            kong_core::traits::Phase::Log,
-            &mut ctx.plugin_ctx,
-        )
-        .await
-        {
+        // 执行插件 log 阶段（总是执行，即使之前短路）
+        if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Log 阶段执行失败: {}", e);
         }
     }

@@ -152,7 +152,7 @@ impl PluginExecutor {
                 Phase::Response => plugin.handler.response(&plugin.config, ctx).await,
                 Phase::HeaderFilter => plugin.handler.header_filter(&plugin.config, ctx).await,
                 Phase::BodyFilter => {
-                    // body_filter 需要 body 参数，在 proxy 层单独处理
+                    // body_filter 需要 body 参数，使用 execute_body_filter 代替
                     Ok(())
                 }
                 Phase::Log => plugin.handler.log(&plugin.config, ctx).await,
@@ -163,6 +163,39 @@ impl PluginExecutor {
                     "插件 {} 在 {:?} 阶段执行失败: {}",
                     plugin.config.name,
                     phase,
+                    e
+                );
+                return Err(KongError::PluginError {
+                    plugin_name: plugin.config.name.clone(),
+                    message: e.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 执行 body_filter 阶段（需要额外的 body 和 end_of_stream 参数）
+    pub async fn execute_body_filter(
+        plugins: &[ResolvedPlugin],
+        ctx: &mut RequestCtx,
+        body: &mut bytes::Bytes,
+        end_of_stream: bool,
+    ) -> Result<()> {
+        for plugin in plugins {
+            if ctx.is_short_circuited() {
+                break;
+            }
+
+            let result = plugin
+                .handler
+                .body_filter(&plugin.config, ctx, body, end_of_stream)
+                .await;
+
+            if let Err(e) = result {
+                tracing::error!(
+                    "插件 {} 在 BodyFilter 阶段执行失败: {}",
+                    plugin.config.name,
                     e
                 );
                 return Err(KongError::PluginError {

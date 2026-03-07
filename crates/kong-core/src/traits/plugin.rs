@@ -33,6 +33,29 @@ pub struct RequestCtx {
     pub authenticated_credential: Option<serde_json::Value>,
     /// 认证后的消费者信息
     pub authenticated_consumer: Option<serde_json::Value>,
+
+    // ====== 请求快照字段（PDK 使用） ======
+
+    /// 请求方法
+    pub request_method: String,
+    /// 请求路径
+    pub request_path: String,
+    /// 请求 scheme（http/https）
+    pub request_scheme: String,
+    /// 请求 host
+    pub request_host: String,
+    /// 请求端口
+    pub request_port: u16,
+    /// 请求头快照
+    pub request_headers: std::collections::HashMap<String, String>,
+    /// 客户端 IP
+    pub client_ip: String,
+    /// 查询字符串
+    pub request_query_string: String,
+    /// 上游响应状态码（header_filter/log 阶段可用）
+    pub response_status: Option<u16>,
+    /// 上游响应头
+    pub response_headers: std::collections::HashMap<String, String>,
 }
 
 impl RequestCtx {
@@ -53,6 +76,16 @@ impl RequestCtx {
             response_headers_to_remove: Vec::new(),
             authenticated_credential: None,
             authenticated_consumer: None,
+            request_method: String::new(),
+            request_path: String::new(),
+            request_scheme: String::new(),
+            request_host: String::new(),
+            request_port: 0,
+            request_headers: std::collections::HashMap::new(),
+            client_ip: String::new(),
+            request_query_string: String::new(),
+            response_status: None,
+            response_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -146,6 +179,7 @@ pub trait PluginHandler: Send + Sync {
         _config: &PluginConfig,
         _ctx: &mut RequestCtx,
         _body: &mut Bytes,
+        _end_of_stream: bool,
     ) -> Result<()> {
         Ok(())
     }

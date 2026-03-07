@@ -346,25 +346,55 @@ impl Default for HealthChecker {
     }
 }
 
-/// 简单的 HTTP 健康检查请求
+/// 发送真正的 HTTP GET 请求进行健康检查
 async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
-    // 使用 TCP 连接简单检查（不引入额外 HTTP 客户端依赖）
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let addr = url
+    let url_without_scheme = url
         .strip_prefix("http://")
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .ok_or_else(|| "无效地址".to_string())?;
+        .unwrap_or(url);
 
-    let stream = TcpStream::connect(addr)
+    // 解析地址和路径
+    let (addr, path) = match url_without_scheme.find('/') {
+        Some(i) => (&url_without_scheme[..i], &url_without_scheme[i..]),
+        None => (url_without_scheme, "/"),
+    };
+
+    let mut stream = TcpStream::connect(addr)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 连接成功即视为 200（简化实现）
-    drop(stream);
-    Ok(200)
+    // 发送简单的 HTTP/1.1 GET 请求
+    let host = addr.split(':').next().unwrap_or(addr);
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: kong-rust-healthcheck/0.1\r\n\r\n",
+        path, host
+    );
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 读取响应状态行
+    let mut buf = vec![0u8; 1024];
+    let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("空响应".to_string());
+    }
+
+    let response = String::from_utf8_lossy(&buf[..n]);
+    // 解析 "HTTP/1.1 200 OK" 中的状态码
+    let status_str = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "无法解析 HTTP 响应状态".to_string())?;
+
+    status_str
+        .parse::<u16>()
+        .map_err(|e| format!("状态码解析失败: {}", e))
 }
 
 #[cfg(test)]

@@ -266,6 +266,34 @@
   - AdminBgService 在 Pingora runtime 的 start() 中 spawn refresher，避免临时 runtime 生命周期问题
   - _Requirements: R1, R3_
 
+## 阶段 8b：处理链路重构 + 功能补全 + 测试体系
+
+- [x] 8.9 PhaseRunner 抽象层 + body_filter 接入
+  - 新建 `crates/kong-proxy/src/phases.rs` — PhaseRunner 封装所有 Kong 阶段
+  - 修改 `crates/kong-core/src/traits/plugin.rs` — body_filter 增加 end_of_stream 参数、RequestCtx 增加请求/响应快照字段
+  - 修改 `crates/kong-plugin-system/src/lib.rs` — 新增 execute_body_filter 方法
+  - 重构 `crates/kong-proxy/src/lib.rs` — 使用 PhaseRunner、新增 response_body_filter()、修复短路响应（支持自定义 headers/body）、填充 RequestCtx 请求快照
+
+- [x] 8.10 修复 PDK 硬编码桩
+  - 重写 `crates/kong-lua-bridge/src/pdk/mod.rs` — 从 __kong_req_data 全局表读取真实请求数据
+  - kong.response.exit() 通过 __kong_short_circuited 等全局变量实现短路
+  - kong.service.request.set_header/clear_header 通过 __kong_upstream_headers_set/remove 传递
+  - sync_ctx_from_lua() 同步短路标志、上游请求头修改、响应头修改回 RequestCtx
+  - ngx.req/ngx.var 从 __kong_req_data 读取真实数据
+
+- [x] 8.11 补全负载均衡算法 + 健康检查集成
+  - 重写 `crates/kong-proxy/src/balancer.rs` — 实现 consistent-hashing（ketama 风格哈希环）、least-connections（加权最少连接）
+  - LoadBalancer 集成 HealthChecker — select() 跳过不健康目标
+  - 实现 increment_connections/decrement_connections 连接计数
+  - 实现 extract_hash_key 从请求上下文提取哈希 key
+  - 修复 `crates/kong-proxy/src/health.rs` — do_http_check 发送真正的 HTTP GET 请求
+
+- [x] 8.12 测试体系建设
+  - 新建 `crates/kong-proxy/tests/helpers/mod.rs` — TestPlugin、make_resolved_plugin 测试基础设施
+  - 新建 `crates/kong-proxy/tests/phase_chain.rs` — 10 个阶段链测试（短路、优先级、ctx.shared 传递等）
+  - 扩展 `crates/kong-lua-bridge/tests/lua_plugin_compat.rs` — 新增 20+ PDK 真实数据测试（验证不再硬编码）
+  - 修复 `crates/kong-admin/tests/admin_api_compat.rs` — 补全缺失的 proxy 和 refresh_tx 字段
+
 ## 阶段 9：Hybrid 模式和集群通信
 
 - [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动
