@@ -28,6 +28,7 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 async-trait = "0.1"
 bytes = "1"
 
@@ -48,11 +49,11 @@ moka = { version = "0.12", features = ["future", "sync"] }
 mlua = { version = "0.10", features = ["luajit", "async", "serialize"] }
 
 # Pingora
-pingora = "0.8"
-pingora-core = "0.8"
-pingora-proxy = "0.8"
-pingora-load-balancing = "0.8"
-pingora-cache = "0.8"
+pingora = { version = "0.8", features = ["openssl"] }
+pingora-core = { version = "0.8", features = ["openssl"] }
+pingora-proxy = { version = "0.8", features = ["openssl"] }
+pingora-load-balancing = { version = "0.8", features = ["openssl"] }
+pingora-cache = { version = "0.8", features = ["openssl"] }
 pingora-http = "0.8"
 
 # 工具

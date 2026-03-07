@@ -333,7 +333,21 @@ impl ProxyHttp for KongProxy {
             pingora_core::Error::new_str("上游地址未设置")
         })?;
 
-        let peer = HttpPeer::new(addr, ctx.upstream_tls, ctx.upstream_sni.clone());
+        let mut peer = HttpPeer::new(addr, ctx.upstream_tls, ctx.upstream_sni.clone());
+
+        // 与 Kong 保持一致：上游 TLS 验证默认关闭
+        // 仅当 Service 显式设置 tls_verify = true 时才启用验证
+        if ctx.upstream_tls {
+            let service = ctx.service.as_ref();
+            let tls_verify = service.and_then(|s| s.tls_verify).unwrap_or(false);
+            peer.options.verify_cert = tls_verify;
+            peer.options.verify_hostname = tls_verify;
+
+            // TODO: 当 tls_verify=true 时，从 Service.ca_certificates 加载 CA 构建信任链
+            // TODO: 支持 Service.tls_verify_depth
+            // TODO: 支持 Service.client_certificate (mTLS)
+        }
+
         Ok(Box::new(peer))
     }
 
