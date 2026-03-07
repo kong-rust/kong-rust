@@ -239,9 +239,16 @@ fn extract_column_value(row: &PgRow, col: &ColumnDef) -> Result<Value> {
             let val: Option<f64> = row
                 .try_get(db_col)
                 .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
-            Ok(val
-                .and_then(|v| serde_json::Number::from_f64(v).map(Value::Number))
-                .unwrap_or(Value::Null))
+            Ok(match val {
+                Some(v) if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 => {
+                    // 无小数部分时输出为整数，兼容 Rust 模型中的 i32/i64 字段
+                    Value::Number(serde_json::Number::from(v as i64))
+                }
+                Some(v) => serde_json::Number::from_f64(v)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            })
         }
         ColumnType::Boolean => {
             let val: Option<bool> = row

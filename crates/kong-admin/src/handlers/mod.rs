@@ -497,6 +497,45 @@ pub async fn list_nested_routes(
     }
 }
 
+/// POST /services/:service_id/routes
+pub async fn create_nested_route(
+    State(state): State<AdminState>,
+    Path(service_id_or_name): Path<String>,
+    Json(mut body): Json<Value>,
+) -> impl IntoResponse {
+    // 解析 service
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    // 注入 service FK
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "service".to_string(),
+            json!({"id": service.id.to_string()}),
+        );
+    }
+
+    let result = do_create::<Route>(&state.routes, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
 /// GET /upstreams/:upstream_id/targets
 pub async fn list_nested_targets(
     State(state): State<AdminState>,

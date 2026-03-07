@@ -24,6 +24,8 @@ pub struct LoadBalancer {
     algorithm: LbAlgorithm,
     /// Round-robin 索引
     rr_index: AtomicUsize,
+    /// Upstream 的 host_header 配置（用于 SNI 和 Host 头）
+    host_header: Option<String>,
 }
 
 impl LoadBalancer {
@@ -43,6 +45,7 @@ impl LoadBalancer {
             targets: bt,
             algorithm: upstream.algorithm.clone(),
             rr_index: AtomicUsize::new(0),
+            host_header: upstream.host_header.clone(),
         }
     }
 
@@ -81,6 +84,11 @@ impl LoadBalancer {
 
         // 不应到达这里
         Some(self.targets[0].address.clone())
+    }
+
+    /// 获取 upstream 配置的 host_header
+    pub fn host_header(&self) -> Option<String> {
+        self.host_header.clone()
     }
 
     /// 目标数量

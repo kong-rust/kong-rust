@@ -1489,6 +1489,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "http",
  "kong-config",
  "kong-core",

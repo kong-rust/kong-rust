@@ -23,3 +23,4 @@ pingora-load-balancing = { workspace = true }
 pingora-http = { workspace = true }
 uuid = { workspace = true }
 http = "1"
+chrono = { workspace = true }

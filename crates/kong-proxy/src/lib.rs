@@ -12,7 +12,8 @@ pub mod health;
 pub mod tls;
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::io::Write;
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -63,6 +64,8 @@ pub struct KongProxy {
     pub cert_manager: Arc<CertificateManager>,
     /// CA 证书列表（用于上游 TLS 验证）
     pub ca_certificates: Arc<RwLock<Vec<CaCertificate>>>,
+    /// Access log 文件写入器（None 表示 off/禁用）
+    pub access_log_writer: Option<Arc<Mutex<std::io::BufWriter<std::fs::File>>>>,
 }
 
 impl KongProxy {
@@ -81,6 +84,27 @@ impl KongProxy {
             plugins: Arc::new(RwLock::new(Vec::new())),
             cert_manager: Arc::new(cert_manager),
             ca_certificates: Arc::new(RwLock::new(ca_certificates)),
+            access_log_writer: None,
+        }
+    }
+
+    /// 初始化 access log 文件写入（路径为 "off" 时禁用）
+    pub fn init_access_log(&mut self, path: &str) {
+        if path == "off" {
+            return;
+        }
+        let log_path = std::path::Path::new(path);
+        if let Some(dir) = log_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => {
+                self.access_log_writer = Some(Arc::new(Mutex::new(std::io::BufWriter::new(file))));
+                tracing::info!("Access log 输出到: {}", path);
+            }
+            Err(e) => {
+                tracing::error!("Access log 文件打开失败: {} ({})", path, e);
+            }
         }
     }
 
@@ -110,6 +134,11 @@ impl KongProxy {
                     .iter()
                     .filter(|t| t.upstream.id == upstream.id)
                     .collect();
+                tracing::info!(
+                    "更新 upstream={} targets={}",
+                    upstream.name,
+                    upstream_targets.len()
+                );
                 let lb = LoadBalancer::new(upstream, &upstream_targets);
                 balancers.insert(upstream.name.clone(), lb);
             }
@@ -187,7 +216,9 @@ impl KongProxy {
         if let Ok(balancers) = self.balancers.read() {
             if let Some(lb) = balancers.get(&service.host) {
                 if let Some(addr) = lb.select() {
-                    let sni = service.host.clone();
+                    // SNI 优先级：upstream.host_header > target 地址的主机名部分
+                    let sni = lb.host_header()
+                        .unwrap_or_else(|| addr.split(':').next().unwrap_or(&addr).to_string());
                     return Ok((addr, use_tls, sni));
                 }
             }
@@ -346,11 +377,35 @@ impl ProxyHttp for KongProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Box<HttpPeer>> {
-        let addr = ctx.upstream_addr.as_deref().ok_or_else(|| {
+        let raw_addr = ctx.upstream_addr.as_deref().ok_or_else(|| {
             pingora_core::Error::new_str("上游地址未设置")
         })?;
 
-        let mut peer = HttpPeer::new(addr, ctx.upstream_tls, ctx.upstream_sni.clone());
+        // 确保地址包含端口，不带端口时根据协议补全默认端口
+        let addr_with_port = if raw_addr.contains(':') {
+            raw_addr.to_string()
+        } else {
+            let default_port = if ctx.upstream_tls { 443 } else { 80 };
+            format!("{}:{}", raw_addr, default_port)
+        };
+
+        // DNS 解析：将域名转为 IP:port，避免 HttpPeer::new 内部 unwrap panic
+        let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&addr_with_port.as_str())
+            .map_err(|e| {
+                tracing::error!("上游地址解析失败: {} ({})", addr_with_port, e);
+                pingora_core::Error::because(
+                    pingora_core::ErrorType::ConnectError,
+                    "上游地址解析失败",
+                    e,
+                )
+            })?
+            .next()
+            .ok_or_else(|| {
+                tracing::error!("上游地址无可用 IP: {}", addr_with_port);
+                pingora_core::Error::new_str("上游地址无可用 IP")
+            })?;
+
+        let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
         // 与 Kong 保持一致：上游 TLS 验证默认关闭
         // 仅当 Service 显式设置 tls_verify = true 时才启用验证
@@ -411,17 +466,27 @@ impl ProxyHttp for KongProxy {
         // 1. preserve_host 处理
         if let Some(ref rm) = ctx.route_match {
             if rm.preserve_host {
+                // preserve_host=true：保持客户端原始 Host 头
                 if let Some(host) = session.req_header().headers.get("host") {
                     let _ = upstream_request.insert_header("host", host);
                 }
-            } else if let Some(ref service) = ctx.service {
-                // 设置上游 Host 头
-                let host_header = if service.port == 80 || service.port == 443 {
-                    service.host.clone()
+            } else {
+                // preserve_host=false：使用上游实际主机名
+                // 优先级：upstream.host_header > SNI（target 域名） > service.host:port
+                let host_header = if !ctx.upstream_sni.is_empty() {
+                    ctx.upstream_sni.clone()
+                } else if let Some(ref service) = ctx.service {
+                    if service.port == 80 || service.port == 443 {
+                        service.host.clone()
+                    } else {
+                        format!("{}:{}", service.host, service.port)
+                    }
                 } else {
-                    format!("{}:{}", service.host, service.port)
+                    String::new()
                 };
-                let _ = upstream_request.insert_header("host", &host_header);
+                if !host_header.is_empty() {
+                    let _ = upstream_request.insert_header("host", &host_header);
+                }
             }
         }
 
@@ -540,11 +605,54 @@ impl ProxyHttp for KongProxy {
     /// 日志阶段
     async fn logging(
         &self,
-        _session: &mut Session,
-        _error: Option<&pingora_core::Error>,
+        session: &mut Session,
+        error: Option<&pingora_core::Error>,
         ctx: &mut Self::CTX,
     ) {
-        // 执行 log 阶段
+        // Access Log：写入独立文件（与 Kong/Nginx combined 格式类似）
+        let req = session.req_header();
+        let method = req.method.as_str();
+        let uri = req.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let host = req.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("-");
+        let remote_addr = session
+            .client_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let status = session
+            .response_written()
+            .map(|r| r.status.as_u16())
+            .unwrap_or(0);
+        let upstream = ctx.upstream_addr.as_deref().unwrap_or("-");
+        let user_agent = req.headers.get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+
+        let now = chrono::Utc::now().format("%d/%b/%Y:%H:%M:%S %z");
+
+        let log_line = if let Some(e) = error {
+            format!(
+                "{} - - [{}] \"{} {} HTTP/1.1\" {} - \"{}\" upstream={} error=\"{}\"\n",
+                remote_addr, now, method, uri, status, user_agent, upstream, e
+            )
+        } else {
+            format!(
+                "{} - - [{}] \"{} {} HTTP/1.1\" {} - \"{}\" upstream={}\n",
+                remote_addr, now, method, uri, status, user_agent, upstream
+            )
+        };
+
+        // 写入 access log 文件
+        if let Some(ref writer) = self.access_log_writer {
+            if let Ok(mut w) = writer.lock() {
+                let _ = w.write_all(log_line.as_bytes());
+                let _ = w.flush();
+            }
+        }
+
+        // 同时输出到 error log（debug 级别，方便调试）
+        tracing::debug!("access: {} {} {} -> {} upstream={}", host, method, uri, status, upstream);
+
+        // 执行插件 log 阶段
         if let Err(e) = PluginExecutor::execute_phase(
             &ctx.resolved_plugins,
             kong_core::traits::Phase::Log,

@@ -267,10 +267,13 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     tracing::info!("路由风格: {}", config.router_flavor);
 
     // 阶段 1：用临时 tokio runtime 做异步初始化（DB 连接、数据加载）
-    let (kong_proxy, admin_state, refresh_rx) = {
+    let (mut kong_proxy, admin_state, refresh_rx) = {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(init_proxy_and_admin(&config))?
     };
+
+    // 初始化 access log 独立文件
+    kong_proxy.init_access_log(&config.proxy_access_log);
 
     // 阶段 2：创建 Pingora Server
     let mut server = pingora::server::Server::new(None)?;

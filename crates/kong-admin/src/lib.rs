@@ -92,7 +92,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/routes/{id_or_name}",
             get(get_route).patch(update_route).put(upsert_route).delete(delete_route))
         // 嵌套: Service 下的 Routes
-        .route("/services/{service_id_or_name}/routes", get(list_nested_routes))
+        .route("/services/{service_id_or_name}/routes", get(list_nested_routes).post(create_nested_route))
         // Consumers
         .route("/consumers", get(list_consumers).post(create_consumer))
         .route("/consumers/{id_or_name}",
