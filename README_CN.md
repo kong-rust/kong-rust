@@ -22,6 +22,7 @@ Kong ���全球最流行的开源 API 网关，但它运行在 LuaJIT + Ope
 - **Lua 插件支持** — 通过 mlua + LuaJIT 运行全部 47 个 Kong 内置 Lua 插件
 - **负载均衡与健康检查** — 轮询、一致性哈希、主动/被动健康检查
 - **TLS 终止与 SNI** — 证书管理和基于 SNI 的路由
+- **L4 Stream 代理** — TCP/TLS Passthrough 四层代理，支持 SNI 和 source/dest CIDR 路由
 - **Kong Manager UI** — 兼容官方 Kong Manager 前端管理界面
 - **多数据源** — PostgreSQL 数据库模式或 db-less 声明式配置模式
 - **Hybrid 模式** — Control Plane / Data Plane 分离部署（规划中）
@@ -33,8 +34,8 @@ kong-server（主入口二进制）
  ├── kong-core          — 核心数据模型和 trait
  ├── kong-config        — 配置解析（kong.conf 格式）
  ├── kong-db            — PostgreSQL DAO + 缓存 + db-less + migration
- ├── kong-router        — 路由引擎（traditional + expressions）
- ├── kong-proxy         — Pingora 代理引擎 + 负载均衡 + 健康检查
+ ├── kong-router        — 路由引擎（traditional + expressions + L4 stream）
+ ├── kong-proxy         — Pingora 代理引擎（L7 HTTP + L4 Stream）+ 负载均衡 + 健康检查
  ├── kong-plugin-system — 插件注册/执行框架
  ├── kong-lua-bridge    — Lua 兼容层 + PDK + ngx.*
  ├── kong-admin         — Admin API（axum）
@@ -119,8 +120,9 @@ Kong-Rust 使用与 Kong 相同的 `kong.conf` 配置格式。完整配置项请
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `proxy_listen` | `0.0.0.0:8000` | 代理监听地址 |
+| `proxy_listen` | `0.0.0.0:8000` | HTTP 代理监听地址 |
 | `admin_listen` | `0.0.0.0:8001` | Admin API 监听地址 |
+| `stream_listen` | `off` | L4 Stream 代理监听（如 `0.0.0.0:9000`） |
 | `database` | `postgres` | 数据库模式（`postgres` 或 `off`） |
 | `pg_host` | `127.0.0.1` | PostgreSQL 主机 |
 | `pg_port` | `5432` | PostgreSQL 端口 |
@@ -165,6 +167,7 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 | 6. Admin API | 已完成 | 完整 CRUD、嵌套端点、Kong Manager 支持 |
 | 7. TLS | 已完成 | 证书管理、SNI 路由 |
 | 8. 集成测试 | 已完成 | 端到端测试、访问日志 |
+| 8c. Stream 代理 | 已完成 | L4 TCP/TLS Passthrough 代理、SNI/CIDR 路由 |
 | 9. Hybrid 模式 | 规划中 | CP/DP 集群通信 |
 
 ## 许可证

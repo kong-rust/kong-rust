@@ -22,6 +22,7 @@ Kong is the world's most popular open-source API gateway, but it runs on LuaJIT 
 - **Lua Plugin Support** — Run all 47 built-in Kong Lua plugins via mlua + LuaJIT
 - **Load Balancing & Health Checks** — Round-robin, consistent-hashing, active/passive health checks
 - **TLS Termination & SNI** — Certificate management with SNI-based routing
+- **L4 Stream Proxy** — TCP/TLS passthrough proxy with SNI-based and source/destination CIDR routing
 - **Kong Manager UI** — Works with the official Kong Manager frontend
 - **Multiple Data Sources** — PostgreSQL or db-less (declarative config) modes
 - **Hybrid Mode** — Control Plane / Data Plane separation (planned)
@@ -33,8 +34,8 @@ kong-server (binary entry point)
  ├── kong-core          — Core data models and traits
  ├── kong-config        — Configuration parser (kong.conf format)
  ├── kong-db            — PostgreSQL DAO + cache + db-less + migrations
- ├── kong-router        — Routing engine (traditional + expressions)
- ├── kong-proxy         — Pingora proxy engine + load balancing + health checks
+ ├── kong-router        — Routing engine (traditional + expressions + L4 stream)
+ ├── kong-proxy         — Pingora proxy engine (L7 HTTP + L4 stream) + load balancing + health checks
  ├── kong-plugin-system — Plugin registry and execution framework
  ├── kong-lua-bridge    — Lua compatibility layer + PDK + ngx.*
  ├── kong-admin         — Admin API (axum)
@@ -119,8 +120,9 @@ Key settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `proxy_listen` | `0.0.0.0:8000` | Proxy listener address |
+| `proxy_listen` | `0.0.0.0:8000` | HTTP proxy listener address |
 | `admin_listen` | `0.0.0.0:8001` | Admin API listener address |
+| `stream_listen` | `off` | L4 stream proxy listener (e.g., `0.0.0.0:9000`) |
 | `database` | `postgres` | Database mode (`postgres` or `off`) |
 | `pg_host` | `127.0.0.1` | PostgreSQL host |
 | `pg_port` | `5432` | PostgreSQL port |
@@ -165,6 +167,7 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 | 6. Admin API | Done | Full CRUD, nested endpoints, Kong Manager support |
 | 7. TLS | Done | Certificate management, SNI routing |
 | 8. Integration | Done | End-to-end testing, access logs |
+| 8c. Stream Proxy | Done | L4 TCP/TLS passthrough proxy, SNI/CIDR routing |
 | 9. Hybrid Mode | Planned | CP/DP cluster communication |
 
 ## License

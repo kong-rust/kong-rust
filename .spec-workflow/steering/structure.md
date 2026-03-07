@@ -60,12 +60,15 @@ kong-rust/
 │   │   └── src/
 │   │       ├── lib.rs            # Router 统一入口（根据 flavor 选择引擎）
 │   │       ├── traditional.rs    # 传统路由匹配（hosts/paths/methods/headers/snis 优先级）
-│   │       └── expressions.rs    # 表达式路由（ATC 表达式语法解析和匹配）
+│   │       ├── expressions.rs    # 表达式路由（ATC 表达式语法解析和匹配）
+│   │       └── stream.rs         # Stream (L4) 路由引擎（source/dest CIDR + SNI 匹配）
 │   │
 │   ├── kong-proxy/               # 基于 Pingora 的代理引擎
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs            # KongProxy（ProxyHttp trait 实现）
+│   │   │   ├── lib.rs            # KongProxy（ProxyHttp trait 实现，L7 HTTP 代理）
+│   │   │   ├── stream.rs         # KongStreamProxy（ServerApp trait 实现，L4 TCP/TLS 代理）
+│   │   │   ├── stream_tls.rs     # TLS ClientHello SNI 解析器（手动解析 TLS record）
 │   │   │   ├── balancer.rs       # 负载均衡器（round-robin/least-conn/consistent-hashing/latency）
 │   │   │   ├── health.rs         # 健康检查器（主动 + 被动）
 │   │   │   └── tls.rs            # TLS 证书管理（SNI 匹配，上游 mTLS）
