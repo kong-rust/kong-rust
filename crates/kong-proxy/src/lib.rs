@@ -7,7 +7,9 @@
 //! - 将请求转发到上游服务
 //! - 支持负载均衡和健康检查
 
+pub mod access_log;
 pub mod balancer;
+pub mod dns;
 pub mod health;
 pub mod phases;
 pub mod stream;
@@ -15,8 +17,7 @@ pub mod stream_tls;
 pub mod tls;
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -30,7 +31,9 @@ use kong_core::traits::RequestCtx;
 use kong_router::{RequestContext, RouteMatch, Router};
 use kong_plugin_system::{PluginExecutor, PluginRegistry, ResolvedPlugin};
 
+use crate::access_log::AccessLogWriter;
 use crate::balancer::LoadBalancer;
+use crate::dns::SharedDnsResolver;
 use crate::phases::PhaseRunner;
 use crate::tls::CertificateManager;
 
@@ -69,8 +72,10 @@ pub struct KongProxy {
     pub cert_manager: Arc<CertificateManager>,
     /// CA 证书列表（用于上游 TLS 验证）
     pub ca_certificates: Arc<RwLock<Vec<CaCertificate>>>,
-    /// Access log 文件写入器（None 表示 off/禁用）
-    pub access_log_writer: Option<Arc<Mutex<std::io::BufWriter<std::fs::File>>>>,
+    /// Access log 异步写入器（None 表示 off/禁用）
+    pub access_log_writer: Option<AccessLogWriter>,
+    /// 异步 DNS 解析器
+    pub dns_resolver: SharedDnsResolver,
 }
 
 impl KongProxy {
@@ -80,6 +85,7 @@ impl KongProxy {
         plugin_registry: PluginRegistry,
         cert_manager: CertificateManager,
         ca_certificates: Vec<CaCertificate>,
+        dns_resolver: SharedDnsResolver,
     ) -> Self {
         Self {
             router: Arc::new(RwLock::new(Router::new(routes, router_flavor))),
@@ -90,26 +96,7 @@ impl KongProxy {
             cert_manager: Arc::new(cert_manager),
             ca_certificates: Arc::new(RwLock::new(ca_certificates)),
             access_log_writer: None,
-        }
-    }
-
-    /// 初始化 access log 文件写入（路径为 "off" 时禁用）
-    pub fn init_access_log(&mut self, path: &str) {
-        if path == "off" {
-            return;
-        }
-        let log_path = std::path::Path::new(path);
-        if let Some(dir) = log_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            Ok(file) => {
-                self.access_log_writer = Some(Arc::new(Mutex::new(std::io::BufWriter::new(file))));
-                tracing::info!("Access log 输出到: {}", path);
-            }
-            Err(e) => {
-                tracing::error!("Access log 文件打开失败: {} ({})", path, e);
-            }
+            dns_resolver,
         }
     }
 
@@ -472,21 +459,18 @@ impl ProxyHttp for KongProxy {
             format!("{}:{}", raw_addr, default_port)
         };
 
-        // DNS 解析
-        let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&addr_with_port.as_str())
-            .map_err(|e| {
-                tracing::error!("上游地址解析失败: {} ({})", addr_with_port, e);
-                pingora_core::Error::because(
-                    pingora_core::ErrorType::ConnectError,
-                    "上游地址解析失败",
-                    e,
-                )
-            })?
-            .next()
-            .ok_or_else(|| {
-                tracing::error!("上游地址无可用 IP: {}", addr_with_port);
-                pingora_core::Error::new_str("上游地址无可用 IP")
-            })?;
+        // 异步 DNS 解析（IP 直连自动跳过 DNS 查询）
+        let (host, port) = if let Some(colon_pos) = addr_with_port.rfind(':') {
+            let h = &addr_with_port[..colon_pos];
+            let p: u16 = addr_with_port[colon_pos + 1..].parse().unwrap_or(80);
+            (h, p)
+        } else {
+            (addr_with_port.as_str(), 80u16)
+        };
+        let socket_addr = self.dns_resolver.resolve(host, port).await.map_err(|e| {
+            tracing::error!("上游地址解析失败: {} ({})", addr_with_port, e);
+            pingora_core::Error::new_str("上游地址解析失败")
+        })?;
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
@@ -761,12 +745,9 @@ impl ProxyHttp for KongProxy {
             )
         };
 
-        // 写入 access log 文件
+        // 异步写入 access log 文件
         if let Some(ref writer) = self.access_log_writer {
-            if let Ok(mut w) = writer.lock() {
-                let _ = w.write_all(log_line.as_bytes());
-                let _ = w.flush();
-            }
+            writer.write(log_line.clone());
         }
 
         tracing::debug!("access: {} {} {} -> {} upstream={}", host, method, uri, status, upstream);

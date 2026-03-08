@@ -67,6 +67,7 @@ hmac = "0.12"
 base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
 gethostname = "1"
+hickory-resolver = "0.25"
 
 # Workspace crates
 kong-core = { path = "crates/kong-core" }

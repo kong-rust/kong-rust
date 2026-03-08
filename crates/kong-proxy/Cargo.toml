@@ -24,3 +24,4 @@ pingora-http = { workspace = true }
 uuid = { workspace = true }
 http = "1"
 chrono = { workspace = true }
+hickory-resolver = { workspace = true }

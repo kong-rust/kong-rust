@@ -8,9 +8,8 @@
 //! 所有 stream_listen 端口统一注册为纯 TCP（add_tcp），由应用层决定 TLS 处理方式。
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use pingora_core::apps::ServerApp;
@@ -23,7 +22,9 @@ use uuid::Uuid;
 use kong_core::models::{Protocol, Service};
 use kong_router::stream::{StreamRequestContext, StreamRouter};
 
+use crate::access_log::AccessLogWriter;
 use crate::balancer::LoadBalancer;
+use crate::dns::SharedDnsResolver;
 use crate::stream_tls::{is_tls_handshake, parse_sni_from_client_hello, CLIENT_HELLO_PEEK_SIZE};
 use crate::tls::CertificateManager;
 
@@ -39,8 +40,10 @@ pub struct KongStreamProxy {
     pub cert_manager: Arc<CertificateManager>,
     /// 上游连接器
     pub connector: TransportConnector,
-    /// Access log 文件写入器
-    pub access_log_writer: Option<Arc<Mutex<std::io::BufWriter<std::fs::File>>>>,
+    /// Access log 异步写入器
+    pub access_log_writer: Option<AccessLogWriter>,
+    /// 异步 DNS 解析器
+    pub dns_resolver: SharedDnsResolver,
 }
 
 impl KongStreamProxy {
@@ -50,6 +53,7 @@ impl KongStreamProxy {
         balancers: Arc<RwLock<HashMap<String, LoadBalancer>>>,
         services: Arc<RwLock<HashMap<Uuid, Service>>>,
         cert_manager: Arc<CertificateManager>,
+        dns_resolver: SharedDnsResolver,
     ) -> Self {
         Self {
             stream_router: Arc::new(RwLock::new(StreamRouter::new(routes))),
@@ -58,31 +62,7 @@ impl KongStreamProxy {
             cert_manager,
             connector: TransportConnector::new(None),
             access_log_writer: None,
-        }
-    }
-
-    /// 初始化 access log 文件写入
-    pub fn init_access_log(&mut self, path: &str) {
-        if path == "off" {
-            return;
-        }
-        let log_path = std::path::Path::new(path);
-        if let Some(dir) = log_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            Ok(file) => {
-                self.access_log_writer =
-                    Some(Arc::new(Mutex::new(std::io::BufWriter::new(file))));
-                tracing::info!("Stream access log 输出到: {}", path);
-            }
-            Err(e) => {
-                tracing::error!("Stream access log 文件打开失败: {} ({})", path, e);
-            }
+            dns_resolver,
         }
     }
 
@@ -255,10 +235,7 @@ impl KongStreamProxy {
         );
 
         if let Some(ref writer) = self.access_log_writer {
-            if let Ok(mut w) = writer.lock() {
-                let _ = w.write_all(log_line.as_bytes());
-                let _ = w.flush();
-            }
+            writer.write(log_line);
         }
 
         tracing::debug!(
@@ -306,24 +283,19 @@ impl KongStreamProxy {
         addr: &str,
         _tls: bool,
     ) -> Result<Stream, Box<dyn std::error::Error + Send + Sync>> {
-        // DNS 解析
-        let addr_with_port = if addr.contains(':') {
-            addr.to_string()
+        // 异步 DNS 解析
+        let (host, port) = if let Some(colon_pos) = addr.rfind(':') {
+            let h = &addr[..colon_pos];
+            let p: u16 = addr[colon_pos + 1..].parse().unwrap_or(80);
+            (h, p)
         } else {
-            format!("{}:80", addr)
+            (addr, 80u16)
         };
 
-        let socket_addr: std::net::SocketAddr = addr_with_port
-            .parse()
-            .or_else(|_| {
-                std::net::ToSocketAddrs::to_socket_addrs(&addr_with_port.as_str())
-                    .map_err(|e| format!("上游地址解析失败 {}: {}", addr, e))
-                    .and_then(|mut iter| {
-                        iter.next()
-                            .ok_or_else(|| format!("上游地址无可用 IP: {}", addr))
-                    })
-            })
-            .map_err(|e: String| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
+        let socket_addr = self.dns_resolver.resolve(host, port).await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!("上游��址解析失败 {}: {}", addr, e))
+            })?;
 
         // 使用 BasicPeer 构建连接（纯 TCP，不做 TLS）
         let peer = BasicPeer::new(&socket_addr.to_string());

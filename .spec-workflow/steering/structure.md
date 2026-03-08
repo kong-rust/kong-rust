@@ -67,10 +67,13 @@ kong-rust/
 │   │   ├── Cargo.toml
 │   │   ├── src/
 │   │   │   ├── lib.rs            # KongProxy（ProxyHttp trait 实现，L7 HTTP 代理）
+│   │   │   ├── access_log.rs     # 异步 Access Log 写入器（mpsc channel + 后台 flush）
+│   │   │   ├── dns.rs            # 异步 DNS 解析器（hickory-resolver，带缓存）
 │   │   │   ├── stream.rs         # KongStreamProxy（ServerApp trait 实现，L4 TCP/TLS 代理）
 │   │   │   ├── stream_tls.rs     # TLS ClientHello SNI 解析器（手动解析 TLS record）
 │   │   │   ├── balancer.rs       # 负载均衡器（round-robin/least-conn/consistent-hashing/latency）
 │   │   │   ├── health.rs         # 健康检查器（主动 + 被动）
+│   │   │   ├── phases.rs         # PhaseRunner 插件阶段执行器
 │   │   │   └── tls.rs            # TLS 证书管理（SNI 匹配，上游 mTLS）
 │   │   └── tests/
 │   │       └── proxy_e2e.rs      # 代理端到端测试

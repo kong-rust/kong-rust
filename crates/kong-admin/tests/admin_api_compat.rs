@@ -22,12 +22,14 @@ fn create_test_app() -> axum::Router {
     let config = kong_config::KongConfig::default();
 
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
     let proxy = kong_proxy::KongProxy::new(
         &[],
         "traditional",
         kong_plugin_system::PluginRegistry::new(),
         kong_proxy::tls::CertificateManager::new(),
         vec![],
+        dns_resolver,
     );
 
     let state = AdminState {
@@ -143,12 +145,14 @@ fn create_test_app_with_data() -> axum::Router {
     let config = kong_config::KongConfig::default();
 
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
     let proxy = kong_proxy::KongProxy::new(
         &[],
         "traditional",
         kong_plugin_system::PluginRegistry::new(),
         kong_proxy::tls::CertificateManager::new(),
         vec![],
+        dns_resolver,
     );
 
     let state = AdminState {

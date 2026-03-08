@@ -273,8 +273,11 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     let (mut kong_proxy, mut admin_state, refresh_rx) =
         rt.block_on(init_proxy_and_admin(&config))?;
 
-    // 初始化 access log 独立文件
-    kong_proxy.init_access_log(&config.proxy_access_log);
+    // 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
+    let access_log_writer = rt.block_on(async {
+        kong_proxy::access_log::AccessLogWriter::new(&config.proxy_access_log)
+    });
+    kong_proxy.access_log_writer = access_log_writer.clone();
 
     // 阶段 2：创建 Pingora Server
     let mut server = pingora::server::Server::new(None)?;
@@ -332,8 +335,12 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
             kong_proxy.balancers.clone(),
             kong_proxy.services.clone(),
             kong_proxy.cert_manager.clone(),
+            kong_proxy.dns_resolver.clone(),
         );
-        stream_proxy.init_access_log(&config.proxy_stream_access_log);
+        // Stream access log 异步写入器
+        stream_proxy.access_log_writer = rt.block_on(async {
+            kong_proxy::access_log::AccessLogWriter::new(&config.proxy_stream_access_log)
+        });
 
         // 保存 stream_router 的 Arc 引用，后续传给 AdminState 用于热更新
         let stream_router = stream_proxy.stream_router.clone();
@@ -393,6 +400,9 @@ async fn init_proxy_and_admin(
     let node_id = uuid::Uuid::new_v4();
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // 创建共享异步 DNS 解析器
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(config));
+
     if config.is_dbless() {
         // db-less 模式：空路由表，内存存储
         let store = Arc::new(DblessStore::new());
@@ -408,6 +418,7 @@ async fn init_proxy_and_admin(
             plugin_registry,
             kong_proxy::tls::CertificateManager::new(),
             Vec::new(),
+            dns_resolver,
         );
 
         let admin_state = kong_admin::AdminState {
@@ -489,6 +500,7 @@ async fn init_proxy_and_admin(
             plugin_registry,
             cert_manager,
             ca_certificates_page.data.clone(),
+            dns_resolver,
         );
         kong_proxy.update_services(services_page.data);
         kong_proxy.update_upstreams(upstreams_page.data, targets_page.data);

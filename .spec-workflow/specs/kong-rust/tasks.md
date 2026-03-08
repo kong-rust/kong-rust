@@ -326,6 +326,24 @@
   - 修改 `crates/kong-admin/src/lib.rs` + `handlers/mod.rs` — 路由刷新时同步 rebuild StreamRouter
   - _Requirements: R1_
 
+## 阶段 8d：性能优化 — 异步 DNS + 异步日志
+
+- [x] 8.17 异步 DNS 解析（hickory-resolver）
+  - 新建 `crates/kong-proxy/src/dns.rs` — DnsResolver 封装 hickory-resolver，支持 IP 直连跳过、TTL 缓存、自定义 nameserver
+  - 修改 `crates/kong-proxy/src/lib.rs` — KongProxy 新增 dns_resolver 字段，upstream_peer() 使用异步 DNS
+  - 修改 `crates/kong-proxy/src/stream.rs` — KongStreamProxy 新增 dns_resolver 字段，connect_upstream() 使用异步 DNS
+  - 修改 `crates/kong-server/src/main.rs` — 创建共享 DnsResolver 注入两个代理
+  - 消除了 `std::net::ToSocketAddrs` 同步阻塞 tokio 工作线程的问题
+  - _Requirements: R1_
+
+- [x] 8.18 异步 Access Log 写入（mpsc channel + 后台 flush）
+  - 新建 `crates/kong-proxy/src/access_log.rs` — AccessLogWriter 通过 bounded channel 异步写入
+  - 热路径仅 try_send（无锁纳秒级），后台任务批量 recv + flush
+  - channel 满时丢弃日志（不反压请求处理）
+  - 删除 KongProxy::init_access_log() 和 KongStreamProxy::init_access_log()
+  - 修改 logging()/handle_connection() 使用异步写入
+  - _Requirements: R1_
+
 ## 阶段 9：Hybrid 模式和集群通信
 
 - [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动
