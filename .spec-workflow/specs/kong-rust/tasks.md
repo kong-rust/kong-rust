@@ -452,3 +452,40 @@
   - 新增 docker-build、docker-push、docker-run、docker-stop Make 目标
   - 支持 DOCKER_TAG 和 DOCKER_REGISTRY 变量
   - 文件：`Makefile`
+
+## 阶段 11：HTTP 代理性能优化
+
+- [x] 11.1 RouteMatch 类型优化（Opt-4）
+  - protocols 改为 Arc<Vec<String>>，path_handling 改为 PathHandling 枚举，route_name 改为 Arc<str>
+  - 消除每次路由匹配时的堆分配
+  - 文件：`crates/kong-router/src/lib.rs`, `crates/kong-router/src/traditional.rs`, `crates/kong-router/src/expressions.rs`
+
+- [x] 11.2 消除重复请求头解析（Opt-1）
+  - 合并 build_request_context() 和 populate_request_ctx() 为 populate_and_build_route_ctx()
+  - 单次头遍历同时填充 RequestCtx 和 RequestContext，消除约 20 次重复 String 分配
+  - 文件：`crates/kong-proxy/src/lib.rs`
+
+- [x] 11.3 路由匹配 LRU 缓存（Opt-2）
+  - TraditionalRouter 和 ExpressionsRouter 添加 moka::sync::Cache LRU 缓存
+  - 缓存键：(method, host_no_port, uri)，容量 1024
+  - 路由表 rebuild 时新实例自动创建新缓存（旧缓存随旧实例释放）
+  - 文件：`crates/kong-router/Cargo.toml`, `crates/kong-router/src/traditional.rs`, `crates/kong-router/src/expressions.rs`
+
+- [x] 11.4 插件链预计算 + Arc clone 消除（Opt-3 + Opt-5）
+  - KongProxy 添加 plugin_chains HashMap，在 update_plugins/update_routes 时预计算
+  - KongCtx.resolved_plugins 改为 Arc<Vec<ResolvedPlugin>>，clone 变为原子计数增加
+  - 文件：`crates/kong-proxy/src/lib.rs`
+
+- [x] 11.5 Service 超时应用到 HttpPeer（Opt-7）
+  - upstream_peer() 中设置 connect/read/write timeout
+  - 文件：`crates/kong-proxy/src/lib.rs`
+
+- [x] 11.6 大 body 落盘保护（Opt-6）
+  - 新建 SpillableBuffer：内存阈值 10MB，超过自动溢出到 tempfile
+  - KongCtx 的 request/response_body_buf 改为 Option<SpillableBuffer>
+  - 文件：`crates/kong-proxy/src/spillable_buffer.rs`, `crates/kong-proxy/src/lib.rs`
+
+- [x] 11.7 chunk 间隔超时保护（Opt-8）
+  - request_body_filter 中检查 body chunk 间隔，超过 60s 返回错误终止请求
+  - KongCtx 添加 last_body_chunk_at: Option<Instant>
+  - 文件：`crates/kong-proxy/src/lib.rs`

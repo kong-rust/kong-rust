@@ -90,8 +90,8 @@ fn test_route_matching_by_path() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("api-route".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("api-route")
     );
 
     // /web path should match web-route — /web 路径应匹配 web-route
@@ -106,8 +106,8 @@ fn test_route_matching_by_path() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("web-route".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("web-route")
     );
 }
 
@@ -146,8 +146,8 @@ fn test_route_matching_by_host() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("api-host".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("api-host")
     );
 }
 
@@ -187,8 +187,8 @@ fn test_route_matching_by_method() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("get-only".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("get-only")
     );
 
     // POST 请求
@@ -203,8 +203,8 @@ fn test_route_matching_by_method() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("post-only".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("post-only")
     );
 }
 
@@ -527,8 +527,8 @@ fn test_router_hot_update() {
     let result = router.find_route(&ctx);
     assert!(result.is_some());
     assert_eq!(
-        result.unwrap().route_name,
-        Some("route-a".to_string())
+        result.unwrap().route_name.as_deref(),
+        Some("route-a")
     );
 }
 

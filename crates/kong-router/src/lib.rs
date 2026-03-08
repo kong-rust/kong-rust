@@ -9,9 +9,10 @@ pub mod stream;
 pub mod traditional;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
-use kong_core::models::Route;
+use kong_core::models::{PathHandling, Route};
 
 /// Request context — fields extracted from the HTTP request for matching — 请求上下文 — 从 HTTP 请求中提取的匹配字段
 #[derive(Debug, Clone, Default)]
@@ -38,17 +39,17 @@ pub struct RouteMatch {
     /// Associated Service ID — 关联的 Service ID
     pub service_id: Option<Uuid>,
     /// Route name — 路由名称
-    pub route_name: Option<String>,
+    pub route_name: Option<Arc<str>>,
     /// Whether to strip the matched path prefix — 是否去除匹配的路径前缀
     pub strip_path: bool,
     /// Whether to preserve the original Host header — 是否保留原始 Host 头
     pub preserve_host: bool,
-    /// Path handling mode ("v0" / "v1") — 路径处理方式 ("v0" / "v1")
-    pub path_handling: String,
+    /// Path handling mode — 路径处理方式
+    pub path_handling: PathHandling,
     /// Matched path (used for strip_path) — 匹配的路径（用于 strip_path）
     pub matched_path: Option<String>,
     /// Protocol list — 协议列表
-    pub protocols: Vec<String>,
+    pub protocols: Arc<Vec<String>>,
     /// Whether to buffer the request body before forwarding — 是否在转发前缓冲请求体
     pub request_buffering: bool,
     /// Whether to buffer the response body before sending to client — 是否在发送给客户端前缓冲响应体

@@ -67,7 +67,7 @@ crates/
 |------|------|
 | `.spec-workflow/specs/kong-rust/requirements.md` | 9 个需求（R1-R9）：代理引擎、路由、Admin API、数据库、Lua 插件、配置、健康检查、TLS、Hybrid 模式 |
 | `.spec-workflow/specs/kong-rust/design.md` | 9 个组件设计：kong-core 到 kong-cluster 的详细接口和架构 |
-| `.spec-workflow/specs/kong-rust/tasks.md` | 9 个阶段的任务清单，含状态标记（`[x]` 已完成 / `[ ]` 待实现） |
+| `.spec-workflow/specs/kong-rust/tasks.md` | 15 个阶段（1-11）的任务清单，含状态标记（`[x]` 已完成 / `[ ]` 待实现） |
 
 ### 实现日志
 
@@ -75,7 +75,7 @@ crates/
 
 ### 进度概览
 
-- **阶段 1-8**：已完成（26 个任务），涵盖核心模型、配置、数据库、路由、代理、插件、Admin API、TLS、集成测试、日志文件输出
+- **阶段 1-8e, 10-11**：已完成（54 个任务），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化
 - **阶段 9**：待实现（7 个任务），Hybrid 模式 CP/DP 集群通信
 
 ## 强制要求：自动更新 Spec-Workflow

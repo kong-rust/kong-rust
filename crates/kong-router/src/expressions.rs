@@ -8,29 +8,35 @@
 //! - `http.host in "example.com", "api.example.com"`
 
 use regex::Regex;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{RequestContext, RouteMatch};
-use kong_core::models::Route;
+use kong_core::models::{PathHandling, Route};
+
+/// Default LRU cache capacity — LRU 缓存默认容量
+const ROUTE_CACHE_CAPACITY: u64 = 1024;
 
 /// Expression router — 表达式路由器
 pub struct ExpressionsRouter {
     /// Compiled expression routes (sorted by priority descending) — 已编译的表达式路由（按 priority 降序排列）
     routes: Vec<ExpressionRoute>,
+    /// LRU cache — LRU 缓存
+    cache: moka::sync::Cache<String, Option<RouteMatch>>,
 }
 
 /// Compiled expression route — 编译后的表达式路由
 struct ExpressionRoute {
     route_id: Uuid,
     service_id: Option<Uuid>,
-    route_name: Option<String>,
+    route_name: Option<Arc<str>>,
     priority: i64,
     /// Compiled expression — 编译后的表达式
     expression: CompiledExpression,
     strip_path: bool,
     preserve_host: bool,
-    path_handling: String,
-    protocols: Vec<String>,
+    path_handling: PathHandling,
+    protocols: Arc<Vec<String>>,
     request_buffering: bool,
     response_buffering: bool,
 }
@@ -81,16 +87,13 @@ impl ExpressionsRouter {
                 Some(ExpressionRoute {
                     route_id: route.id,
                     service_id,
-                    route_name: route.name.clone(),
+                    route_name: route.name.as_deref().map(Arc::from),
                     priority: route.priority.unwrap_or(0) as i64,
                     expression,
                     strip_path: route.strip_path,
                     preserve_host: route.preserve_host,
-                    path_handling: match &route.path_handling {
-                        kong_core::models::PathHandling::V0 => "v0".to_string(),
-                        kong_core::models::PathHandling::V1 => "v1".to_string(),
-                    },
-                    protocols,
+                    path_handling: route.path_handling.clone(),
+                    protocols: Arc::new(protocols),
                     request_buffering: route.request_buffering,
                     response_buffering: route.response_buffering,
                 })
@@ -107,11 +110,27 @@ impl ExpressionsRouter {
 
         Self {
             routes: expr_routes,
+            cache: moka::sync::Cache::new(ROUTE_CACHE_CAPACITY),
         }
     }
 
-    /// Match a request — 匹配请求
+    /// Match a request (with LRU cache) — 匹配请求（带 LRU 缓存）
     pub fn find_route(&self, ctx: &RequestContext) -> Option<RouteMatch> {
+        let host_lower = ctx.host.to_lowercase();
+        let host_no_port = host_lower.split(':').next().unwrap_or(&host_lower);
+        let cache_key = format!("{}\0{}\0{}", ctx.method, host_no_port, ctx.uri);
+
+        if let Some(cached) = self.cache.get(&cache_key) {
+            return cached;
+        }
+
+        let result = self.find_route_uncached(ctx);
+        self.cache.insert(cache_key, result.clone());
+        result
+    }
+
+    /// Actual route matching without cache — 实际路由匹配（无缓存）
+    fn find_route_uncached(&self, ctx: &RequestContext) -> Option<RouteMatch> {
         for route in &self.routes {
             if evaluate(&route.expression, ctx) {
                 return Some(RouteMatch {
@@ -122,7 +141,7 @@ impl ExpressionsRouter {
                     preserve_host: route.preserve_host,
                     path_handling: route.path_handling.clone(),
                     matched_path: None,
-                    protocols: route.protocols.clone(),
+                    protocols: Arc::clone(&route.protocols),
                     request_buffering: route.request_buffering,
                     response_buffering: route.response_buffering,
                 });

@@ -8,10 +8,11 @@
 
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{RequestContext, RouteMatch};
-use kong_core::models::Route;
+use kong_core::models::{PathHandling, Route};
 
 // ============ Match rule bit value definitions — 匹配规则位值定义 ============
 
@@ -41,7 +42,7 @@ struct ProcessedRoute {
     /// Associated Service ID — 关联的 Service ID
     service_id: Option<Uuid>,
     /// Route name — 路由名称
-    name: Option<String>,
+    name: Option<Arc<str>>,
 
     /// Match weight (number of specified match conditions) — 匹配权重（指定了多少个匹配条件）
     match_weight: u32,
@@ -86,9 +87,9 @@ struct ProcessedRoute {
     /// preserve_host setting — preserve_host 设置
     preserve_host: bool,
     /// path_handling setting — path_handling 设置
-    path_handling: String,
+    path_handling: PathHandling,
     /// Protocol list — 协议列表
-    protocols: Vec<String>,
+    protocols: Arc<Vec<String>>,
     /// Request buffering — 请求体缓冲
     request_buffering: bool,
     /// Response buffering — 响应体缓冲
@@ -121,6 +122,9 @@ struct Category {
 
 // ============ Traditional router — 传统路由器 ============
 
+/// Default LRU cache capacity for route matching — 路由匹配 LRU 缓存默认容量
+const ROUTE_CACHE_CAPACITY: u64 = 1024;
+
 /// Traditional routing engine — 传统路由匹配引擎
 pub struct TraditionalRouter {
     /// All processed routes — 所有已处理的路由
@@ -139,6 +143,8 @@ pub struct TraditionalRouter {
     /// sni -> route indices — sni -> 路由索引
     #[allow(dead_code)]
     sni_index: HashMap<String, Vec<usize>>,
+    /// LRU cache: (method, host_no_port, uri) -> Option<RouteMatch> — LRU 缓存
+    cache: moka::sync::Cache<String, Option<RouteMatch>>,
 }
 
 impl TraditionalRouter {
@@ -218,20 +224,34 @@ impl TraditionalRouter {
             path_index,
             method_index,
             sni_index,
+            cache: moka::sync::Cache::new(ROUTE_CACHE_CAPACITY),
         }
     }
 
-    /// Match a request — 匹配请求
+    /// Match a request (with LRU cache) — 匹配请求（带 LRU 缓存）
     pub fn find_route(&self, ctx: &RequestContext) -> Option<RouteMatch> {
-        let req_host = ctx.host.to_lowercase();
-        let req_host_no_port = req_host.split(':').next().unwrap_or(&req_host);
+        // Build cache key: method + "\0" + host_no_port + "\0" + uri — 构建缓存键
+        let host_lower = ctx.host.to_lowercase();
+        let host_no_port = host_lower.split(':').next().unwrap_or(&host_lower);
+        let cache_key = format!("{}\0{}\0{}", ctx.method, host_no_port, ctx.uri);
 
+        if let Some(cached) = self.cache.get(&cache_key) {
+            return cached;
+        }
+
+        let result = self.find_route_uncached(ctx, &host_lower, host_no_port);
+        self.cache.insert(cache_key, result.clone());
+        result
+    }
+
+    /// Actual route matching without cache — 实际路由匹配（无缓存）
+    fn find_route_uncached(&self, ctx: &RequestContext, req_host: &str, req_host_no_port: &str) -> Option<RouteMatch> {
         // Iterate categories (starting from highest weight) — 遍历 categories（从权重最高的开始）
         for category in &self.categories {
             for &route_idx in &category.routes {
                 let route = &self.routes[route_idx];
 
-                if self.match_route(route, ctx, &req_host, req_host_no_port) {
+                if self.match_route(route, ctx, req_host, req_host_no_port) {
                     // Calculate the matched path — 计算匹配的路径
                     let matched_path = self.find_matched_path(route, &ctx.uri);
 
@@ -243,7 +263,7 @@ impl TraditionalRouter {
                         preserve_host: route.preserve_host,
                         path_handling: route.path_handling.clone(),
                         matched_path,
-                        protocols: route.protocols.clone(),
+                        protocols: Arc::clone(&route.protocols),
                         request_buffering: route.request_buffering,
                         response_buffering: route.response_buffering,
                     });
@@ -554,7 +574,7 @@ fn process_route(route: &Route) -> Option<ProcessedRoute> {
     Some(ProcessedRoute {
         route_id: route.id,
         service_id,
-        name: route.name.clone(),
+        name: route.name.as_deref().map(Arc::from),
         match_weight,
         submatch_weight,
         match_rules,
@@ -572,11 +592,8 @@ fn process_route(route: &Route) -> Option<ProcessedRoute> {
         created_at: route.created_at,
         strip_path: route.strip_path,
         preserve_host: route.preserve_host,
-        path_handling: match &route.path_handling {
-            kong_core::models::PathHandling::V0 => "v0".to_string(),
-            kong_core::models::PathHandling::V1 => "v1".to_string(),
-        },
-        protocols,
+        path_handling: route.path_handling.clone(),
+        protocols: Arc::new(protocols),
         request_buffering: route.request_buffering,
         response_buffering: route.response_buffering,
     })
@@ -764,7 +781,7 @@ mod tests {
         };
 
         let result = router.find_route(&ctx).unwrap();
-        assert_eq!(result.route_name, Some("specific".to_string()));
+        assert_eq!(result.route_name.as_deref(), Some("specific"));
     }
 
     #[test]
@@ -782,7 +799,7 @@ mod tests {
         };
 
         let result = router.find_route(&ctx).unwrap();
-        assert_eq!(result.route_name, Some("long".to_string()));
+        assert_eq!(result.route_name.as_deref(), Some("long"));
     }
 
     #[test]

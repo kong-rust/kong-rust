@@ -74,6 +74,7 @@ kong-rust/
 │   │   │   ├── balancer.rs       # 负载均衡器（round-robin/least-conn/consistent-hashing/latency）
 │   │   │   ├── health.rs         # 健康检查器（主动 + 被动）
 │   │   │   ├── phases.rs         # PhaseRunner 插件阶段执行器
+│   │   │   ├── spillable_buffer.rs # 可溢出缓冲区（内存 + 磁盘 tempfile，防大 body OOM）
 │   │   │   └── tls.rs            # TLS 证书管理（SNI 匹配，上游 mTLS）
 │   │   └── tests/
 │   │       └── proxy_e2e.rs      # 代理端到端测试
@@ -157,7 +158,7 @@ kong-rust/
     ├── specs/kong-rust/          # 功能规格
     │   ├── requirements.md       # 需求文档（R1-R9）
     │   ├── design.md             # 设计文档（组件 1-9）
-    │   └── tasks.md              # 任务清单（阶段 1-9）
+    │   └── tasks.md              # 任务清单（阶段 1-11）
     ├── Implementation Logs/      # 已完成任务的实现日志
     ├── steering/                 # 项目导航文档
     │   ├── product.md            # 产品概述

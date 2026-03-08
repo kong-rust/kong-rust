@@ -34,6 +34,8 @@
 | **CLI** | `clap` | workspace | 命令行参数解析 |
 | **日志** | `tracing` + `tracing-subscriber` + `tracing-appender` | workspace | 结构化日志、追踪和文件输出 |
 | **错误处理** | `thiserror` / `anyhow` | workspace | 错误类型定义和传播 |
+| **DNS** | `hickory-resolver` | 0.25 | 异步 DNS 解析器（带缓存，替代系统 DNS） |
+| **临时文件** | `tempfile` | 3 | 大 body 缓冲溢出到磁盘（SpillableBuffer） |
 | **工具** | `uuid`, `regex`, `chrono`, `indexmap`, `rand`, `sha2`, `base64` | workspace | 通用工具库 |
 
 ### 应用架构
@@ -143,6 +145,15 @@ kong-server（入口）
 | `make dev-dbless` | db-less 模式启动，无需 docker |
 | `make dev-full` | 同时启动 kong-server（后台）+ kong-manager（前台） |
 
+**Docker：**
+
+| 命令 | 作用 |
+|------|------|
+| `make docker-build` | 构建 Docker 镜像（多阶段构建） |
+| `make docker-push` | 推送镜像到 Registry |
+| `make docker-run` | 运行 Docker 容器 |
+| `make docker-stop` | 停止 Docker 容器 |
+
 **清理：**
 
 | 命令 | 作用 |
@@ -173,13 +184,18 @@ kong-server（入口）
 ## 部署和分发
 
 - **目标平台**：Linux（主要）、macOS（开发）
-- **分发方式**：单一二进制文件（`kong-server`）
+- **分发方式**：单一二进制文件（`kong-server`）或 Docker 镜像
 - **安装要求**：PostgreSQL 15+（数据库模式），或无数据库（db-less 模式）
 - **配置文件**：`kong.conf.default`（开发默认配置，兼容 Kong 格式）
-- **启动方式**：
+- **���动方式**：
   - 开发：`make dev`（自动 bootstrap + 启动）或 `cargo run -- -c kong.conf.default`
   - 生产：`./target/release/kong-server -c /path/to/kong.conf`
+  - Docker：`make docker-build && make docker-run`（多阶段构建，兼容 Kong 官方镜像布局）
 - **数据库初始化**：`cargo run -- -c kong.conf.default db bootstrap`（必须在首次启动前执行）
+- **Docker**：
+  - `Dockerfile`：多阶段构建（builder + runtime Debian slim），兼容 Kong 官方用户/目录布局
+  - `docker-entrypoint.sh`：支持 Docker Secrets（`KONG_*_FILE` 环境变量）
+  - 端口：8000（HTTP 代理）、8443（HTTPS 代理）、8001（Admin API）、8444（Admin SSL）
 
 ## 技术约束
 

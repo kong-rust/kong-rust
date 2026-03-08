@@ -12,6 +12,7 @@ pub mod balancer;
 pub mod dns;
 pub mod health;
 pub mod phases;
+pub mod spillable_buffer;
 pub mod stream;
 pub mod stream_tls;
 pub mod tls;
@@ -35,6 +36,7 @@ use crate::access_log::AccessLogWriter;
 use crate::balancer::LoadBalancer;
 use crate::dns::SharedDnsResolver;
 use crate::phases::PhaseRunner;
+use crate::spillable_buffer::SpillableBuffer;
 use crate::tls::CertificateManager;
 
 /// Per-request context — passed between Pingora phases — 请求级上下文 — 在 Pingora 各阶段间传递
@@ -51,12 +53,14 @@ pub struct KongCtx {
     pub upstream_sni: String,
     /// Plugin context — 插件上下文
     pub plugin_ctx: RequestCtx,
-    /// Resolved plugin chain for the current request — 当前请求已解析的插件链
-    pub resolved_plugins: Vec<ResolvedPlugin>,
-    /// Request body buffer (when request_buffering=true) — 请求体缓冲区（request_buffering=true 时使用）
-    pub request_body_buf: Option<Vec<u8>>,
-    /// Response body buffer (when response_buffering=true) — 响应体缓冲区（response_buffering=true 时使用）
-    pub response_body_buf: Option<Vec<u8>>,
+    /// Resolved plugin chain for the current request (Arc for cheap clone) — 当前请求已解析的插件链（Arc 包装以便廉价 clone）
+    pub resolved_plugins: Arc<Vec<ResolvedPlugin>>,
+    /// Request body buffer (with spill-to-disk protection) — 请求体缓冲区（带落盘保护）
+    pub request_body_buf: Option<SpillableBuffer>,
+    /// Response body buffer (with spill-to-disk protection) — 响应体缓冲区（带落盘保护）
+    pub response_body_buf: Option<SpillableBuffer>,
+    /// Timestamp of last received body chunk (for timeout protection) — 最后收到 body chunk 的时间戳（用于超时保护）
+    pub last_body_chunk_at: Option<std::time::Instant>,
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
@@ -80,6 +84,8 @@ pub struct KongProxy {
     pub access_log_writer: Option<AccessLogWriter>,
     /// Async DNS resolver — 异步 DNS 解析器
     pub dns_resolver: SharedDnsResolver,
+    /// Pre-computed plugin chains: (route_id, service_id) -> sorted plugin list — 预计算插件链
+    pub plugin_chains: Arc<RwLock<HashMap<(Option<Uuid>, Option<Uuid>), Arc<Vec<ResolvedPlugin>>>>>,
 }
 
 impl KongProxy {
@@ -101,6 +107,7 @@ impl KongProxy {
             ca_certificates: Arc::new(RwLock::new(ca_certificates)),
             access_log_writer: None,
             dns_resolver,
+            plugin_chains: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -109,6 +116,7 @@ impl KongProxy {
         if let Ok(mut router) = self.router.write() {
             router.rebuild(routes);
         }
+        self.rebuild_plugin_chains();
     }
 
     /// Update service cache — 更新服务缓存
@@ -146,6 +154,48 @@ impl KongProxy {
         if let Ok(mut p) = self.plugins.write() {
             *p = plugins;
         }
+        self.rebuild_plugin_chains();
+    }
+
+    /// Pre-compute plugin chains for all (route_id, service_id) combinations — 预计算所有 (route_id, service_id) 组合的插件链
+    fn rebuild_plugin_chains(&self) {
+        let plugins = match self.plugins.read() {
+            Ok(p) => p.clone(),
+            Err(_) => return,
+        };
+
+        // Collect unique (route_id, service_id) pairs from plugin configs — 从插件配置中收集唯一的 (route_id, service_id) 组合
+        let mut keys: std::collections::HashSet<(Option<Uuid>, Option<Uuid>)> = std::collections::HashSet::new();
+        // Always include (None, None) for global plugins — 始终包含 (None, None) 用于全局插件
+        keys.insert((None, None));
+        for plugin in &plugins {
+            let route_id = plugin.route.as_ref().map(|fk| fk.id);
+            let service_id = plugin.service.as_ref().map(|fk| fk.id);
+            keys.insert((route_id, service_id));
+            // Also include individual route/service combos — 也包含单独的 route/service 组合
+            if route_id.is_some() {
+                keys.insert((route_id, None));
+            }
+            if service_id.is_some() {
+                keys.insert((None, service_id));
+            }
+        }
+
+        let mut chains = HashMap::new();
+        for (route_id, service_id) in keys {
+            let resolved = PluginExecutor::resolve_plugins(
+                &self.plugin_registry,
+                &plugins,
+                route_id,
+                service_id,
+                None, // consumer_id unknown at precompute time — 预计算时 consumer_id 未知
+            );
+            chains.insert((route_id, service_id), Arc::new(resolved));
+        }
+
+        if let Ok(mut pc) = self.plugin_chains.write() {
+            *pc = chains;
+        }
     }
 
     /// Hot-reload CA certificate list — 热更新 CA 证书列表
@@ -155,96 +205,70 @@ impl KongProxy {
         }
     }
 
-    /// Build RequestContext from request — 根据请求构建 RequestContext
-    fn build_request_context(session: &Session) -> RequestContext {
+    /// Populate RequestCtx and build RequestContext in a single header scan — 单次头遍历同时填充 RequestCtx 和构建 RequestContext
+    fn populate_and_build_route_ctx(session: &Session, ctx: &mut RequestCtx) -> RequestContext {
         let req = session.req_header();
         let method = req.method.as_str().to_string();
-        let uri = req.uri.path().to_string();
-        let host = req
-            .headers
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost")
-            .to_string();
+        let uri_path = req.uri.path().to_string();
+        let query_string = req.uri.query().unwrap_or("").to_string();
 
         let is_tls = session
             .digest()
             .map(|d| d.ssl_digest.is_some())
             .unwrap_or(false);
-        let scheme = if is_tls {
-            "https".to_string()
-        } else {
-            "http".to_string()
-        };
+        let scheme = if is_tls { "https".to_string() } else { "http".to_string() };
 
-        let mut headers = HashMap::new();
-        for (name, value) in req.headers.iter() {
-            if let Ok(v) = value.to_str() {
-                headers.insert(name.as_str().to_lowercase(), v.to_string());
-            }
-        }
-
-        // Pingora 0.8 SslDigest does not directly expose the server_name field — Pingora 0.8 的 SslDigest 不直接暴露 server_name 字段
-        // SNI info is obtained indirectly via the host header during route matching — SNI 信息通过路由匹配中的 host 头间接获取
-        let sni: Option<String> = None;
-
-        RequestContext {
-            method,
-            uri,
-            host,
-            scheme,
-            headers,
-            sni,
-        }
-    }
-
-    /// Populate RequestCtx request snapshot (for PDK use) — 填充 RequestCtx 的请求快照（供 PDK 使用）
-    fn populate_request_ctx(session: &Session, ctx: &mut RequestCtx) {
-        let req = session.req_header();
-        ctx.request_method = req.method.as_str().to_string();
-        ctx.request_path = req.uri.path().to_string();
-        ctx.request_query_string = req.uri.query().unwrap_or("").to_string();
-
-        let is_tls = session
-            .digest()
-            .map(|d| d.ssl_digest.is_some())
-            .unwrap_or(false);
-        ctx.request_scheme = if is_tls { "https".to_string() } else { "http".to_string() };
-
-        // Host and port — host 和 port
         let host_header = req
             .headers
             .get("host")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("localhost");
 
-        if let Some(colon_pos) = host_header.rfind(':') {
+        // Parse host and port from Host header — 从 Host 头解析 host 和 port
+        let (host_no_port, port) = if let Some(colon_pos) = host_header.rfind(':') {
             let (h, p) = host_header.split_at(colon_pos);
-            ctx.request_host = h.to_string();
-            ctx.request_port = p[1..].parse().unwrap_or(if is_tls { 443 } else { 80 });
+            (h.to_string(), p[1..].parse().unwrap_or(if is_tls { 443 } else { 80 }))
         } else {
-            ctx.request_host = host_header.to_string();
-            ctx.request_port = if is_tls { 443 } else { 80 };
-        }
+            (host_header.to_string(), if is_tls { 443 } else { 80 })
+        };
 
-        // Request headers snapshot — 请求头快照
+        // Single header scan — build both RequestCtx.request_headers and route headers — 单次头遍历 — 同时构建 RequestCtx.request_headers 和路由匹配 headers
+        let mut headers = HashMap::new();
         ctx.request_headers.clear();
         for (name, value) in req.headers.iter() {
             if let Ok(v) = value.to_str() {
-                ctx.request_headers
-                    .insert(name.as_str().to_lowercase(), v.to_string());
+                let key = name.as_str().to_lowercase();
+                let val = v.to_string();
+                ctx.request_headers.insert(key.clone(), val.clone());
+                headers.insert(key, val);
             }
         }
+
+        // Fill RequestCtx fields — 填充 RequestCtx 字段
+        ctx.request_method = method.clone();
+        ctx.request_path = uri_path.clone();
+        ctx.request_query_string = query_string;
+        ctx.request_scheme = scheme.clone();
+        ctx.request_host = host_no_port;
+        ctx.request_port = port;
 
         // Client IP — 客户端 IP
         ctx.client_ip = session
             .client_addr()
             .map(|a| {
-                // Strip the port part — 去掉端口部分
                 let s = a.to_string();
                 s.split(':').next().unwrap_or(&s).to_string()
             })
             .unwrap_or_default();
+
+        RequestContext {
+            method,
+            uri: uri_path,
+            host: host_header.to_string(),
+            scheme,
+            headers,
+            sni: None,
+        }
     }
 
     /// Resolve upstream address — 解析上游地址
@@ -329,9 +353,10 @@ impl ProxyHttp for KongProxy {
             upstream_tls: false,
             upstream_sni: String::new(),
             plugin_ctx: RequestCtx::new(),
-            resolved_plugins: Vec::new(),
+            resolved_plugins: Arc::new(Vec::new()),
             request_body_buf: None,
             response_body_buf: None,
+            last_body_chunk_at: None,
         }
     }
 
@@ -341,9 +366,10 @@ impl ProxyHttp for KongProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<bool> {
-        // 1. Route matching — 路由匹配
-        let req_ctx = Self::build_request_context(session);
+        // 1. Populate request context + build route matching context (single header scan) — 填充请求上下文 + 构建路由匹配上下文（单次头遍历）
+        let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx);
 
+        // 2. Route matching — 路由匹配
         let route_match = {
             let router = self.router.read().map_err(|_| {
                 pingora_core::Error::new_str("路由器读取失败")
@@ -359,7 +385,7 @@ impl ProxyHttp for KongProxy {
             }
         };
 
-        // 2. Find Service — 查找 Service
+        // 3. Find Service — 查找 Service
         let service = if let Some(service_id) = route_match.service_id {
             let services = self.services.read().map_err(|_| {
                 pingora_core::Error::new_str("服务缓存读取失败")
@@ -382,31 +408,33 @@ impl ProxyHttp for KongProxy {
             return Ok(true);
         }
 
-        // 3. Resolve upstream address — 解析上游地址
+        // 4. Resolve upstream address — 解析上游地址
         let (upstream_addr, upstream_tls, upstream_sni) =
             self.resolve_upstream(&service).map_err(|_| {
                 pingora_core::Error::new_str("上游解析失败")
             })?;
 
-        // 4. Set up plugin context — 设置插件上下文
+        // 5. Set up plugin context — 设置插件上下文
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
         ctx.plugin_ctx.service_id = route_match.service_id;
 
-        // 5. Populate request snapshot (for PDK to read actual data) — 填充请求快照（供 PDK 读取真实数据）
-        Self::populate_request_ctx(session, &mut ctx.plugin_ctx);
-
-        // 6. Resolve plugin chain — 解析插件链
+        // 6. Resolve plugin chain (from pre-computed cache) — 解析插件链（从预计算缓存）
         let resolved_plugins = {
-            let plugins = self.plugins.read().map_err(|_| {
-                pingora_core::Error::new_str("插件配置读取失败")
+            let key = (Some(route_match.route_id), route_match.service_id);
+            let chains = self.plugin_chains.read().map_err(|_| {
+                pingora_core::Error::new_str("插件链缓存读取失败")
             })?;
-            PluginExecutor::resolve_plugins(
-                &self.plugin_registry,
-                &plugins,
-                Some(route_match.route_id),
-                route_match.service_id,
-                None, // consumer_id is determined after auth plugins execute — consumer_id 在认证插件执行后确定
-            )
+            chains.get(&key).cloned().unwrap_or_else(|| {
+                // Fallback: compute at runtime if no pre-computed chain — 回退：如果没有预计算链则运行时计算
+                let plugins = self.plugins.read().unwrap_or_else(|p| p.into_inner());
+                Arc::new(PluginExecutor::resolve_plugins(
+                    &self.plugin_registry,
+                    &plugins,
+                    Some(route_match.route_id),
+                    route_match.service_id,
+                    None,
+                ))
+            })
         };
 
         // 7. Execute rewrite phase — 执行 rewrite 阶段
@@ -479,6 +507,13 @@ impl ProxyHttp for KongProxy {
         })?;
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
+
+        // Apply Service timeouts — 应用 Service 超时设置
+        if let Some(ref service) = ctx.service {
+            peer.options.connection_timeout = Some(std::time::Duration::from_millis(service.connect_timeout as u64));
+            peer.options.read_timeout = Some(std::time::Duration::from_millis(service.read_timeout as u64));
+            peer.options.write_timeout = Some(std::time::Duration::from_millis(service.write_timeout as u64));
+        }
 
         // Upstream TLS configuration — 上游 TLS 配置
         if ctx.upstream_tls {
@@ -641,16 +676,26 @@ impl ProxyHttp for KongProxy {
             return Ok(());
         }
 
-        // Collect chunks into buffer, release all at end_of_stream — 收集 chunk 到缓冲区，end_of_stream 时一次性释放
+        // Check chunk interval timeout (60s, similar to nginx client_body_timeout) — 检查 chunk 间隔超时（60 秒，类似 nginx 的 client_body_timeout）
+        let now = std::time::Instant::now();
+        if let Some(last_at) = ctx.last_body_chunk_at {
+            if now.duration_since(last_at).as_secs() > 60 {
+                tracing::warn!("请求体 chunk 间隔超时 (>60s)，终止请求");
+                return Err(pingora_core::Error::new_str("client body timeout"));
+            }
+        }
+
+        // Collect chunks into spillable buffer, release all at end_of_stream — 收集 chunk 到可溢出缓冲区，end_of_stream 时一次性释放
         if let Some(data) = body.take() {
-            let buf = ctx.request_body_buf.get_or_insert_with(Vec::new);
-            buf.extend_from_slice(&data);
+            ctx.last_body_chunk_at = Some(now);
+            let buf = ctx.request_body_buf.get_or_insert_with(SpillableBuffer::new);
+            buf.extend(&data);
         }
 
         if end_of_stream {
             // Release the buffered body — 释放缓冲的请求体
             if let Some(buf) = ctx.request_body_buf.take() {
-                *body = Some(Bytes::from(buf));
+                *body = Some(Bytes::from(buf.finish()));
             }
         }
         // When not end_of_stream, body remains None — suppress forwarding — 非 end_of_stream 时 body 保持 None — 抑制转发
@@ -716,16 +761,16 @@ impl ProxyHttp for KongProxy {
         let buffering = ctx.route_match.as_ref().map(|rm| rm.response_buffering).unwrap_or(true);
 
         if buffering {
-            // Collect chunks into buffer — 收集 chunk 到缓冲区
+            // Collect chunks into spillable buffer — 收集 chunk 到可溢出缓冲区
             if let Some(data) = body.take() {
-                let buf = ctx.response_body_buf.get_or_insert_with(Vec::new);
-                buf.extend_from_slice(&data);
+                let buf = ctx.response_body_buf.get_or_insert_with(SpillableBuffer::new);
+                buf.extend(&data);
             }
 
             if end_of_stream {
                 // Release the buffered body — 释放缓冲的响应体
                 if let Some(buf) = ctx.response_body_buf.take() {
-                    *body = Some(Bytes::from(buf));
+                    *body = Some(Bytes::from(buf.finish()));
                 }
             }
             // When not end_of_stream, body remains None — suppress sending to client — 非 end_of_stream 时 body 保持 None — 抑制发送

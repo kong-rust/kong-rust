@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 indexmap = { workspace = true }
 uuid = { workspace = true }
+moka = { workspace = true }
