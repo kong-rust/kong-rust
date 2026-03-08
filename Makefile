@@ -157,10 +157,11 @@ dev-full:
 
 DOCKER_TAG ?= kong-rust:latest
 DOCKER_REGISTRY ?=
+DOCKER_PLATFORM ?= linux/amd64
 
-# 构建 Docker 镜像
+# 构建 Docker 镜像（默认 linux/amd64，适配 x86 服务器）
 docker-build:
-	docker build -t $(DOCKER_TAG) .
+	docker buildx build --platform $(DOCKER_PLATFORM) -t $(DOCKER_TAG) --load .
 
 # 推送 Docker 镜像
 docker-push:
