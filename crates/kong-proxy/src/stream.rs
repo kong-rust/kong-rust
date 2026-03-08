@@ -46,6 +46,14 @@ pub struct KongStreamProxy {
     pub dns_resolver: SharedDnsResolver,
 }
 
+/// Proxy pipeline result for access log — 代理流水线结果，用于 access log
+struct StreamProxyResult {
+    status: &'static str,
+    mode: &'static str,
+    route_label: Option<String>,
+    upstream: Option<String>,
+}
+
 impl KongStreamProxy {
     /// Create Stream proxy — 创建 Stream 代理
     pub fn new(
@@ -130,105 +138,24 @@ impl KongStreamProxy {
             sni: sni.clone(),
         };
 
-        // 4. Route matching — 路由匹配
-        let route_match = {
-            let router = match self.stream_router.read() {
-                Ok(r) => r,
-                Err(_) => {
-                    tracing::error!("Stream 路由器读取失败");
-                    return;
-                }
-            };
-            router.find_route(&ctx)
-        };
-
-        let route_match = match route_match {
-            Some(rm) => rm,
-            None => {
-                tracing::debug!(
-                    "Stream 连接无匹配路由: {} sni={:?}",
-                    remote_addr,
-                    sni
-                );
-                return;
-            }
-        };
-
-        // 5. Find Service — 查找 Service
-        let service = match route_match.service_id {
-            Some(service_id) => {
-                let services = match self.services.read() {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                services.get(&service_id).cloned()
-            }
-            None => None,
-        };
-
-        let service = match service {
-            Some(s) if s.enabled => s,
-            _ => {
-                tracing::debug!("Stream 路由 {} 无有效 Service", route_match.route_id);
-                return;
-            }
-        };
-
-        // 6. Resolve upstream address — 解析上游地址
-        let (upstream_addr, upstream_tls) = match self.resolve_upstream(&service) {
-            Some(r) => r,
-            None => {
-                tracing::error!("Stream 上游解析失败: {}", service.host);
-                return;
-            }
-        };
-
-        // 7. Determine proxy mode and execute — 判断代理模式并执行
-        let is_passthrough = route_match
-            .protocols
-            .iter()
-            .any(|p| matches!(p, Protocol::TlsPassthrough));
-
-        let result = if is_passthrough {
-            // TLS Passthrough: forward encrypted data as-is — 直接透传加密数据
-            self.proxy_passthrough(downstream, &upstream_addr).await
-        } else if is_tls && route_match.protocols.iter().any(|p| matches!(p, Protocol::Tls)) {
-            // TLS Termination: forward after terminating TLS — 终止 TLS 后转发
-            // Current simplified implementation: treated as TCP passthrough — 当前简化实现：作为 TCP 透传
-            // TODO: 实现完整 TLS termination（SslAcceptor + CertificateManager）
-            tracing::warn!(
-                "TLS Termination 模式暂作为 TCP 透传处理 (route={})",
-                route_match.route_id
-            );
-            self.proxy_passthrough(downstream, &upstream_addr).await
-        } else {
-            // TCP: plaintext bidirectional forwarding — 明文双向转发
-            self.proxy_tcp(downstream, &upstream_addr, upstream_tls)
-                .await
-        };
+        // Execute proxy pipeline, collect result for unified access log — 执行代理流水线，收集结果用于统一 access log
+        let proxy_result = self.do_proxy(downstream, &ctx, is_tls).await;
 
         let elapsed = start.elapsed();
-        let status = if result.is_ok() { "OK" } else { "ERR" };
+        let mode = if is_tls { proxy_result.mode } else { "tcp" };
+        let status = proxy_result.status;
+        let route_label = proxy_result.route_label.as_deref().unwrap_or("-");
+        let upstream = proxy_result.upstream.as_deref().unwrap_or("-");
 
-        // 8. Access Log
+        // Access Log — 写入 access log
         let now = chrono::Utc::now().format("%d/%b/%Y:%H:%M:%S %z");
-        let mode = if is_passthrough {
-            "tls_passthrough"
-        } else if is_tls {
-            "tls"
-        } else {
-            "tcp"
-        };
         let log_line = format!(
             "{} [{}] {} {} -> {} sni={} elapsed={}ms status={}\n",
             remote_addr,
             now,
             mode,
-            route_match
-                .route_name
-                .as_deref()
-                .unwrap_or(&route_match.route_id.to_string()),
-            upstream_addr,
+            route_label,
+            upstream,
             sni.as_deref().unwrap_or("-"),
             elapsed.as_millis(),
             status,
@@ -242,14 +169,126 @@ impl KongStreamProxy {
             "stream: {} {} -> {} sni={} {}ms {}",
             mode,
             remote_addr,
-            upstream_addr,
+            upstream,
             sni.as_deref().unwrap_or("-"),
             elapsed.as_millis(),
             status,
         );
+    }
 
-        if let Err(e) = result {
-            tracing::debug!("Stream 代理错误: {} -> {} : {}", remote_addr, upstream_addr, e);
+    /// Execute the proxy pipeline (route → service → upstream → forward) — 执行代理流水线（路由 → 服务 → 上游 → 转发）
+    async fn do_proxy(
+        &self,
+        downstream: Stream,
+        ctx: &StreamRequestContext,
+        is_tls: bool,
+    ) -> StreamProxyResult {
+        // 1. Route matching — 路由匹配
+        let route_match = {
+            let router = match self.stream_router.read() {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::error!("Stream 路由器读取失败");
+                    return StreamProxyResult {
+                        status: "ROUTER_ERR", mode: if is_tls { "tls" } else { "tcp" },
+                        route_label: None, upstream: None,
+                    };
+                }
+            };
+            router.find_route(ctx)
+        };
+
+        let route_match = match route_match {
+            Some(rm) => rm,
+            None => {
+                tracing::debug!("Stream 连接无匹配路由: sni={:?}", ctx.sni);
+                return StreamProxyResult {
+                    status: "NO_ROUTE", mode: if is_tls { "tls" } else { "tcp" },
+                    route_label: None, upstream: None,
+                };
+            }
+        };
+
+        let route_label = Some(
+            route_match.route_name.clone()
+                .unwrap_or_else(|| route_match.route_id.to_string()),
+        );
+
+        // 2. Find Service — 查找 Service
+        let service = match route_match.service_id {
+            Some(service_id) => {
+                let services = match self.services.read() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return StreamProxyResult {
+                            status: "SVC_ERR", mode: if is_tls { "tls" } else { "tcp" },
+                            route_label, upstream: None,
+                        };
+                    }
+                };
+                services.get(&service_id).cloned()
+            }
+            None => None,
+        };
+
+        let service = match service {
+            Some(s) if s.enabled => s,
+            _ => {
+                tracing::debug!("Stream 路由 {} 无有效 Service", route_match.route_id);
+                return StreamProxyResult {
+                    status: "NO_SVC", mode: if is_tls { "tls" } else { "tcp" },
+                    route_label, upstream: None,
+                };
+            }
+        };
+
+        // 3. Resolve upstream address — 解析上游地址
+        let (upstream_addr, upstream_tls) = match self.resolve_upstream(&service) {
+            Some(r) => r,
+            None => {
+                tracing::error!("Stream 上游解析失败: {}", service.host);
+                return StreamProxyResult {
+                    status: "UPSTREAM_ERR", mode: if is_tls { "tls" } else { "tcp" },
+                    route_label, upstream: Some(service.host.clone()),
+                };
+            }
+        };
+
+        // 4. Determine proxy mode and execute — 判断代理模式并执行
+        let is_passthrough = route_match
+            .protocols
+            .iter()
+            .any(|p| matches!(p, Protocol::TlsPassthrough));
+
+        let mode = if is_passthrough {
+            "tls_passthrough"
+        } else if is_tls {
+            "tls"
+        } else {
+            "tcp"
+        };
+
+        let result = if is_passthrough {
+            self.proxy_passthrough(downstream, &upstream_addr).await
+        } else if is_tls && route_match.protocols.iter().any(|p| matches!(p, Protocol::Tls)) {
+            // TLS Termination: simplified as TCP passthrough for now — TLS Termination 暂作为 TCP 透传
+            // TODO: 实现完整 TLS termination（SslAcceptor + CertificateManager）
+            tracing::warn!(
+                "TLS Termination 模式暂作为 TCP 透传处理 (route={})",
+                route_match.route_id
+            );
+            self.proxy_passthrough(downstream, &upstream_addr).await
+        } else {
+            self.proxy_tcp(downstream, &upstream_addr, upstream_tls).await
+        };
+
+        let status = if result.is_ok() { "OK" } else { "ERR" };
+        if let Err(ref e) = result {
+            tracing::debug!("Stream 代理错误: {} : {}", upstream_addr, e);
+        }
+
+        StreamProxyResult {
+            status, mode, route_label, upstream: Some(upstream_addr),
         }
     }
 
