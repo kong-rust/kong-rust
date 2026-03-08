@@ -344,6 +344,16 @@
   - 修改 logging()/handle_connection() 使用异步写入
   - _Requirements: R1_
 
+## 阶段 8e：Route 级别 Body Buffering
+
+- [x] 8.19 实现 Route 级别 request_buffering / response_buffering
+  - 修改 `crates/kong-router/src/lib.rs` — RouteMatch 添加 request_buffering / response_buffering 字段
+  - 修改 `crates/kong-router/src/traditional.rs` — ProcessedRoute 添加字段，process_route() 和 find_route() 传递字段值
+  - 修改 `crates/kong-router/src/expressions.rs` — ExpressionRoute 添加字段，构造和匹配时传递字段值
+  - 修改 `crates/kong-proxy/src/lib.rs` — KongCtx 添加 request_body_buf / response_body_buf 缓冲区；实现 request_body_filter()；修改 response_body_filter() 在插件阶段前执行 response buffering
+  - Kong 默认 buffering=true（全量缓冲后转发），false=流式转发（Pingora 原生行为）
+  - _Requirements: R1_
+
 ## 阶段 9：Hybrid 模式和集群通信
 
 - [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动

@@ -53,6 +53,10 @@ pub struct KongCtx {
     pub plugin_ctx: RequestCtx,
     /// Resolved plugin chain for the current request — 当前请求已解析的插件链
     pub resolved_plugins: Vec<ResolvedPlugin>,
+    /// Request body buffer (when request_buffering=true) — 请求体缓冲区（request_buffering=true 时使用）
+    pub request_body_buf: Option<Vec<u8>>,
+    /// Response body buffer (when response_buffering=true) — 响应体缓冲区（response_buffering=true 时使用）
+    pub response_body_buf: Option<Vec<u8>>,
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
@@ -326,6 +330,8 @@ impl ProxyHttp for KongProxy {
             upstream_sni: String::new(),
             plugin_ctx: RequestCtx::new(),
             resolved_plugins: Vec::new(),
+            request_body_buf: None,
+            response_body_buf: None,
         }
     }
 
@@ -619,6 +625,39 @@ impl ProxyHttp for KongProxy {
         Ok(())
     }
 
+    /// Request body filter — buffer request body when request_buffering=true — 请求体过滤 — request_buffering=true 时缓冲请求体
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> pingora_core::Result<()> {
+        // Default buffering=true (Kong's default) — 默认 buffering=true（Kong 默认行为）
+        let buffering = ctx.route_match.as_ref().map(|rm| rm.request_buffering).unwrap_or(true);
+
+        if !buffering {
+            // Pass through (Pingora default streaming behavior) — 直接透传（Pingora 默认流式行为）
+            return Ok(());
+        }
+
+        // Collect chunks into buffer, release all at end_of_stream — 收集 chunk 到缓冲区，end_of_stream 时一次性释放
+        if let Some(data) = body.take() {
+            let buf = ctx.request_body_buf.get_or_insert_with(Vec::new);
+            buf.extend_from_slice(&data);
+        }
+
+        if end_of_stream {
+            // Release the buffered body — 释放缓冲的请求体
+            if let Some(buf) = ctx.request_body_buf.take() {
+                *body = Some(Bytes::from(buf));
+            }
+        }
+        // When not end_of_stream, body remains None — suppress forwarding — 非 end_of_stream 时 body 保持 None — 抑制转发
+
+        Ok(())
+    }
+
     /// Upstream response header processing — header_filter phase — 上游响应头处理 — header_filter 阶段
     async fn upstream_response_filter(
         &self,
@@ -665,7 +704,7 @@ impl ProxyHttp for KongProxy {
         Ok(())
     }
 
-    /// Response body filter — body_filter phase — 响应体过滤 — body_filter 阶段
+    /// Response body filter — body_filter phase + response buffering — 响应体过滤 — body_filter 阶段 + 响应体缓冲
     fn response_body_filter(
         &self,
         _session: &mut Session,
@@ -673,6 +712,26 @@ impl ProxyHttp for KongProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Option<std::time::Duration>> {
+        // 1. Response buffering — 响应体缓冲
+        let buffering = ctx.route_match.as_ref().map(|rm| rm.response_buffering).unwrap_or(true);
+
+        if buffering {
+            // Collect chunks into buffer — 收集 chunk 到缓冲区
+            if let Some(data) = body.take() {
+                let buf = ctx.response_body_buf.get_or_insert_with(Vec::new);
+                buf.extend_from_slice(&data);
+            }
+
+            if end_of_stream {
+                // Release the buffered body — 释放缓冲的响应体
+                if let Some(buf) = ctx.response_body_buf.take() {
+                    *body = Some(Bytes::from(buf));
+                }
+            }
+            // When not end_of_stream, body remains None — suppress sending to client — 非 end_of_stream 时 body 保持 None — 抑制发送
+        }
+
+        // 2. Plugin body_filter phase — 插件 body_filter 阶段
         if ctx.resolved_plugins.is_empty() {
             return Ok(None);
         }

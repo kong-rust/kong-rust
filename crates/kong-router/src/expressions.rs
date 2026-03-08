@@ -31,6 +31,8 @@ struct ExpressionRoute {
     preserve_host: bool,
     path_handling: String,
     protocols: Vec<String>,
+    request_buffering: bool,
+    response_buffering: bool,
 }
 
 /// Compiled expression node — 编译后的表达式节点
@@ -89,6 +91,8 @@ impl ExpressionsRouter {
                         kong_core::models::PathHandling::V1 => "v1".to_string(),
                     },
                     protocols,
+                    request_buffering: route.request_buffering,
+                    response_buffering: route.response_buffering,
                 })
             })
             .collect();
@@ -119,6 +123,8 @@ impl ExpressionsRouter {
                     path_handling: route.path_handling.clone(),
                     matched_path: None,
                     protocols: route.protocols.clone(),
+                    request_buffering: route.request_buffering,
+                    response_buffering: route.response_buffering,
                 });
             }
         }

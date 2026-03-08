@@ -49,6 +49,10 @@ pub struct RouteMatch {
     pub matched_path: Option<String>,
     /// Protocol list — 协议列表
     pub protocols: Vec<String>,
+    /// Whether to buffer the request body before forwarding — 是否在转发前缓冲请求体
+    pub request_buffering: bool,
+    /// Whether to buffer the response body before sending to client — 是否在发送给客户端前缓冲响应体
+    pub response_buffering: bool,
 }
 
 /// Unified router — selects concrete implementation based on router_flavor — 统一路由器 — 根据 router_flavor 选择具体实现

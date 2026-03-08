@@ -89,6 +89,10 @@ struct ProcessedRoute {
     path_handling: String,
     /// Protocol list — 协议列表
     protocols: Vec<String>,
+    /// Request buffering — 请求体缓冲
+    request_buffering: bool,
+    /// Response buffering — 响应体缓冲
+    response_buffering: bool,
 }
 
 /// Header match rule — Header 匹配规则
@@ -240,6 +244,8 @@ impl TraditionalRouter {
                         path_handling: route.path_handling.clone(),
                         matched_path,
                         protocols: route.protocols.clone(),
+                        request_buffering: route.request_buffering,
+                        response_buffering: route.response_buffering,
                     });
                 }
             }
@@ -571,6 +577,8 @@ fn process_route(route: &Route) -> Option<ProcessedRoute> {
             kong_core::models::PathHandling::V1 => "v1".to_string(),
         },
         protocols,
+        request_buffering: route.request_buffering,
+        response_buffering: route.response_buffering,
     })
 }
 
