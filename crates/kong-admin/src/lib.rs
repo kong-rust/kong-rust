@@ -15,7 +15,7 @@ use std::sync::RwLock;
 
 use axum::routing::get;
 use axum::Router;
-use axum::response::{IntoResponse, Redirect};
+use axum::response::IntoResponse;
 use tower_http::cors::{AllowOrigin, AllowMethods, AllowHeaders, CorsLayer};
 use tower_http::services::ServeDir;
 use kong_core::models::*;
@@ -170,9 +170,10 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
     );
 
     let index_path = std::path::PathBuf::from(gui_dir).join("index.html");
+    let index_fallback = index_path.clone();
     let serve_dir = ServeDir::new(gui_dir)
         .not_found_service(tower::service_fn(move |_req: axum::http::Request<axum::body::Body>| {
-            let path = index_path.clone();
+            let path = index_fallback.clone();
             async move {
                 // SPA fallback: serve index.html for unknown paths — SPA 回退：未知路径返回 index.html
                 match tokio::fs::read(&path).await {
@@ -189,7 +190,21 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
         }));
 
     Router::new()
-        .route("/", get(|| async { Redirect::permanent("/__km_base__/") }))
+        .route("/", get(move || async move {
+            // Serve index.html directly at root, no redirect — 根路径直接返回 index.html，不重定向
+            match tokio::fs::read(&index_path).await {
+                Ok(body) => axum::http::Response::builder()
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+                    .into_response(),
+                Err(_) => axum::http::Response::builder()
+                    .status(404)
+                    .body(axum::body::Body::from("Kong Manager GUI not found"))
+                    .unwrap()
+                    .into_response(),
+            }
+        }))
         .route("/__km_base__/kconfig.js", get(move || async move {
             axum::http::Response::builder()
                 .header("content-type", "application/javascript; charset=utf-8")

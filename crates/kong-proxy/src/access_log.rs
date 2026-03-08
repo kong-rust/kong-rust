@@ -30,6 +30,9 @@ impl AccessLogWriter {
             return None;
         }
 
+        // Kong log config format: "path [format]", extract path only — Kong 日志配置格式："路径 [格式]"，只取路径部分
+        let path = path.split_whitespace().next().unwrap_or(path);
+
         let log_path = std::path::Path::new(path);
         if let Some(dir) = log_path.parent() {
             let _ = std::fs::create_dir_all(dir);
