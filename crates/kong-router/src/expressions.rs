@@ -12,7 +12,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{RequestContext, RouteMatch};
-use kong_core::models::{PathHandling, Route};
+use kong_core::models::{PathHandling, Protocol, Route};
 
 /// Default LRU cache capacity — LRU 缓存默认容量
 const ROUTE_CACHE_CAPACITY: u64 = 1024;
@@ -77,6 +77,14 @@ impl ExpressionsRouter {
     pub fn new(routes: &[Route]) -> Self {
         let mut expr_routes: Vec<ExpressionRoute> = routes
             .iter()
+            .filter(|route| {
+                // Only include routes with HTTP-compatible protocols — 仅包含 HTTP 兼容协议的路由
+                route.protocols.iter().any(|p| matches!(p,
+                    Protocol::Http | Protocol::Https |
+                    Protocol::Grpc | Protocol::Grpcs |
+                    Protocol::Ws | Protocol::Wss
+                ))
+            })
             .filter_map(|route| {
                 let expression_str = route.expression.as_deref()?;
                 let expression = parse_expression(expression_str).ok()?;

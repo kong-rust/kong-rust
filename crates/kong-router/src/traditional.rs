@@ -12,7 +12,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{RequestContext, RouteMatch};
-use kong_core::models::{PathHandling, Route};
+use kong_core::models::{PathHandling, Protocol, Route};
 
 // ============ Match rule bit value definitions — 匹配规则位值定义 ============
 
@@ -152,8 +152,17 @@ impl TraditionalRouter {
     pub fn new(routes: &[Route]) -> Self {
         let mut processed = Vec::with_capacity(routes.len());
 
-        // 1. Process each route — 处理每个路由
+        // 1. Process each route (skip non-HTTP routes) — 处理每个路由（跳过非 HTTP 协议路由）
         for route in routes {
+            // Only include routes with HTTP-compatible protocols — 仅包含 HTTP 兼容协议的路由
+            let is_http_route = route.protocols.iter().any(|p| matches!(p,
+                Protocol::Http | Protocol::Https |
+                Protocol::Grpc | Protocol::Grpcs |
+                Protocol::Ws | Protocol::Wss
+            ));
+            if !is_http_route {
+                continue;
+            }
             if let Some(pr) = process_route(route) {
                 processed.push(pr);
             }
