@@ -1,5 +1,6 @@
 //! Kong-Rust API Gateway — main entry point — Kong-Rust API Gateway — 主入口
 
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,6 +23,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Start,
+    /// Container mode start (same as Start, env vars set by entrypoint) — 容器模式启动（行为同 Start，环境变量由 entrypoint 设置）
+    DockerStart,
+    /// Health check: probe Admin API /status endpoint — 健康检查：探测 Admin API /status 端点
+    Health,
     Check,
     Db {
         #[command(subcommand)]
@@ -119,16 +124,26 @@ fn main() -> anyhow::Result<()> {
 
     let config = kong_config::load_config(conf_path)?;
 
+    // Health and Version commands don't need logging, execute early — Health 和 Version 命令不需要日志系统，提前执行
+    match &cli.command {
+        Some(Commands::Version) => {
+            println!("kong-rust 0.1.0");
+            println!("基于 Pingora 和 mlua 的 Kong API Gateway Rust 实现");
+            return Ok(());
+        }
+        Some(Commands::Health) => {
+            health_check(&config)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Initialize logging based on config (config parse failures output via default panic before this) — 根据配置初始化日志（config 解析失败会在此之前通过默认 panic 输出）
     init_logging(&config)?;
 
     let config = Arc::new(config);
 
     match cli.command.unwrap_or(Commands::Start) {
-        Commands::Version => {
-            println!("kong-rust 0.1.0");
-            println!("基于 Pingora 和 mlua 的 Kong API Gateway Rust 实现");
-        }
         Commands::Check => {
             println!("配置文件检查通过");
             println!("数据库: {}", config.database);
@@ -149,9 +164,11 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(handle_db_command(&config, action))?;
         }
-        Commands::Start => {
+        Commands::Start | Commands::DockerStart => {
             start_gateway(config)?;
         }
+        // Already handled above — 已在上方处理
+        Commands::Version | Commands::Health => unreachable!(),
     }
 
     Ok(())
@@ -240,6 +257,37 @@ async fn handle_db_command(
 
     db.close().await;
     Ok(())
+}
+
+/// Health check: TCP connect to Admin API and send GET /status — 健康检查：TCP 连接 Admin API 并发送 GET /status
+fn health_check(config: &kong_config::KongConfig) -> anyhow::Result<()> {
+    let addr = if let Some(a) = config.admin_listen.first() {
+        // 将 0.0.0.0 替换为 127.0.0.1，因为不能连接 0.0.0.0 — Replace 0.0.0.0 with 127.0.0.1 since we can't connect to 0.0.0.0
+        let ip = if a.ip == "0.0.0.0" { "127.0.0.1" } else { &a.ip };
+        format!("{}:{}", ip, a.port)
+    } else {
+        "127.0.0.1:8001".to_string()
+    };
+
+    let timeout = std::time::Duration::from_secs(5);
+    let mut stream = std::net::TcpStream::connect_timeout(&addr.parse()?, timeout)
+        .map_err(|e| anyhow::anyhow!("Failed to connect to Admin API at {}: {} — 无法连接 Admin API {}: {}", addr, e, addr, e))?;
+
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let request = format!("GET /status HTTP/1.0\r\nHost: {}\r\n\r\n", addr);
+    stream.write_all(request.as_bytes())?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    if response.contains("200") {
+        println!("kong-rust is healthy at {} — kong-rust 健康检查通过 {}", addr, addr);
+        Ok(())
+    } else {
+        anyhow::bail!("kong-rust is NOT healthy: unexpected response from {} — kong-rust 健康检查失败: {} 返回异常响应", addr, addr);
+    }
 }
 
 /// Format listen address list — 格式化监听地址列表

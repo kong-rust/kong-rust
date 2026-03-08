@@ -153,6 +153,45 @@ dev-full:
 	@echo "启动 kong-manager (前台, http://localhost:$(MANAGER_PORT))..."
 	@cd $(MANAGER_DIR) && KONG_GUI_URL=$(ADMIN_API) pnpm serve
 
+# ---------- Docker ----------
+
+DOCKER_TAG ?= kong-rust:latest
+DOCKER_REGISTRY ?=
+
+# 构建 Docker 镜像
+docker-build:
+	docker build -t $(DOCKER_TAG) .
+
+# 推送 Docker 镜像
+docker-push:
+	docker push $(DOCKER_REGISTRY)$(DOCKER_TAG)
+
+# db-less 模式运行容器
+docker-run:
+	docker run -d --name kong-rust \
+		-e KONG_DATABASE=off \
+		-p 8000:8000 -p 8443:8443 \
+		-p 8001:8001 -p 8444:8444 \
+		$(DOCKER_TAG)
+
+# PostgreSQL 模式运行容器
+# 用法: make KONG_PG_HOST=host KONG_PG_PASSWORD=pass docker-run-pg
+docker-run-pg:
+	docker run -d --name kong-rust \
+		-e KONG_DATABASE=postgres \
+		-e KONG_PG_HOST=$(KONG_PG_HOST) \
+		-e KONG_PG_PORT=$(KONG_PG_PORT) \
+		-e KONG_PG_USER=$(KONG_PG_USER) \
+		-e KONG_PG_PASSWORD=$(KONG_PG_PASSWORD) \
+		-e KONG_PG_DATABASE=$(KONG_PG_DATABASE) \
+		-p 8000:8000 -p 8443:8443 \
+		-p 8001:8001 -p 8444:8444 \
+		$(DOCKER_TAG)
+
+# 停止并删除容器
+docker-stop:
+	docker rm -f kong-rust 2>/dev/null || true
+
 # ---------- 清理 ----------
 
 # 清理 Rust 构建产物
@@ -184,4 +223,5 @@ members:
         manager-install manager-build manager-dev manager-preview \
         services-up services-down services-logs \
         dev dev-dbless dev-full \
+        docker-build docker-push docker-run docker-run-pg docker-stop \
         clean manager-clean clean-all deps members

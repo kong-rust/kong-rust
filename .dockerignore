@@ -1,0 +1,32 @@
+# 构建产物
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 项目管理
+.spec-workflow/
+.claude/
+
+# Kong Manager 前端（不需要打入网关镜像）
+kong-manager/
+
+# 日志和临时文件
+logs/
+*.log
+tmp/
+
+# 脚本和文档（运行时不需要）
+scripts/
+docs/
+*.md
+
+# macOS
+.DS_Store

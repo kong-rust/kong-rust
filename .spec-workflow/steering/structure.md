@@ -138,6 +138,9 @@ kong-rust/
 │   ├── src/                      # Vue 前端源码
 │   └── dist/                     # 构建产物（gitignore）
 │
+├── Dockerfile                    # 多阶段构建镜像（builder + runtime，兼容 Kong 官方布局）
+├── docker-entrypoint.sh          # Docker 入口脚本（支持 KONG_*_FILE Docker Secrets）
+├── .dockerignore                 # Docker 构建排除规则
 ├── kong.conf.default             # 开发环境默认配置（兼容 Kong 的 kong.conf 格式）
 │
 ├── scripts/                      # 开发和测试脚本

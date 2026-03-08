@@ -414,3 +414,31 @@
   - 文件：`tests/cluster_e2e.rs`
   - _Requirements: R9_
   - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust 测试工程师 | Task: 编写 CP/DP 集群通信集成测试。1) 测试角色启动：启动 CP 实例（role=control_plane）和 DP 实例（role=data_plane），验证 DP 能连接 CP。2) 测试 Sync V1 全量推送：CP 通过 Admin API 创建 Service + Route → 验证 DP 收到配置 → DP 代理请求能路由到正确上游。3) 测试配置变更推送：CP 更新 Service → 验证 DP 自动收到新配置。4) 测试 Sync V2 增量同步：CP 添加新 Route → 验证 DP 只收到 delta 而非全量。5) 测试心跳：验证 30 秒心跳正常发送，PING 负载包含配置哈希。6) 测试断线重连：断开 CP/DP 连接 → 验证 DP 使用缓存配置继续代理 → 恢复连接后 DP 自动重连并重新同步。7) 测试 /clustering/status：验证 CP 的 /clustering/status 端点返回正确的 DP 信息。 | Restrictions: 测试应使用真实的 WebSocket 通信（非 mock），可使用自签名证书进行 mTLS。 | Success: 所有集群通信场景测试通过。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
+
+## 阶段 10：Docker 镜像构建
+
+- [x] 10.1 添加 docker-start 和 health CLI 子命令
+  - kong-server 新增 `docker-start` 子命令（顺序执行 migrations bootstrap/up/finish → start）
+  - 新增 `health` 子命令（HTTP GET Admin API /status，进程退出码表示健康状态）
+  - 用于 Docker 容器内一键启动和健康检查
+  - 文件：`crates/kong-server/src/main.rs`
+
+- [x] 10.2 创建 Dockerfile（多阶段构建，兼容 Kong 官方镜像）
+  - 多阶段构建：builder（Rust 编译）→ runtime（Debian slim 最小镜像）
+  - 兼容 Kong 官方镜像的用户/目录布局（kong 用户、/usr/local/kong 等）
+  - 暴露标准端口（8000/8443/8001/8444/8005）
+  - 文件：`Dockerfile`
+
+- [x] 10.3 创建 docker-entrypoint.sh（Docker Secrets 支持）
+  - 支持 Docker Secrets（`KONG_*_FILE` 环境变量自动读取文件内容）
+  - 与 Kong 官方 docker-entrypoint.sh 行为兼容
+  - 文件：`docker-entrypoint.sh`
+
+- [x] 10.4 创建 .dockerignore
+  - 排除 target/、.git/、kong-manager/node_modules/ 等不必要文件
+  - 文件：`.dockerignore`
+
+- [x] 10.5 更新 Makefile（docker-build/push/run/stop 目标）
+  - 新增 docker-build、docker-push、docker-run、docker-stop Make 目标
+  - 支持 DOCKER_TAG 和 DOCKER_REGISTRY 变量
+  - 文件：`Makefile`
