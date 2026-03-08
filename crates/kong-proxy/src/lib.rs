@@ -366,6 +366,17 @@ impl ProxyHttp for KongProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<bool> {
+        // 0. Proxy loop detection — check Via header to prevent request loop — 代理回环检测 — 检查 Via 头防止请求回环
+        if let Some(via) = session.req_header().headers.get("via") {
+            if let Ok(v) = via.to_str() {
+                if v.contains("kong-rust") {
+                    tracing::warn!("检测到代理回环 (Via: {}), 返回 508", v);
+                    let _ = session.respond_error(508).await;
+                    return Ok(true);
+                }
+            }
+        }
+
         // 1. Populate request context + build route matching context (single header scan) — 填充请求上下文 + 构建路由匹配上下文（单次头遍历）
         let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx);
 
@@ -656,6 +667,9 @@ impl ProxyHttp for KongProxy {
         if let Some(host) = session.req_header().headers.get("host") {
             let _ = upstream_request.insert_header("x-forwarded-host", host);
         }
+
+        // 5. Inject Via header for proxy loop detection — 注入 Via 头用于代理回环检测
+        let _ = upstream_request.insert_header("via", "1.1 kong-rust");
 
         Ok(())
     }
