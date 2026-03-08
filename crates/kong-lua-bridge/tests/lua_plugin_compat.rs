@@ -1,6 +1,6 @@
-//! Lua 插件兼容性集成测试
+//! Lua plugin compatibility integration tests — Lua 插件兼容性集成测试
 //!
-//! 验证 kong-lua-bridge 能正确加载和执行 Lua 插件代码
+//! Verifies that kong-lua-bridge can correctly load and execute Lua plugin code — 验证 kong-lua-bridge 能正确加载和执行 Lua 插件代码
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use kong_core::traits::{Phase, RequestCtx};
 use kong_lua_bridge::loader;
 
-// ========== 插件加载器测试 ==========
+// ========== Plugin loader tests — 插件加载器测试 ==========
 
 #[test]
 fn test_detect_phases_from_handler_code() {
@@ -76,7 +76,7 @@ fn test_extract_version() {
     );
 }
 
-// ========== PDK 注入测试 ==========
+// ========== PDK injection tests ��� PDK 注入测试 ==========
 
 #[test]
 fn test_pdk_kong_table_exists() {
@@ -171,7 +171,7 @@ fn test_pdk_kong_ctx_shared() {
     );
 }
 
-// ========== PDK 真实数据测试（修复硬编码桩） ==========
+// ========== PDK real data tests (fixed hardcoded stubs) — PDK 真实数据测试（修复硬编码桩） ==========
 
 #[test]
 fn test_pdk_request_get_method_returns_real_method() {
@@ -182,7 +182,7 @@ fn test_pdk_request_get_method_returns_real_method() {
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
     let result: String = lua.load("return kong.request.get_method()").eval().unwrap();
-    assert_eq!(result, "POST", "PDK 应返回真实的请求方法，而不是硬编码 GET");
+    assert_eq!(result, "POST", "PDK should return the real request method, not hardcoded GET — PDK 应返回真实的请求方法，而不是硬编码 GET");
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn test_pdk_request_get_path_returns_real_path() {
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
     let result: String = lua.load("return kong.request.get_path()").eval().unwrap();
-    assert_eq!(result, "/api/v1/users", "PDK 应返回真实的请求路径");
+    assert_eq!(result, "/api/v1/users", "PDK should return the real request path — PDK 应返回真实的请求路径");
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn test_pdk_request_get_header_returns_real_header() {
         .unwrap();
     assert_eq!(result, "application/json");
 
-    // 不存在的 header 返回 nil
+    // Non-existent header returns nil — 不存在的 header 返回 nil
     let result: Option<String> = lua
         .load(r#"return kong.request.get_header("x-nonexistent")"#)
         .eval()
@@ -288,20 +288,20 @@ fn test_pdk_response_exit_sets_short_circuit() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    // 调用 kong.response.exit(403, '{"message":"forbidden"}')
+    // Call kong.response.exit(403, '{"message":"forbidden"}') — 调用 kong.response.exit(403, '{"message":"forbidden"}')
     lua.load(r#"kong.response.exit(403, '{"message":"forbidden"}')"#)
         .exec()
         .unwrap();
 
-    // 同步回 RequestCtx
+    // Sync back to RequestCtx — 同步回 RequestCtx
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
-    assert!(ctx.short_circuited, "exit() 应设置短路标志");
-    assert_eq!(ctx.exit_status, Some(403), "exit() 应设置状态码");
+    assert!(ctx.short_circuited, "exit() should set the short-circuit flag — exit() 应设置短路标志");
+    assert_eq!(ctx.exit_status, Some(403), "exit() should set the status code — exit() 应设置状态码");
     assert_eq!(
         ctx.exit_body.as_deref(),
         Some(r#"{"message":"forbidden"}"#),
-        "exit() 应设置响应体"
+        "exit() should set the response body — exit() 应设置响应体"
     );
 }
 
@@ -346,7 +346,7 @@ fn test_pdk_service_request_set_header() {
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
     assert_eq!(ctx.upstream_headers_to_set.len(), 2);
-    // 注意：HashMap 遍历顺序不确定，检查包含关系
+    // Note: HashMap iteration order is non-deterministic, check containment — 注意：HashMap 遍历顺序不确定，检查包含关系
     let headers: HashMap<String, String> = ctx.upstream_headers_to_set.into_iter().collect();
     assert_eq!(headers.get("X-Consumer-ID").unwrap(), "abc-123");
     assert_eq!(headers.get("X-Custom").unwrap(), "value");
@@ -411,7 +411,7 @@ fn test_ngx_req_get_method_returns_real_method() {
     kong_lua_bridge::pdk::inject_ngx_compat(&lua).unwrap();
 
     let result: String = lua.load("return ngx.req.get_method()").eval().unwrap();
-    assert_eq!(result, "DELETE", "ngx.req.get_method() 应返回真实方法");
+    assert_eq!(result, "DELETE", "ngx.req.get_method() should return the real method — ngx.req.get_method() 应返回真实方法");
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn test_ngx_var_reads_real_data() {
     assert_eq!(host, "api.test.com");
 }
 
-// ========== LuaPluginHandler 测试 ==========
+// ========== LuaPluginHandler tests — LuaPluginHandler 测试 ==========
 
 #[test]
 fn test_lua_plugin_handler_creation() {
@@ -478,7 +478,7 @@ fn test_lua_plugin_handler_creation() {
     assert_eq!(handler.version(), "1.0.0");
 }
 
-// ========== Lua VM 基础测试 ==========
+// ========== Lua VM basic tests — Lua VM 基础测试 ==========
 
 #[test]
 fn test_lua_vm_basic_execution() {
@@ -547,7 +547,7 @@ fn test_lua_serde_roundtrip() {
     assert_eq!(result, 1);
 }
 
-// ========== 综合场景测试 ==========
+// ========== End-to-end scenario tests — 综合场景测试 ==========
 
 #[test]
 fn test_pdk_full_request_context() {
@@ -565,7 +565,7 @@ fn test_pdk_full_request_context() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    // 验证所有字段都能正确读取
+    // Verify all fields are correctly readable — 验证所有字段都能正确读取
     let method: String = lua.load("return kong.request.get_method()").eval().unwrap();
     assert_eq!(method, "PUT");
 
@@ -596,16 +596,16 @@ fn test_pdk_full_request_context() {
 
 #[test]
 fn test_pdk_plugin_simulation_auth_check() {
-    // 模拟一个简单的认证插件行为
+    // Simulate a simple auth plugin behavior — 模拟一个简单的认证插件行为
     let lua = unsafe { mlua::Lua::unsafe_new() };
     let mut ctx = RequestCtx::new();
     ctx.request_method = "GET".to_string();
     ctx.request_path = "/protected/resource".to_string();
-    // 没有 authorization header → 应该被短路
+    // No authorization header -> should be short-circuited — 没有 authorization header → 应该被短路
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    // 模拟插件逻辑
+    // Simulate plugin logic — 模拟插件逻辑
     lua.load(r#"
         local auth = kong.request.get_header("authorization")
         if not auth then
@@ -624,7 +624,7 @@ fn test_pdk_plugin_simulation_auth_check() {
 
 #[test]
 fn test_pdk_plugin_simulation_auth_pass() {
-    // 有 authorization header → 不应短路
+    // Has authorization header -> should not short-circuit — 有 authorization header → 不应短路
     let lua = unsafe { mlua::Lua::unsafe_new() };
     let mut ctx = RequestCtx::new();
     ctx.request_method = "GET".to_string();
@@ -646,7 +646,7 @@ fn test_pdk_plugin_simulation_auth_pass() {
 
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
-    assert!(!ctx.short_circuited, "有 authorization 时不应短路");
+    assert!(!ctx.short_circuited, "Should not short-circuit when authorization is present — 有 authorization 时不应短路");
     let headers: HashMap<String, String> = ctx.upstream_headers_to_set.into_iter().collect();
     assert_eq!(headers.get("X-Authenticated").unwrap(), "true");
 }

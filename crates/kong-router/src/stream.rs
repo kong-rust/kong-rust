@@ -1,53 +1,53 @@
-//! Stream (L4) 路由引擎 — 基于 source/destination/SNI 匹配
+//! Stream (L4) routing engine — matches based on source/destination/SNI — Stream (L4) 路由引擎 — 基于 source/destination/SNI 匹配
 //!
-//! 与 HTTP 路由器完全独立，仅处理 protocols 包含 tcp/tls/tls_passthrough 的路由。
+//! Completely independent from the HTTP router, only handles routes with tcp/tls/tls_passthrough protocols — 与 HTTP 路由器完全独立，仅处理 protocols 包含 tcp/tls/tls_passthrough 的路由。
 //!
-//! 匹配优先级：
-//! 1. SNI 精确匹配 > 通配符匹配
-//! 2. Source IP/Port 匹配（CIDR）
-//! 3. Destination IP/Port 匹配
-//! 4. 更具体的规则优先（匹配维度越多优先级越高）
+//! Match priority — 匹配优先级：
+//! 1. SNI exact match > wildcard match — SNI 精确匹配 > 通配符匹配
+//! 2. Source IP/Port match (CIDR) — Source IP/Port 匹配（CIDR）
+//! 3. Destination IP/Port match — Destination IP/Port 匹配
+//! 4. More specific rules take priority (more match dimensions = higher priority) — 更具体的规则优先（匹配维度越多优先级越高）
 
 use std::net::IpAddr;
 use uuid::Uuid;
 
 use kong_core::models::{CidrPort, Protocol, Route};
 
-/// Stream 请求上下文 — 从 L4 连接中提取的匹配字段
+/// Stream request context — fields extracted from the L4 connection for matching — Stream 请求上下文 — 从 L4 连接中提取的匹配字段
 #[derive(Debug, Clone, Default)]
 pub struct StreamRequestContext {
-    /// 客户端 IP
+    /// Client IP — 客户端 IP
     pub source_ip: Option<IpAddr>,
-    /// 客户端端口
+    /// Client port — 客户端端口
     pub source_port: Option<u16>,
-    /// 监听地址 IP（目标 IP）
+    /// Listen address IP (destination IP) — 监听地址 IP（目标 IP）
     pub dest_ip: Option<IpAddr>,
-    /// 监听地址端口（目标端口）
+    /// Listen address port (destination port) — 监听地址端口（目标端口）
     pub dest_port: Option<u16>,
-    /// TLS SNI（如果是 TLS 连接）
+    /// TLS SNI (if TLS connection) — TLS SNI（如果是 TLS 连接）
     pub sni: Option<String>,
 }
 
-/// Stream 路由匹配结果
+/// Stream route match result — Stream 路由匹配结果
 #[derive(Debug, Clone)]
 pub struct StreamRouteMatch {
-    /// 匹配到的路由 ID
+    /// Matched route ID — 匹配到的路由 ID
     pub route_id: Uuid,
-    /// 关联的 Service ID
+    /// Associated Service ID — 关联的 Service ID
     pub service_id: Option<Uuid>,
-    /// 路由名称
+    /// Route name — 路由名称
     pub route_name: Option<String>,
-    /// 协议列表（tcp/tls/tls_passthrough）
+    /// Protocol list (tcp/tls/tls_passthrough) — 协议列表（tcp/tls/tls_passthrough）
     pub protocols: Vec<Protocol>,
 }
 
-// ============ 匹配权重位值 ============
+// ============ Match weight bit values — 匹配权重位值 ============
 
 const MATCH_SNI: u32 = 0x08;
 const MATCH_SOURCE: u32 = 0x04;
 const MATCH_DEST: u32 = 0x02;
 
-/// 已处理的 Stream 路由
+/// Processed Stream route — 已处理的 Stream 路由
 #[derive(Debug, Clone)]
 struct ProcessedStreamRoute {
     route_id: Uuid,
@@ -55,30 +55,30 @@ struct ProcessedStreamRoute {
     name: Option<String>,
     protocols: Vec<Protocol>,
 
-    /// 匹配规则位掩码
+    /// Match rules bitmask — 匹配规则位掩码
     match_rules: u32,
-    /// 匹配权重（指定的匹配条件数量）
+    /// Match weight (number of specified match conditions) — 匹配权重（指定的匹配条件数量）
     match_weight: u32,
 
-    /// SNI 列表（小写，支持通配符）
+    /// SNI list (lowercased, supports wildcards) — SNI 列表（小写，支持通配符）
     snis: Vec<String>,
 
-    /// Source IP/Port 匹配规则
+    /// Source IP/Port match rules — Source IP/Port 匹配规则
     sources: Vec<CidrPortMatcher>,
 
-    /// Destination IP/Port 匹配规则
+    /// Destination IP/Port match rules — Destination IP/Port 匹配规则
     destinations: Vec<CidrPortMatcher>,
 
-    /// 创建时间（FIFO 排序）
+    /// Creation time (FIFO ordering) — 创建时间（FIFO 排序）
     created_at: i64,
 }
 
-/// 预处理后的 CIDR + Port 匹配器
+/// Preprocessed CIDR + Port matcher — 预处理后的 CIDR + Port 匹配器
 #[derive(Debug, Clone)]
 struct CidrPortMatcher {
-    /// 解析后的网络地址和前缀长度
+    /// Parsed network address and prefix length — 解析后的网络地址和前缀长度
     network: Option<(IpAddr, u8)>,
-    /// 端口匹配
+    /// Port match — 端口匹配
     port: Option<u16>,
 }
 
@@ -91,9 +91,9 @@ impl CidrPortMatcher {
         }
     }
 
-    /// 检查 IP 和端口是否匹配
+    /// Check if IP and port match — 检查 IP 和端口是否匹配
     fn matches(&self, ip: Option<IpAddr>, port: Option<u16>) -> bool {
-        // IP 匹配
+        // IP matching — IP 匹配
         if let Some((net_addr, prefix_len)) = &self.network {
             match ip {
                 Some(client_ip) => {
@@ -105,7 +105,7 @@ impl CidrPortMatcher {
             }
         }
 
-        // 端口匹配
+        // Port matching — 端口匹配
         if let Some(expected_port) = self.port {
             match port {
                 Some(p) if p == expected_port => {}
@@ -117,16 +117,16 @@ impl CidrPortMatcher {
     }
 }
 
-/// Stream 路由引擎
+/// Stream routing engine — Stream 路由引擎
 pub struct StreamRouter {
-    /// 所有已处理的 Stream 路由（按优先级排序）
+    /// All processed Stream routes (sorted by priority) — 所有已处理的 Stream 路由（按优先级排序）
     routes: Vec<ProcessedStreamRoute>,
 }
 
 impl StreamRouter {
-    /// 从路由列表构建 Stream 路由器
+    /// Build a Stream router from route list — 从路由列表构建 Stream 路由器
     ///
-    /// 仅索引 protocols 包含 tcp/tls/tls_passthrough 的路由
+    /// Only indexes routes whose protocols include tcp/tls/tls_passthrough — 仅索引 protocols 包含 tcp/tls/tls_passthrough 的路由
     pub fn new(routes: &[Route]) -> Self {
         let mut processed = Vec::new();
 
@@ -139,7 +139,7 @@ impl StreamRouter {
             }
         }
 
-        // 排序：match_weight 高 → created_at 早
+        // Sort: higher match_weight first, then earlier created_at — 排序：match_weight 高 → created_at 早
         processed.sort_by(|a, b| {
             b.match_weight
                 .cmp(&a.match_weight)
@@ -154,7 +154,7 @@ impl StreamRouter {
         Self { routes: processed }
     }
 
-    /// 匹配 Stream 请求
+    /// Match a Stream request — 匹配 Stream 请求
     pub fn find_route(&self, ctx: &StreamRequestContext) -> Option<StreamRouteMatch> {
         for route in &self.routes {
             if self.match_route(route, ctx) {
@@ -169,19 +169,19 @@ impl StreamRouter {
         None
     }
 
-    /// 路由数量
+    /// Number of routes — 路由数量
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
 
-    /// 重建路由表
+    /// Rebuild the routing table — 重建路由表
     pub fn rebuild(&mut self, routes: &[Route]) {
         *self = Self::new(routes);
     }
 
-    /// 检查单个路由是否匹配
+    /// Check if a single route matches — 检查单个路由是否匹配
     fn match_route(&self, route: &ProcessedStreamRoute, ctx: &StreamRequestContext) -> bool {
-        // SNI 匹配
+        // SNI matching — SNI 匹配
         if route.match_rules & MATCH_SNI != 0 {
             match &ctx.sni {
                 Some(sni) => {
@@ -193,7 +193,7 @@ impl StreamRouter {
             }
         }
 
-        // Source 匹配
+        // Source matching — Source 匹配
         if route.match_rules & MATCH_SOURCE != 0 {
             let mut any_match = false;
             for src in &route.sources {
@@ -207,7 +207,7 @@ impl StreamRouter {
             }
         }
 
-        // Destination 匹配
+        // Destination matching — Destination 匹配
         if route.match_rules & MATCH_DEST != 0 {
             let mut any_match = false;
             for dst in &route.destinations {
@@ -225,9 +225,9 @@ impl StreamRouter {
     }
 }
 
-// ============ 辅助函数 ============
+// ============ Helper functions — 辅助函数 ============
 
-/// 判断路由是否为 Stream 路由
+/// Check if a route is a Stream route — 判断路由是否为 Stream 路由
 fn is_stream_route(route: &Route) -> bool {
     route.protocols.iter().any(|p| {
         matches!(
@@ -237,7 +237,7 @@ fn is_stream_route(route: &Route) -> bool {
     })
 }
 
-/// 处理单个 Stream 路由
+/// Process a single Stream route — 处理单个 Stream 路由
 fn process_stream_route(route: &Route) -> Option<ProcessedStreamRoute> {
     let mut match_rules = 0u32;
     let mut match_weight = 0u32;
@@ -294,16 +294,16 @@ fn process_stream_route(route: &Route) -> Option<ProcessedStreamRoute> {
     })
 }
 
-/// SNI 匹配（支持通配符 *.example.com）
+/// SNI matching (supports wildcard *.example.com) — SNI 匹配（支持通配符 *.example.com）
 fn match_sni(patterns: &[String], sni: &str) -> bool {
     let sni_lower = sni.to_lowercase();
     for pattern in patterns {
         if pattern == &sni_lower {
             return true;
         }
-        // 通配符匹配：*.example.com 匹配 foo.example.com（但不匹配 example.com）
+        // Wildcard match: *.example.com matches foo.example.com (but not example.com) — 通配符匹配：*.example.com 匹配 foo.example.com（但不匹配 example.com）
         if let Some(suffix) = pattern.strip_prefix("*.") {
-            // SNI 需要至少有一个点，且点后面的部分与 suffix 匹配
+            // SNI must have at least one dot, and the part after the dot must match suffix — SNI 需要至少有一个点，且点后面的部分与 suffix 匹配
             if let Some(dot_pos) = sni_lower.find('.') {
                 if &sni_lower[dot_pos + 1..] == suffix {
                     return true;
@@ -314,21 +314,21 @@ fn match_sni(patterns: &[String], sni: &str) -> bool {
     false
 }
 
-/// 解析 CIDR 表示（如 "192.168.0.0/16" 或 "10.0.0.1"）
+/// Parse CIDR notation (e.g. "192.168.0.0/16" or "10.0.0.1") — 解析 CIDR 表示（如 "192.168.0.0/16" 或 "10.0.0.1"）
 fn parse_cidr(cidr: &str) -> Option<(IpAddr, u8)> {
     if let Some((ip_str, prefix_str)) = cidr.split_once('/') {
         let ip: IpAddr = ip_str.parse().ok()?;
         let prefix: u8 = prefix_str.parse().ok()?;
         Some((ip, prefix))
     } else {
-        // 无前缀长度，精确匹配
+        // No prefix length, exact match — 无前缀长度，精确匹配
         let ip: IpAddr = cidr.parse().ok()?;
         let prefix = if ip.is_ipv4() { 32 } else { 128 };
         Some((ip, prefix))
     }
 }
 
-/// 检查 IP 是否在 CIDR 范围内
+/// Check if IP is within CIDR range — 检查 IP 是否在 CIDR 范围内
 fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
     match (ip, network) {
         (IpAddr::V4(ip), IpAddr::V4(net)) => {
@@ -355,7 +355,7 @@ fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
             let mask = !0u128 << (128 - prefix_len);
             (ip_bits & mask) == (net_bits & mask)
         }
-        _ => false, // IPv4 和 IPv6 不互相匹配
+        _ => false, // IPv4 and IPv6 do not match each other — IPv4 和 IPv6 不互相匹配
     }
 }
 
@@ -426,7 +426,7 @@ mod tests {
         };
         assert!(router.find_route(&ctx).is_some());
 
-        // 不匹配 example.com 本身
+        // Should not match example.com itself — 不匹配 example.com 本身
         let ctx2 = StreamRequestContext {
             sni: Some("example.com".to_string()),
             ..Default::default()
@@ -542,7 +542,7 @@ mod tests {
             "192.168.0.0".parse().unwrap(),
             16
         ));
-        // 精确匹配
+        // Exact match — 精确匹配
         assert!(ip_in_cidr(
             "10.0.0.1".parse().unwrap(),
             "10.0.0.1".parse().unwrap(),

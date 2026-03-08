@@ -1,6 +1,6 @@
-//! 负载均衡器 — 实现 round-robin、least-connections、consistent-hashing
+//! Load balancer — implements round-robin, least-connections, consistent-hashing — 负载均衡器 — 实现 round-robin、least-connections、consistent-hashing
 //!
-//! 与 Kong 的 upstream 负载均衡行为一致
+//! Consistent with Kong's upstream load balancing behavior — 与 Kong 的 upstream 负载均衡行为一致
 
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,50 +10,50 @@ use kong_core::models::{HashOn, LbAlgorithm, Target, Upstream};
 
 use crate::health::HealthChecker;
 
-/// 负载均衡目标
+/// Load balancer target — 负载均衡目标
 #[derive(Debug, Clone)]
 pub struct BalancerTarget {
-    /// 目标地址（host:port）
+    /// Target address (host:port) — 目标地址（host:port）
     pub address: String,
-    /// 权重
+    /// Weight — 权重
     pub weight: i32,
 }
 
-/// 一致性哈希环节点
+/// Consistent hash ring node — 一致性哈希环节点
 #[derive(Debug, Clone)]
 struct HashRingNode {
-    /// 虚拟节点在环上的位置
+    /// Virtual node position on the ring — 虚拟节点在环上的位置
     hash: u64,
-    /// 对应的目标索引
+    /// Corresponding target index — 对应的目标索引
     target_index: usize,
 }
 
-/// 负载均衡器
+/// Load balancer — 负载均衡器
 pub struct LoadBalancer {
-    /// 目标列表
+    /// Target list — 目标列表
     targets: Vec<BalancerTarget>,
-    /// 算法
+    /// Algorithm — 算法
     algorithm: LbAlgorithm,
-    /// Round-robin 索引
+    /// Round-robin index — Round-robin 索引
     rr_index: AtomicUsize,
-    /// Upstream 的 host_header 配置
+    /// Upstream's host_header configuration — Upstream 的 host_header 配置
     host_header: Option<String>,
-    /// Upstream 名称（用于健康检查查询）
+    /// Upstream name (used for health check lookups) — Upstream 名称（用于健康检查查询）
     upstream_name: String,
-    /// 健康检查器引用
+    /// Health checker reference — 健康检查器引用
     health_checker: Option<Arc<HealthChecker>>,
-    /// hash_on 配置
+    /// hash_on configuration — hash_on 配置
     hash_on: HashOn,
-    /// hash_on_header 配置
+    /// hash_on_header configuration — hash_on_header 配置
     hash_on_header: Option<String>,
-    /// 一致性哈希环（预计算）
+    /// Consistent hash ring (precomputed) — 一致性哈希环（预计算）
     hash_ring: Vec<HashRingNode>,
-    /// Least-connections: 每个 target 的活跃连接数
+    /// Least-connections: active connection count per target — 每个 target 的活跃连接数
     connection_counts: Vec<AtomicUsize>,
 }
 
 impl LoadBalancer {
-    /// 从 Upstream + Targets 创建负载均衡器
+    /// Create load balancer from Upstream + Targets — 从 Upstream + Targets 创建负载均衡器
     pub fn new(upstream: &Upstream, targets: &[&Target]) -> Self {
         let mut bt = Vec::new();
         for target in targets {
@@ -88,28 +88,28 @@ impl LoadBalancer {
         }
     }
 
-    /// 设置健康检查器
+    /// Set health checker — 设置健康检查器
     pub fn set_health_checker(&mut self, checker: Arc<HealthChecker>) {
         self.health_checker = checker.into();
     }
 
-    /// 选择一个上游目标地址（用于非哈希算法）
+    /// Select an upstream target address (for non-hash algorithms) — 选择一个上游目标地址（用于非哈希算法）
     pub fn select(&self) -> Option<String> {
         self.select_with_key(None)
     }
 
-    /// 选择一个上游目标地址
+    /// Select an upstream target address — 选择一个上游目标地址
     ///
-    /// hash_key: 一致性哈希使用的 key（consumer ID、IP、header 值等）
+    /// hash_key: key used for consistent hashing (consumer ID, IP, header value, etc.) — 一致性哈希使用的 key（consumer ID、IP、header 值等）
     pub fn select_with_key(&self, hash_key: Option<&str>) -> Option<String> {
         if self.targets.is_empty() {
             return None;
         }
 
-        // 获取健康的目标索引列表
+        // Get list of healthy target indices — 获取健康的目标索引列表
         let healthy_indices = self.get_healthy_indices();
         if healthy_indices.is_empty() {
-            // 所有目标不健康时回退到全部目标（避免完全不可用）
+            // Fall back to all targets when all are unhealthy (avoid total unavailability) — 所有目标不健康时回退到全部目标（避免完全不可用）
             tracing::warn!(
                 "upstream {} 所有目标不健康，回退到全部目标",
                 self.upstream_name
@@ -124,17 +124,17 @@ impl LoadBalancer {
             }
             LbAlgorithm::LeastConnections => self.least_connections_select(&healthy_indices),
             LbAlgorithm::Latency => {
-                // Latency 算法暂用 round-robin 代替
+                // Latency algorithm temporarily uses round-robin as substitute — Latency 算法暂用 round-robin 代替
                 self.weighted_round_robin(&healthy_indices)
             }
         }
     }
 
-    /// 获取当前健康的目标索引
+    /// Get currently healthy target indices — 获取当前健康的目标索引
     fn get_healthy_indices(&self) -> Vec<usize> {
         let checker = match &self.health_checker {
             Some(c) => c,
-            None => return (0..self.targets.len()).collect(), // 无健康检查器，全部视为健康
+            None => return (0..self.targets.len()).collect(), // No health checker, all considered healthy — 无健康检查器，全部视为健康
         };
 
         (0..self.targets.len())
@@ -142,7 +142,7 @@ impl LoadBalancer {
             .collect()
     }
 
-    /// 无健康检查回退：从所有目标中选择
+    /// No health check fallback: select from all targets — 无健康检查回退：从所有目标中选择
     fn select_from_all(&self) -> Option<String> {
         if self.targets.is_empty() {
             return None;
@@ -151,7 +151,7 @@ impl LoadBalancer {
         self.weighted_round_robin(&indices)
     }
 
-    /// 加权 Round-Robin 选择（仅在健康目标中选择）
+    /// Weighted round-robin selection (among healthy targets only) — 加权 Round-Robin 选择（仅在健康目标中选择）
     fn weighted_round_robin(&self, healthy_indices: &[usize]) -> Option<String> {
         if healthy_indices.is_empty() {
             return None;
@@ -179,7 +179,7 @@ impl LoadBalancer {
         Some(self.targets[healthy_indices[0]].address.clone())
     }
 
-    /// 一致性哈希选择
+    /// Consistent hash selection — 一致性哈希选择
     fn consistent_hash_select(
         &self,
         hash_key: Option<&str>,
@@ -192,7 +192,7 @@ impl LoadBalancer {
         let key = hash_key.unwrap_or("default");
         let hash = compute_hash(key);
 
-        // 在哈希环上查找（二分搜索）
+        // Search on hash ring (binary search) — 在哈希环上查找（二分搜索）
         let ring = &self.hash_ring;
         if ring.is_empty() {
             return self.weighted_round_robin(healthy_indices);
@@ -203,7 +203,7 @@ impl LoadBalancer {
             Err(i) => i % ring.len(),
         };
 
-        // 从 pos 开始寻找健康的目标
+        // Find a healthy target starting from pos — 从 pos 开始寻找健康的目标
         for offset in 0..ring.len() {
             let idx = (pos + offset) % ring.len();
             let target_idx = ring[idx].target_index;
@@ -212,11 +212,11 @@ impl LoadBalancer {
             }
         }
 
-        // 回退到第一个健康目标
+        // Fall back to first healthy target — 回退到第一个健康目标
         Some(self.targets[healthy_indices[0]].address.clone())
     }
 
-    /// 最少连接选择
+    /// Least connections selection — 最少连接选择
     fn least_connections_select(&self, healthy_indices: &[usize]) -> Option<String> {
         if healthy_indices.is_empty() {
             return None;
@@ -227,8 +227,8 @@ impl LoadBalancer {
 
         for &i in healthy_indices {
             let conns = self.connection_counts[i].load(Ordering::Relaxed);
-            // 考虑权重：有效连接数 = 实际连接数 / 权重
-            // 权重越高，等效连接数越低，越容易被选中
+            // Factor in weight: effective connections = actual connections / weight — 考虑权重：有效连接数 = 实际连接数 / 权重
+            // Higher weight means lower effective count, more likely to be selected — 权重越高，等效连接数越低，越容易被选中
             let effective = if self.targets[i].weight > 0 {
                 conns * 100 / self.targets[i].weight as usize
             } else {
@@ -243,7 +243,7 @@ impl LoadBalancer {
         Some(self.targets[min_idx].address.clone())
     }
 
-    /// 增加目标的活跃连接数（在 upstream_peer 返回后调用）
+    /// Increment active connection count for a target (called after upstream_peer returns) — 增加目标的活跃连接数（在 upstream_peer 返回后调用）
     pub fn increment_connections(&self, addr: &str) {
         if let Some(i) = self.targets.iter().position(|t| t.address == addr) {
             if i < self.connection_counts.len() {
@@ -252,11 +252,11 @@ impl LoadBalancer {
         }
     }
 
-    /// 减少目标的活跃连接数（在 logging 阶段调用）
+    /// Decrement active connection count for a target (called during logging phase) — 减少目标的活跃连接数（在 logging 阶段调用）
     pub fn decrement_connections(&self, addr: &str) {
         if let Some(i) = self.targets.iter().position(|t| t.address == addr) {
             if i < self.connection_counts.len() {
-                // 防止下溢
+                // Prevent underflow — 防止下溢
                 let _ = self.connection_counts[i].fetch_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
@@ -266,7 +266,7 @@ impl LoadBalancer {
         }
     }
 
-    /// 根据 hash_on 配置从请求上下文中提取 hash key
+    /// Extract hash key from request context based on hash_on configuration — 根据 hash_on 配置从请求上下文中提取 hash key
     pub fn extract_hash_key(&self, ctx: &kong_core::traits::RequestCtx) -> Option<String> {
         match self.hash_on {
             HashOn::None => None,
@@ -287,33 +287,33 @@ impl LoadBalancer {
                 if path.is_empty() { None } else { Some(path.clone()) }
             }
             HashOn::Cookie | HashOn::QueryArg | HashOn::UriCapture => {
-                // 简化实现：暂不支持这些高级哈希方式
+                // Simplified implementation: these advanced hash modes are not yet supported — 简化实现：暂不支持这些高级哈希方式
                 None
             }
         }
     }
 
-    /// 获取 upstream 配置的 host_header
+    /// Get the upstream's configured host_header — 获取 upstream 配置的 host_header
     pub fn host_header(&self) -> Option<String> {
         self.host_header.clone()
     }
 
-    /// 获取 upstream 名称
+    /// Get upstream name — 获取 upstream 名称
     pub fn upstream_name(&self) -> &str {
         &self.upstream_name
     }
 
-    /// 目标数量
+    /// Target count — 目标数量
     pub fn target_count(&self) -> usize {
         self.targets.len()
     }
 
-    /// 获取算法
+    /// Get algorithm — 获取算法
     pub fn algorithm(&self) -> &LbAlgorithm {
         &self.algorithm
     }
 
-    /// 更新目标列表
+    /// Update target list — 更新目标列表
     pub fn update_targets(&mut self, targets: &[&Target]) {
         self.targets.clear();
         for target in targets {
@@ -334,14 +334,14 @@ impl LoadBalancer {
     }
 }
 
-/// 计算 ketama 风格的哈希值
+/// Compute ketama-style hash value — 计算 ketama 风格的哈希值
 fn compute_hash(key: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
     hasher.finish()
 }
 
-/// 构建一致性哈希环
+/// Build consistent hash ring — 构建一致性哈希环
 fn build_hash_ring(targets: &[BalancerTarget], total_slots: usize) -> Vec<HashRingNode> {
     if targets.is_empty() {
         return Vec::new();
@@ -355,7 +355,7 @@ fn build_hash_ring(targets: &[BalancerTarget], total_slots: usize) -> Vec<HashRi
     let mut ring = Vec::with_capacity(total_slots);
 
     for (idx, target) in targets.iter().enumerate() {
-        // 按权重比例分配虚拟节点数
+        // Allocate virtual nodes proportionally by weight — 按权重比例分配虚拟节点数
         let vnodes = (target.weight as usize * total_slots) / total_weight as usize;
         let vnodes = vnodes.max(1);
 
@@ -466,14 +466,14 @@ mod tests {
 
         let lb = LoadBalancer::new(&upstream, &[&t1, &t2, &t3]);
 
-        // 相同 key 应始终选择相同 target
+        // Same key should always select the same target — 相同 key 应始终选择相同 target
         let first = lb.select_with_key(Some("192.168.1.100")).unwrap();
         for _ in 0..100 {
             let result = lb.select_with_key(Some("192.168.1.100")).unwrap();
             assert_eq!(result, first, "相同 key 应选择相同 target");
         }
 
-        // 不同 key 可能选择不同 target（不强制要求，只验证不 panic）
+        // Different keys may select different targets (not enforced, just verify no panic) — 不同 key 可能选择不同 target（不强制要求，只验证不 panic）
         let _other = lb.select_with_key(Some("10.0.0.99")).unwrap();
     }
 
@@ -495,23 +495,23 @@ mod tests {
 
         let lb = LoadBalancer::new(&upstream, &[&t1, &t2]);
 
-        // 初始状态：两者连接数相同，选择第一个
+        // Initial state: both have same connection count, select first — 初始状态：两者连接数相同，选择第一个
         let first = lb.select().unwrap();
         assert_eq!(first, "10.0.0.1:80");
 
-        // 给 target1 增加连接
+        // Increase connections for target1 — 给 target1 增加连接
         lb.increment_connections("10.0.0.1:80");
         lb.increment_connections("10.0.0.1:80");
 
-        // 现在应该选择连接数更少的 target2
+        // Should now select target2 with fewer connections — 现在应该选择连接数更少的 target2
         let second = lb.select().unwrap();
         assert_eq!(second, "10.0.0.2:80");
 
-        // 减少 target1 的连接
+        // Decrease target1 connections — 减少 target1 的连接
         lb.decrement_connections("10.0.0.1:80");
         lb.decrement_connections("10.0.0.1:80");
 
-        // 两者又相等，选择第一个
+        // Both equal again, select first — 两者又相等，选择第一个
         let third = lb.select().unwrap();
         assert_eq!(third, "10.0.0.1:80");
     }
@@ -534,7 +534,7 @@ mod tests {
 
         let mut lb = LoadBalancer::new(&upstream, &[&t1, &t2]);
 
-        // 设置健康检查器
+        // Set up health checker — 设置健康检查器
         let checker = Arc::new(HealthChecker::new());
         let config = crate::health::HealthCheckerConfig {
             unhealthy_tcp_failures: 1,
@@ -549,20 +549,20 @@ mod tests {
 
         lb.set_health_checker(checker.clone());
 
-        // 初始状态：两者都健康
-        // 使 target1 不健康
+        // Initial state: both healthy — 初始状态：两者都健康
+        // Make target1 unhealthy — 使 target1 不健康
         checker.report_tcp_failure("test-upstream", "10.0.0.1:80");
 
-        // 现在只应该选择 target2
+        // Should now only select target2 — 现在只应该选择 target2
         for _ in 0..10 {
             let addr = lb.select().unwrap();
             assert_eq!(addr, "10.0.0.2:80", "不健康的目标应被跳过");
         }
 
-        // 恢复 target1
+        // Recover target1 — 恢复 target1
         checker.report_success("test-upstream", "10.0.0.1:80");
 
-        // 两者都应该被选择（增大采样数确保覆盖 round-robin 周期）
+        // Both should be selected (increase sample count to cover round-robin cycle) — 两者都应该被选择（增大采样数确保覆盖 round-robin 周期）
         let mut got_t1 = false;
         let mut got_t2 = false;
         for _ in 0..200 {

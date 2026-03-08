@@ -1,7 +1,7 @@
-//! 端到端代理功能测试
+//! End-to-end proxy functionality tests — 端到端代理功能测试
 //!
-//! 测试路由匹配、负载均衡、健康检查、TLS 证书管理等核心代理功能
-//! 注意：这些测试不启动真正的网络监听，而是直接测试组件逻辑
+//! Tests route matching, load balancing, health checks, TLS certificate management and other core proxy features — 测试路由匹配、负载均衡、健康检查、TLS 证书管理等核心代理功能
+//! Note: these tests do not start real network listeners, they directly test component logic — 注意：这些测试不启动真正的网络监听，而是直接测试组件逻辑
 
 use std::collections::HashMap;
 
@@ -13,7 +13,7 @@ use kong_proxy::balancer::LoadBalancer;
 use kong_proxy::tls::CertificateManager;
 use kong_router::{RequestContext, Router};
 
-// ========== 路由匹配测试 ==========
+// ========== Route matching tests — 路由匹配测试 ==========
 
 fn make_route(
     id: Uuid,
@@ -78,7 +78,7 @@ fn test_route_matching_by_path() {
 
     let router = Router::new(&routes, "traditional");
 
-    // /api 路径应匹配 api-route
+    // /api path should match api-route — /api 路径应匹配 api-route
     let ctx = RequestContext {
         method: "GET".to_string(),
         uri: "/api/users".to_string(),
@@ -94,7 +94,7 @@ fn test_route_matching_by_path() {
         Some("api-route".to_string())
     );
 
-    // /web 路径应匹配 web-route
+    // /web path should match web-route — /web 路径应匹配 web-route
     let ctx = RequestContext {
         method: "GET".to_string(),
         uri: "/web/page".to_string(),
@@ -291,7 +291,7 @@ fn test_strip_path_behavior() {
     assert_eq!(rm.matched_path, Some("/api/v1".to_string()));
 }
 
-// ========== 负载均衡测试 ==========
+// ========== Load balancing tests — 负载均衡测试 ==========
 
 #[test]
 fn test_load_balancer_round_robin() {
@@ -315,7 +315,7 @@ fn test_load_balancer_round_robin() {
         *counts.entry(addr).or_insert(0) += 1;
     }
 
-    // 等权重应该均匀分布
+    // Equal weights should distribute evenly — 等权重应该均匀分布
     assert_eq!(*counts.get("10.0.0.1:80").unwrap(), 100);
     assert_eq!(*counts.get("10.0.0.2:80").unwrap(), 100);
 }
@@ -342,7 +342,7 @@ fn test_load_balancer_weighted() {
         *counts.entry(addr).or_insert(0) += 1;
     }
 
-    // 3:1 权重比
+    // 3:1 weight ratio — 3:1 权重比
     assert_eq!(*counts.get("10.0.0.1:80").unwrap(), 300);
     assert_eq!(*counts.get("10.0.0.2:80").unwrap(), 100);
 }
@@ -357,7 +357,7 @@ fn test_load_balancer_zero_weight_excluded() {
     };
     let t2 = Target {
         target: "10.0.0.2:80".to_string(),
-        weight: 0, // 权重为 0，应被排除
+        weight: 0, // Weight 0, should be excluded — 权重为 0，应被排除
         ..Target::default()
     };
 
@@ -381,7 +381,7 @@ fn test_load_balancer_dynamic_update() {
     let mut lb = LoadBalancer::new(&upstream, &[&t1]);
     assert_eq!(lb.target_count(), 1);
 
-    // 添加新目标
+    // Add new target — 添加新目标
     let t2 = Target {
         target: "10.0.0.2:80".to_string(),
         weight: 100,
@@ -391,7 +391,7 @@ fn test_load_balancer_dynamic_update() {
     assert_eq!(lb.target_count(), 2);
 }
 
-// ========== TLS 证书管理测试 ==========
+// ========== TLS certificate management tests — TLS 证书管理测试 ==========
 
 #[test]
 fn test_certificate_exact_sni_match() {
@@ -440,11 +440,11 @@ fn test_certificate_wildcard_sni() {
 
     manager.load_certificates(&certs, &snis);
 
-    // 子域名应匹配通配符
+    // Subdomains should match wildcard — 子域名应匹配通配符
     assert!(manager.find_certificate(Some("api.example.com")).is_some());
     assert!(manager.find_certificate(Some("www.example.com")).is_some());
 
-    // 不同域名不应匹配
+    // Different domains should not match — 不同域名不应匹配
     assert!(manager.find_certificate(Some("example.org")).is_none());
 }
 
@@ -453,18 +453,18 @@ fn test_certificate_default_fallback() {
     let manager = CertificateManager::new();
     manager.set_default_cert("default-cert".to_string(), "default-key".to_string());
 
-    // 无 SNI 返回默认
+    // No SNI returns default — 无 SNI 返回默认
     let result = manager.find_certificate(None);
     assert!(result.is_some());
     assert_eq!(result.unwrap().cert, "default-cert");
 
-    // 无匹配也返回默认
+    // No match also returns default — 无匹配也返回默认
     let result = manager.find_certificate(Some("unknown.com"));
     assert!(result.is_some());
     assert_eq!(result.unwrap().cert, "default-cert");
 }
 
-// ========== 路由表热更新测试 ==========
+// ========== Route table hot-reload tests — 路由表热更新测试 ==========
 
 #[test]
 fn test_router_hot_update() {
@@ -481,7 +481,7 @@ fn test_router_hot_update() {
     let mut router = Router::new(&routes, "traditional");
     assert_eq!(router.route_count(), 1);
 
-    // 热更新路由表
+    // Hot-reload routing table — 热更新路由表
     let new_routes = vec![
         make_route(
             Uuid::new_v4(),
@@ -504,7 +504,7 @@ fn test_router_hot_update() {
     router.rebuild(&new_routes);
     assert_eq!(router.route_count(), 2);
 
-    // 旧路由不应再匹配
+    // Old routes should no longer match — 旧路由不应再匹配
     let ctx = RequestContext {
         method: "GET".to_string(),
         uri: "/v1/test".to_string(),
@@ -515,7 +515,7 @@ fn test_router_hot_update() {
     };
     assert!(router.find_route(&ctx).is_none());
 
-    // 新路由应匹配
+    // New routes should match — 新路由应匹配
     let ctx = RequestContext {
         method: "GET".to_string(),
         uri: "/a/test".to_string(),
@@ -532,16 +532,16 @@ fn test_router_hot_update() {
     );
 }
 
-// ========== 插件系统集成测试 ==========
+// ========== Plugin system integration tests — 插件系统集成测试 ==========
 
 #[test]
 fn test_plugin_executor_priority_ordering() {
     use kong_plugin_system::{PluginExecutor, PluginRegistry};
 
-    // 创建空的注册表
+    // Create empty registry — 创建空的注册表
     let registry = PluginRegistry::new();
 
-    // 验证无插件时不出错
+    // Verify no error when there are no plugins — 验证无插件时不出错
     let plugins: Vec<kong_core::models::Plugin> = vec![];
     let resolved = PluginExecutor::resolve_plugins(
         &registry,
@@ -560,7 +560,7 @@ async fn test_plugin_phase_execution_no_plugins() {
     let resolved = vec![];
     let mut ctx = RequestCtx::new();
 
-    // 空插件链执行不应出错
+    // Executing an empty plugin chain should not error — 空插件链执行不应出错
     let result = PluginExecutor::execute_phase(
         &resolved,
         kong_core::traits::Phase::Access,
@@ -571,7 +571,7 @@ async fn test_plugin_phase_execution_no_plugins() {
     assert!(!ctx.is_short_circuited());
 }
 
-// ========== 健康检查集成测试 ==========
+// ========== Health check integration tests — 健康检查集成测试 ==========
 
 #[tokio::test]
 async fn test_health_checker_state_transitions() {
@@ -588,16 +588,16 @@ async fn test_health_checker_state_transitions() {
 
     let target_addr = "10.0.0.1:80";
 
-    // 初始状态应为健康
+    // Initial state should be healthy — 初始状态应为健康
     assert!(checker.is_healthy(&config.name, target_addr));
 
-    // 报告多次失败
+    // Report multiple failures — 报告多次失败
     for _ in 0..5 {
         checker.report_tcp_failure(&config.name, target_addr);
     }
 
-    // 应标记为不健康（取决于阈值设置）
-    // 默认阈值为 0（禁用），因此始终健康
-    // 这里只验证接口不 panic
+    // Should be marked unhealthy (depends on threshold settings) — 应标记为不健康（取决于阈值设置）
+    // Default threshold is 0 (disabled), so always healthy — 默认阈值为 0（禁用），因此始终健康
+    // Here we only verify the interface doesn't panic — 这里只验证接口不 panic
     let _ = checker.is_healthy(&config.name, target_addr);
 }

@@ -1,9 +1,9 @@
-//! 表达式路由引擎 — 支持 Kong ATC 表达式语法
+//! Expression routing engine — supports Kong ATC expression syntax — 表达式路由引擎 — 支持 Kong ATC 表达式语法
 //!
-//! 支持的运算符: ==, !=, ~, in, not in, &&, ||
-//! 支持的字段: http.method, http.host, http.path, http.headers.*, net.protocol, tls.sni
+//! Supported operators — 支持的运算符: ==, !=, ~, in, not in, &&, ||
+//! Supported fields — 支持的字段: http.method, http.host, http.path, http.headers.*, net.protocol, tls.sni
 //!
-//! 示例表达式:
+//! Example expressions — 示例表达式:
 //! - `http.method == "GET" && http.path ~ "^/api"`
 //! - `http.host in "example.com", "api.example.com"`
 
@@ -13,19 +13,19 @@ use uuid::Uuid;
 use crate::{RequestContext, RouteMatch};
 use kong_core::models::Route;
 
-/// 表达式路由器
+/// Expression router — 表达式路由器
 pub struct ExpressionsRouter {
-    /// 已编译的表达式路由（按 priority 降序排列）
+    /// Compiled expression routes (sorted by priority descending) — 已编译的表达式路由（按 priority 降序排列）
     routes: Vec<ExpressionRoute>,
 }
 
-/// 编译后的表达式路由
+/// Compiled expression route — 编译后的表达式路由
 struct ExpressionRoute {
     route_id: Uuid,
     service_id: Option<Uuid>,
     route_name: Option<String>,
     priority: i64,
-    /// 编译后的表达式
+    /// Compiled expression — 编译后的表达式
     expression: CompiledExpression,
     strip_path: bool,
     preserve_host: bool,
@@ -33,27 +33,27 @@ struct ExpressionRoute {
     protocols: Vec<String>,
 }
 
-/// 编译后的表达式节点
+/// Compiled expression node — 编译后的表达式节点
 enum CompiledExpression {
-    /// 与操作
+    /// AND operation — 与操作
     And(Box<CompiledExpression>, Box<CompiledExpression>),
-    /// 或操作
+    /// OR operation — 或操作
     Or(Box<CompiledExpression>, Box<CompiledExpression>),
-    /// 相等比较
+    /// Equality comparison — 相等比较
     Eq(Field, String),
-    /// 不等比较
+    /// Inequality comparison — 不等比较
     Ne(Field, String),
-    /// 正则匹配
+    /// Regex match — 正则匹配
     Regex(Field, Regex),
-    /// 包含检查
+    /// Contains check — 包含检查
     In(Field, Vec<String>),
-    /// 不包含检查
+    /// Not-contains check — 不包含检查
     NotIn(Field, Vec<String>),
-    /// 始终为真（空表达式）
+    /// Always true (empty expression) — 始终为真（空表达式）
     True,
 }
 
-/// 可匹配的字段
+/// Matchable fields — 可匹配的字段
 #[derive(Debug, Clone)]
 enum Field {
     HttpMethod,
@@ -65,7 +65,7 @@ enum Field {
 }
 
 impl ExpressionsRouter {
-    /// 从路由列表构建表达式路由器
+    /// Build an expression router from route list — 从路由列表构建表达式路由器
     pub fn new(routes: &[Route]) -> Self {
         let mut expr_routes: Vec<ExpressionRoute> = routes
             .iter()
@@ -93,7 +93,7 @@ impl ExpressionsRouter {
             })
             .collect();
 
-        // 按 priority 降序排列
+        // Sort by priority descending — 按 priority 降序排列
         expr_routes.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         tracing::info!(
@@ -106,7 +106,7 @@ impl ExpressionsRouter {
         }
     }
 
-    /// 匹配请求
+    /// Match a request — 匹配请求
     pub fn find_route(&self, ctx: &RequestContext) -> Option<RouteMatch> {
         for route in &self.routes {
             if evaluate(&route.expression, ctx) {
@@ -125,13 +125,13 @@ impl ExpressionsRouter {
         None
     }
 
-    /// 路由数量
+    /// Number of routes — 路由数量
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
 }
 
-/// 计算表达式
+/// Evaluate an expression — 计算表达式
 fn evaluate(expr: &CompiledExpression, ctx: &RequestContext) -> bool {
     match expr {
         CompiledExpression::True => true,
@@ -160,7 +160,7 @@ fn evaluate(expr: &CompiledExpression, ctx: &RequestContext) -> bool {
     }
 }
 
-/// 获取字段值
+/// Get field value — 获取字段值
 fn get_field_value(field: &Field, ctx: &RequestContext) -> Option<String> {
     match field {
         Field::HttpMethod => Some(ctx.method.clone()),
@@ -172,7 +172,7 @@ fn get_field_value(field: &Field, ctx: &RequestContext) -> Option<String> {
     }
 }
 
-/// 解析字段名
+/// Parse a field name — 解析字段名
 fn parse_field(name: &str) -> Result<Field, String> {
     let name = name.trim();
     match name {
@@ -189,9 +189,9 @@ fn parse_field(name: &str) -> Result<Field, String> {
     }
 }
 
-/// 解析表达式字符串
+/// Parse an expression string — 解析表达式字符串
 ///
-/// 简化的递归下降解析器，支持:
+/// Simplified recursive descent parser, supports — 简化的递归下降解析器，支持:
 /// - `field == "value"`
 /// - `field != "value"`
 /// - `field ~ "regex"`
@@ -205,30 +205,30 @@ fn parse_expression(input: &str) -> Result<CompiledExpression, String> {
         return Ok(CompiledExpression::True);
     }
 
-    // 处理 || （最低优先级）
+    // Handle || (lowest precedence) — 处理 || （最低优先级）
     if let Some(pos) = find_operator(input, "||") {
         let left = parse_expression(&input[..pos])?;
         let right = parse_expression(&input[pos + 2..])?;
         return Ok(CompiledExpression::Or(Box::new(left), Box::new(right)));
     }
 
-    // 处理 &&
+    // Handle && — 处理 &&
     if let Some(pos) = find_operator(input, "&&") {
         let left = parse_expression(&input[..pos])?;
         let right = parse_expression(&input[pos + 2..])?;
         return Ok(CompiledExpression::And(Box::new(left), Box::new(right)));
     }
 
-    // 处理括号
+    // Handle parentheses — 处理括号
     if input.starts_with('(') && input.ends_with(')') {
         return parse_expression(&input[1..input.len() - 1]);
     }
 
-    // 解析简单比较: field op value
+    // Parse simple comparison: field op value — 解析简单比较: field op value
     parse_comparison(input)
 }
 
-/// 查找顶层运算符位置（跳过括号和引号内的内容）
+/// Find top-level operator position (skipping content inside parentheses and quotes) — 查找顶层运算符位置（跳过括号和引号内的内容）
 fn find_operator(input: &str, op: &str) -> Option<usize> {
     let mut depth = 0;
     let mut in_quote = false;
@@ -241,7 +241,7 @@ fn find_operator(input: &str, op: &str) -> Option<usize> {
             b')' if !in_quote => depth -= 1,
             _ if !in_quote && depth == 0 => {
                 if input[i..].starts_with(op) {
-                    // 确保前后有空格
+                    // Ensure spaces before and after — 确保前后有空格
                     let before_ok = i == 0 || bytes[i - 1] == b' ';
                     let after_ok = i + op.len() >= bytes.len()
                         || bytes[i + op.len()] == b' ';
@@ -257,14 +257,14 @@ fn find_operator(input: &str, op: &str) -> Option<usize> {
     None
 }
 
-/// 解析简单比较表达式
+/// Parse a simple comparison expression — 解析简单比较表达式
 fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
     let input = input.trim();
 
-    // 尝试匹配各种运算符
+    // Try matching various operators — 尝试匹配各种运算符
     for (op, op_len) in &[("==", 2), ("!=", 2), ("~", 1)] {
         if let Some(pos) = input.find(op) {
-            // 确保不是其他运算符的一部分
+            // Ensure it's not part of another operator — 确保不是其他运算符的一部分
             if *op == "~" && (input[..pos].ends_with('!') || input[pos + 1..].starts_with('=')) {
                 continue;
             }
@@ -287,7 +287,7 @@ fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
         }
     }
 
-    // 尝试 "in" 运算符
+    // Try "in" operator — 尝试 "in" 运算符
     if let Some(pos) = input.find(" in ") {
         let field_str = input[..pos].trim();
         let values_str = input[pos + 4..].trim();
@@ -299,7 +299,7 @@ fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
         return Ok(CompiledExpression::In(field, values));
     }
 
-    // 尝试 "not in" 运算符
+    // Try "not in" operator — 尝试 "not in" 运算符
     if let Some(pos) = input.find(" not in ") {
         let field_str = input[..pos].trim();
         let values_str = input[pos + 8..].trim();
@@ -314,7 +314,7 @@ fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
     Err(format!("无法解析表达式: {}", input))
 }
 
-/// 去除字符串两端的引号
+/// Strip surrounding quotes from a string — 去除字符串两端的引号
 fn strip_quotes(s: &str) -> String {
     let s = s.trim();
     if (s.starts_with('"') && s.ends_with('"'))

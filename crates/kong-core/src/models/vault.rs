@@ -3,20 +3,20 @@ use uuid::Uuid;
 
 use crate::traits::Entity;
 
-/// Vault 实体 — 与 Kong sm_vaults 表完全一致
-/// 注意：Kong 中 table_name 为 "sm_vaults"，但 admin_api_name 为 "vaults"
+/// Vault entity — fully consistent with Kong sm_vaults table — Vault 实体 — 与 Kong sm_vaults 表完全一致
+/// Note: Kong uses table_name "sm_vaults", but admin_api_name is "vaults" — 注意：Kong 中 table_name 为 "sm_vaults"，但 admin_api_name 为 "vaults"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Vault {
     pub id: Uuid,
-    /// Vault 前缀标识符，唯一，格式要求 [a-z][a-z0-9-]-[a-z0-9]+
+    /// Vault prefix identifier, unique, format: [a-z][a-z0-9-]-[a-z0-9]+ — Vault 前缀标识符，唯一，格式要求 [a-z][a-z0-9-]-[a-z0-9]+
     pub prefix: String,
-    /// Vault 类型名称，必填
+    /// Vault type name, required — Vault 类型名称，必填
     pub name: String,
-    /// Vault 描述
+    /// Vault description — Vault 描述
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Vault 配置（动态 JSON 结构，由各 vault 类型的 schema 定义）
+    /// Vault configuration (dynamic JSON structure, defined by each vault type's schema) — Vault 配置（动态 JSON 结构，由各 vault 类型的 schema 定义）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
     pub created_at: i64,

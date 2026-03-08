@@ -1,9 +1,9 @@
-//! Admin API 请求处理器
+//! Admin API request handlers — Admin API 请求处理器
 //!
-//! 实现 Kong 兼容的 REST API 端点:
-//! - 通用 CRUD 端点（泛型）
-//! - 嵌套端点（如 /services/{id}/routes）
-//! - 特殊端点（/, /status）
+//! Implements Kong-compatible REST API endpoints: — 实现 Kong 兼容的 REST API 端点:
+//! - Generic CRUD endpoints (generic) — 通用 CRUD 端点（泛型）
+//! - Nested endpoints (e.g. /services/{id}/routes) — 嵌套端点（如 /services/{id}/routes）
+//! - Special endpoints (/, /status) — 特殊端点（/, /status）
 
 use std::sync::Arc;
 
@@ -20,10 +20,10 @@ use kong_core::traits::{Dao, Entity, PageParams, PrimaryKey};
 
 use crate::AdminState;
 
-// ============ 缓存刷新 ============
+// ============ Cache refresh — 缓存刷新 ============
 
 impl AdminState {
-    /// Admin API 写操作后异步刷新 KongProxy 内存缓存
+    /// Asynchronously refresh KongProxy in-memory cache after Admin API write operations — Admin API 写操作后异步刷新 KongProxy 内存缓存
     pub async fn refresh_proxy_cache(&self, entity_type: &str) {
         let all_params = kong_core::traits::PageParams {
             size: 10000,
@@ -42,7 +42,7 @@ impl AdminState {
                 match self.routes.page(&all_params).await {
                     Ok(page) => {
                         self.proxy.update_routes(&page.data);
-                        // 同步更新 Stream 路由器（L4 路由表）
+                        // Sync update Stream router (L4 routing table) — 同步更新 Stream 路由器（L4 路由表）
                         if let Some(ref sr) = self.stream_router {
                             if let Ok(mut router) = sr.write() {
                                 router.rebuild(&page.data);
@@ -85,12 +85,12 @@ impl AdminState {
                     Err(e) => tracing::error!("刷新 ca_certificates 缓存失败: {}", e),
                 }
             }
-            _ => {} // consumers / vaults 等代理流程不直接使用
+            _ => {} // consumers / vaults etc. are not directly used in proxy flow — consumers / vaults 等代理流程不直接使用
         }
     }
 }
 
-// ============ 查询参数 ============
+// ============ Query parameters — 查询参数 ============
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -111,9 +111,9 @@ impl ListParams {
     }
 }
 
-// ============ 错误响应 ============
+// ============ Error response — 错误响应 ============
 
-/// Kong 兼容的错误响应格式
+/// Kong-compatible error response format — Kong 兼容的错误响应格式
 #[allow(dead_code)]
 fn error_response(err: KongError) -> impl IntoResponse {
     let status = StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -125,9 +125,9 @@ fn error_response(err: KongError) -> impl IntoResponse {
     (status, Json(body))
 }
 
-// ============ 特殊端点 ============
+// ============ Special endpoints — 特殊端点 ============
 
-/// 将 ListenAddr 列表序列化为 Kong 兼容的字符串数组
+/// Serialize ListenAddr list to Kong-compatible string array — 将 ListenAddr 列表序列化为 Kong 兼容的字符串数组
 fn listen_addrs_to_strings(addrs: &[kong_config::ListenAddr]) -> Vec<String> {
     addrs.iter().map(|a| {
         let mut s = format!("{}:{}", a.ip, a.port);
@@ -140,12 +140,12 @@ fn listen_addrs_to_strings(addrs: &[kong_config::ListenAddr]) -> Vec<String> {
     }).collect()
 }
 
-/// GET / — 节点信息（兼容 Kong）
+/// GET / — Node info (Kong-compatible) — GET / — 节点信息（兼容 Kong）
 pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
     let config = &state.config;
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-    // 将监听地址转为前端期望的 [{port, ssl}] 格式
+    // Convert listen addresses to the [{port, ssl}] format expected by frontend — 将监听地址转为前端期望的 [{port, ssl}] 格式
     let to_listeners = |addrs: &[kong_config::ListenAddr]| -> Vec<Value> {
         addrs.iter().map(|a| json!({"port": a.port, "ssl": a.ssl})).collect()
     };
@@ -217,7 +217,7 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
     }))
 }
 
-/// GET /status — 服务状态
+/// GET /status — Service status — GET /status — 服务状态
 pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse {
     Json(json!({
         "server": {
@@ -240,15 +240,15 @@ pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse 
     }))
 }
 
-// ============ 通用 CRUD 端点 ============
+// ============ Generic CRUD endpoints — 通用 CRUD 端点 ============
 
-// ============ 通用 CRUD 辅助 ============
+// ============ Generic CRUD helpers — 通用 CRUD 辅助 ============
 
-/// 通用的列表/查询/创建/更新/删除逻辑
-/// 因 Rust 泛型限制（无法在运行时根据类型选择 DAO）,
-/// 使用具体类型的 handler 通过宏简化注册
+/// Generic list/query/create/update/delete logic — 通用的列表/查询/创建/更新/删除逻辑
+/// Due to Rust generics limitations (cannot select DAO by type at runtime), — 因 Rust 泛型限制（无法在运行时根据类型选择 DAO）,
+/// uses concrete type handlers simplified via macros — 使用具体类型的 handler 通过宏简化注册
 
-/// 通用列表处理
+/// Generic list handler — 通用列表处理
 async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     params: &ListParams,
@@ -269,7 +269,7 @@ async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     }
 }
 
-/// 通用查询处理
+/// Generic get handler — 通用查询处理
 async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -295,12 +295,12 @@ async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
     }
 }
 
-/// 通用创建处理
+/// Generic create handler — 通用创建处理
 async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
-    // 自动注入 id 和时间戳（Kong 兼容：创建时这些字段可选）
+    // Auto-inject id and timestamps (Kong-compatible: these fields are optional on create) — 自动注入 id 和时间戳（Kong 兼容：创建时这些字段可选）
     let mut body = body;
     if let Some(obj) = body.as_object_mut() {
         if !obj.contains_key("id") {
@@ -313,7 +313,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         if !obj.contains_key("updated_at") {
             obj.insert("updated_at".to_string(), json!(now));
         }
-        // Kong 兼容：url 字段是 protocol + host + port + path 的快捷方式
+        // Kong-compatible: url field is a shorthand for protocol + host + port + path — Kong 兼容：url 字段是 protocol + host + port + path 的快捷方式
         if let Some(url_val) = obj.remove("url") {
             if let Some(url_str) = url_val.as_str() {
                 if let Ok(parsed) = url::Url::parse(url_str) {
@@ -369,7 +369,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     }
 }
 
-/// 通用更新处理
+/// Generic update handler — 通用更新处理
 async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -392,7 +392,7 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     }
 }
 
-/// 通用 upsert 处理
+/// Generic upsert handler — 通用 upsert 处理
 async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -429,7 +429,7 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     }
 }
 
-/// 通用删除处理
+/// Generic delete handler — 通用删除处理
 async fn do_delete<T: Entity + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -449,9 +449,9 @@ async fn do_delete<T: Entity + Send + Sync + 'static>(
     }
 }
 
-// ============ 宏生成具体类型的 handler ============
+// ============ Macro-generated concrete type handlers — 宏生成具体类型的 handler ============
 
-/// 为每个实体类型生成具体的 CRUD handler
+/// Generate concrete CRUD handlers for each entity type — 为每个实体类型生成具体的 CRUD handler
 macro_rules! entity_handlers {
     ($entity:ty, $dao_field:ident, $entity_name:expr, $list:ident, $get:ident, $create:ident, $update:ident, $upsert:ident, $del:ident) => {
         pub async fn $list(
@@ -516,7 +516,7 @@ macro_rules! entity_handlers {
     };
 }
 
-// 为每个实体类型生成 handler
+// Generate handlers for each entity type — 为每个实体类型生成 handler
 entity_handlers!(Service, services, "services", list_services, get_service, create_service, update_service, upsert_service, delete_service);
 entity_handlers!(Route, routes, "routes", list_routes, get_route, create_route, update_route, upsert_route, delete_route);
 entity_handlers!(Consumer, consumers, "", list_consumers, get_consumer, create_consumer, update_consumer, upsert_consumer, delete_consumer);
@@ -527,7 +527,7 @@ entity_handlers!(Sni, snis, "snis", list_snis, get_sni, create_sni, update_sni, 
 entity_handlers!(CaCertificate, ca_certificates, "ca_certificates", list_ca_certificates, get_ca_certificate, create_ca_certificate, update_ca_certificate, upsert_ca_certificate, delete_ca_certificate);
 entity_handlers!(Vault, vaults, "", list_vaults, get_vault, create_vault, update_vault, upsert_vault, delete_vault);
 
-// ============ 嵌套端点 ============
+// ============ Nested endpoints — 嵌套端点 ============
 
 /// GET /services/:service_id/routes
 pub async fn list_nested_routes(
@@ -535,7 +535,7 @@ pub async fn list_nested_routes(
     Path(service_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
-    // 先解析 service ID
+    // Resolve service ID first — 先解析 service ID
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
         Ok(Some(s)) => s,
@@ -651,7 +651,7 @@ pub async fn create_nested_route(
     Path(service_id_or_name): Path<String>,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    // 解析 service
+    // Resolve service — 解析 service
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
         Ok(Some(s)) => s,
@@ -669,7 +669,7 @@ pub async fn create_nested_route(
         }
     };
 
-    // 注入 service FK
+    // Inject service FK — 注入 service FK
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
             "service".to_string(),
@@ -733,7 +733,7 @@ pub async fn create_nested_target(
     Path(upstream_id_or_name): Path<String>,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    // 解析 upstream
+    // Resolve upstream — 解析 upstream
     let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
     let upstream = match state.upstreams.select(&upstream_pk).await {
         Ok(Some(u)) => u,
@@ -751,7 +751,7 @@ pub async fn create_nested_target(
         }
     };
 
-    // 注入 upstream FK
+    // Inject upstream FK — 注入 upstream FK
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
             "upstream".to_string(),
@@ -787,7 +787,7 @@ pub async fn get_nested_target(
     State(state): State<AdminState>,
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    // 验证 upstream 存在
+    // Verify upstream exists — 验证 upstream 存在
     let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
     if let Ok(None) = state.upstreams.select(&upstream_pk).await {
         return (

@@ -1,9 +1,9 @@
-//! TLS ClientHello SNI 解析 — 从原始字节中提取 SNI
+//! TLS ClientHello SNI parsing — extract SNI from raw bytes — TLS ClientHello SNI 解析 — 从原始字节中提取 SNI
 //!
-//! 用于 TLS Passthrough 模式：peek 首字节后解析 ClientHello，
-//! 提取 SNI 用于路由匹配，然后原样转发加密数据。
+//! Used for TLS Passthrough mode: peek first bytes, parse ClientHello, — 用于 TLS Passthrough 模式：peek 首字节后解析 ClientHello，
+//! extract SNI for route matching, then forward encrypted data as-is. — 提取 SNI 用于路由匹配，然后原样转发加密数据。
 //!
-//! 解析路径：
+//! Parsing path: — 解析路径：
 //! TLS Record Header (5 bytes)
 //!   → Handshake Header (4 bytes)
 //!     → ClientHello
@@ -15,17 +15,17 @@
 //!           → ServerNameList
 //!             → HostName
 
-/// 判断首字节是否为 TLS Handshake record（content type 0x16）
+/// Check if the first byte is a TLS Handshake record (content type 0x16) — 判断首字节是否为 TLS Handshake record（content type 0x16）
 pub fn is_tls_handshake(byte: u8) -> bool {
     byte == 0x16
 }
 
-/// 从 peek 到的缓冲区中解析 TLS ClientHello 的 SNI
+/// Parse TLS ClientHello SNI from peeked buffer — 从 peek 到的缓冲区中解析 TLS ClientHello 的 SNI
 ///
-/// 返回 None 表示：
-/// - 不是有效的 TLS ClientHello
-/// - ClientHello 不包含 SNI extension
-/// - 缓冲区不够长（但不会 panic）
+/// Returns None if: — 返回 None 表示：
+/// - Not a valid TLS ClientHello — 不是有效的 TLS ClientHello
+/// - ClientHello does not contain SNI extension — ClientHello 不包含 SNI extension
+/// - Buffer is too short (will not panic) — 缓冲区不够长（但不会 panic）
 pub fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
     let mut pos = 0;
 
@@ -35,9 +35,9 @@ pub fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
         return None;
     }
     if buf[0] != 0x16 {
-        return None; // 不是 Handshake
+        return None; // Not a Handshake — 不是 Handshake
     }
-    // 跳过 version (2 bytes) 和 record length (2 bytes)
+    // Skip version (2 bytes) and record length (2 bytes) — 跳过 version (2 bytes) 和 record length (2 bytes)
     pos += 5;
 
     // === Handshake Header (4 bytes) ===
@@ -46,9 +46,9 @@ pub fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
         return None;
     }
     if buf[pos] != 0x01 {
-        return None; // 不是 ClientHello
+        return None; // Not a ClientHello — 不是 ClientHello
     }
-    pos += 4; // 跳过 handshake type + length
+    pos += 4; // Skip handshake type + length — 跳过 handshake type + length
 
     // === ClientHello 内容 ===
     // ProtocolVersion(2)
@@ -94,10 +94,10 @@ pub fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
 
     let extensions_end = pos + extensions_len;
     if buf.len() < extensions_end {
-        // 缓冲区不够，但仍尝试解析已有数据
+        // Buffer insufficient, but still try to parse available data — 缓冲区不够，但仍尝试解析已有数据
     }
 
-    // 遍历 extensions 查找 SNI (type = 0x0000)
+    // Iterate extensions to find SNI (type = 0x0000) — 遍历 extensions 查找 SNI (type = 0x0000)
     while pos + 4 <= buf.len() && pos + 4 <= extensions_end {
         let ext_type = read_u16(buf, pos);
         let ext_len = read_u16(buf, pos + 2) as usize;
@@ -114,9 +114,9 @@ pub fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
     None
 }
 
-/// 解析 SNI Extension 的内容
+/// Parse the content of SNI Extension — 解析 SNI Extension 的内容
 ///
-/// 格式：ServerNameList length(2) + [NameType(1) + HostName length(2) + HostName]
+/// Format: ServerNameList length(2) + [NameType(1) + HostName length(2) + HostName] — 格式：ServerNameList length(2) + [NameType(1) + HostName length(2) + HostName]
 fn parse_sni_extension(data: &[u8]) -> Option<String> {
     if data.len() < 2 {
         return None;
@@ -125,14 +125,14 @@ fn parse_sni_extension(data: &[u8]) -> Option<String> {
     let _list_len = read_u16(data, 0) as usize;
     let mut pos = 2;
 
-    // 遍历 ServerName 列表
+    // Iterate ServerName list — 遍历 ServerName 列表
     while pos + 3 <= data.len() {
         let name_type = data[pos];
         let name_len = read_u16(data, pos + 1) as usize;
         pos += 3;
 
         if name_type == 0x00 {
-            // host_name 类型
+            // host_name type — host_name 类型
             if pos + name_len <= data.len() {
                 return String::from_utf8(data[pos..pos + name_len].to_vec()).ok();
             }
@@ -144,15 +144,15 @@ fn parse_sni_extension(data: &[u8]) -> Option<String> {
     None
 }
 
-/// 读取大端序 u16
+/// Read big-endian u16 — 读取大端序 u16
 fn read_u16(buf: &[u8], pos: usize) -> u16 {
     ((buf[pos] as u16) << 8) | (buf[pos + 1] as u16)
 }
 
-/// ClientHello 的推荐 peek 缓冲区大小
+/// Recommended peek buffer size for ClientHello — ClientHello 的推荐 peek 缓冲区大小
 ///
-/// 大多数 ClientHello 在 512 字节内包含 SNI extension。
-/// 使用 1024 字节提供足够余量（某些客户端可能有较长的 session ticket）。
+/// Most ClientHello messages contain the SNI extension within 512 bytes. — 大多数 ClientHello 在 512 字节内包含 SNI extension。
+/// Using 1024 bytes provides sufficient headroom (some clients may have long session tickets). — 使用 1024 字节提供足够余量（某些客户端可能有较长的 session ticket）。
 pub const CLIENT_HELLO_PEEK_SIZE: usize = 1024;
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_parse_sni_from_real_client_hello() {
-        // 手工构造一个最小的 TLS 1.2 ClientHello，包含 SNI "example.com"
+        // Manually construct a minimal TLS 1.2 ClientHello with SNI "example.com" — 手工构造一个最小的 TLS 1.2 ClientHello，包含 SNI "example.com"
         let sni = b"example.com";
         let sni_ext = build_sni_extension(sni);
         let client_hello = build_client_hello(&sni_ext);
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_parse_no_sni() {
-        // ClientHello 无 extensions
+        // ClientHello without extensions — ClientHello 无 extensions
         let client_hello = build_client_hello_no_ext();
         let record = build_tls_record(&client_hello);
 
@@ -202,7 +202,7 @@ mod tests {
         assert!(parse_sni_from_client_hello(b"GET / HTTP/1.1\r\n").is_none());
     }
 
-    // ===== 测试辅助构造函数 =====
+    // ===== Test helper builder functions — 测试辅助构造函数 =====
 
     fn build_sni_extension(hostname: &[u8]) -> Vec<u8> {
         let mut ext = Vec::new();
@@ -231,7 +231,7 @@ mod tests {
         let mut hello = Vec::new();
         // Handshake type: ClientHello (1)
         hello.push(0x01);
-        // 占位 length (3 bytes)，最后填充
+        // Placeholder length (3 bytes), filled in at the end — 占位 length (3 bytes)，最后填充
         hello.push(0x00);
         hello.push(0x00);
         hello.push(0x00);
@@ -259,7 +259,7 @@ mod tests {
         // Extensions
         hello.extend_from_slice(extensions);
 
-        // 回填 handshake length
+        // Backfill handshake length — 回填 handshake length
         let body_len = hello.len() - body_start;
         hello[1] = ((body_len >> 16) & 0xFF) as u8;
         hello[2] = ((body_len >> 8) & 0xFF) as u8;
@@ -287,7 +287,7 @@ mod tests {
         hello.push(0xFF);
         hello.push(0x01);
         hello.push(0x00);
-        // 无 extensions
+        // No extensions — 无 extensions
 
         let body_len = hello.len() - body_start;
         hello[1] = ((body_len >> 16) & 0xFF) as u8;

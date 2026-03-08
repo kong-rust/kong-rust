@@ -4,17 +4,17 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 use std::str::FromStr;
 
-/// 数据库连接管理器
+/// Database connection manager — 数据库连接管理器
 #[derive(Clone)]
 pub struct Database {
-    /// 读写连接池
+    /// Read-write connection pool — 读写连接池
     pool: PgPool,
-    /// 只读连接池（可选）
+    /// Read-only connection pool (optional) — 只读连接池（可选）
     ro_pool: Option<PgPool>,
 }
 
 impl Database {
-    /// 从 KongConfig 创建数据库连接
+    /// Create database connection from KongConfig — 从 KongConfig 创建数据库连接
     pub async fn connect(config: &KongConfig) -> Result<Self> {
         if config.is_dbless() {
             return Err(KongError::DatabaseError(
@@ -35,7 +35,7 @@ impl Database {
         )
         .await?;
 
-        // 创建只读连接池（如果配置了）
+        // Create read-only pool if configured — 创建只读连接池（如果配置了）
         let ro_pool = if let Some(ro_host) = config.effective_pg_ro_host() {
             Some(
                 create_pool(
@@ -65,17 +65,17 @@ impl Database {
         Ok(Self { pool, ro_pool })
     }
 
-    /// 获取读写连接池
+    /// Get the read-write connection pool — 获取读写连接池
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    /// 获取只读连接池（如果有的话，否则回退到主池）
+    /// Get the read-only pool, falling back to the primary pool — 获取只读连接池（如果有的话，否则回退到主池）
     pub fn read_pool(&self) -> &PgPool {
         self.ro_pool.as_ref().unwrap_or(&self.pool)
     }
 
-    /// 关闭所有连接
+    /// Close all connections — 关闭所有连接
     pub async fn close(&self) {
         self.pool.close().await;
         if let Some(ro_pool) = &self.ro_pool {
@@ -83,7 +83,7 @@ impl Database {
         }
     }
 
-    /// 从已有连接池创建（用于测试）
+    /// Create from an existing pool (for testing) — 从已有连接池创建（用于测试）
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             pool,
@@ -92,7 +92,7 @@ impl Database {
     }
 }
 
-/// 创建 PostgreSQL 连接池
+/// Create a PostgreSQL connection pool — 创建 PostgreSQL 连接池
 async fn create_pool(
     host: &str,
     port: u16,
@@ -114,16 +114,16 @@ async fn create_pool(
         opts = opts.password(password);
     }
 
-    // SSL 配置
+    // SSL configuration — SSL 配置
     if ssl {
         opts = opts.ssl_mode(sqlx::postgres::PgSslMode::Require);
     } else {
         opts = opts.ssl_mode(sqlx::postgres::PgSslMode::Prefer);
     }
 
-    // Schema 配置
+    // Schema configuration — Schema 配置
     if let Some(schema) = schema {
-        // 通过 options 参数设置 search_path
+        // Set search_path via options parameter — 通过 options 参数设置 search_path
         opts = PgConnectOptions::from_str(&format!(
             "postgres://{}:{}@{}:{}/{}?options=-c search_path={}",
             user,

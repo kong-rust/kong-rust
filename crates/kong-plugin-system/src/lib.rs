@@ -1,9 +1,9 @@
-//! Kong 插件框架 — 插件注册表和执行引擎
+//! Plugin framework — Kong 插件框架 — Plugin registry and execution engine — 插件注册表和执行引擎
 //!
-//! 职责:
-//! - 管理已注册的插件 handler（Rust 原生 + Lua 桥接）
-//! - 根据 route/service/consumer/global 关联查找生效的插件配置
-//! - 按优先级排序并依次执行各阶段回调
+//! Responsibilities: — 职责:
+//! - Manage registered plugin handlers (Rust native + Lua bridge) — 管理已注册的插件 handler（Rust 原生 + Lua 桥接）
+//! - Find effective plugin configs by route/service/consumer/global associations — 根据 route/service/consumer/global 关联查找生效的插件配置
+//! - Sort by priority and execute phase callbacks in order — 按优先级排序并依次执行各阶段回调
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,26 +13,26 @@ use kong_core::models::Plugin;
 use kong_core::traits::{Phase, PluginConfig, PluginHandler, RequestCtx};
 use uuid::Uuid;
 
-/// 已解析的插件实例 — 运行时使用
+/// Resolved plugin instance for runtime use — 已解析的插件实例 — 运行时使用
 #[derive(Clone)]
 pub struct ResolvedPlugin {
-    /// 插件 handler
+    /// Plugin handler — 插件 handler
     pub handler: Arc<dyn PluginHandler>,
-    /// 插件配置
+    /// Plugin configuration — 插件配置
     pub config: PluginConfig,
-    /// 来源插件记录 ID
+    /// Source plugin record ID — 来源插件记录 ID
     pub plugin_id: Uuid,
-    /// 关联的 route
+    /// Associated route — 关联的 route
     pub route_id: Option<Uuid>,
-    /// 关联的 service
+    /// Associated service — 关联的 service
     pub service_id: Option<Uuid>,
-    /// 关联的 consumer
+    /// Associated consumer — 关联的 consumer
     pub consumer_id: Option<Uuid>,
 }
 
-/// 插件注册表 — 管理所有已注册的插件 handler
+/// Plugin registry — manages all registered plugin handlers — 插件注册表 — 管理所有已注册的插件 handler
 pub struct PluginRegistry {
-    /// 插件名 -> handler
+    /// Plugin name -> handler — 插件名 -> handler
     handlers: HashMap<String, Arc<dyn PluginHandler>>,
 }
 
@@ -43,23 +43,23 @@ impl PluginRegistry {
         }
     }
 
-    /// 注册插件 handler
+    /// Register a plugin handler — 注册插件 handler
     pub fn register(&mut self, name: &str, handler: Arc<dyn PluginHandler>) {
         tracing::info!("注册插件: {}", name);
         self.handlers.insert(name.to_string(), handler);
     }
 
-    /// 获取已注册的 handler
+    /// Get a registered handler — 获取已注册的 handler
     pub fn get(&self, name: &str) -> Option<&Arc<dyn PluginHandler>> {
         self.handlers.get(name)
     }
 
-    /// 已注册插件列表
+    /// List of registered plugin names — 已注册插件列表
     pub fn registered_names(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
     }
 
-    /// 是否已注册
+    /// Check if a plugin is registered — 是否已注册
     pub fn is_registered(&self, name: &str) -> bool {
         self.handlers.contains_key(name)
     }
@@ -71,14 +71,14 @@ impl Default for PluginRegistry {
     }
 }
 
-/// 插件执行器 — 按阶段执行已解析的插件链
+/// Plugin executor — executes resolved plugin chains by phase — 插件执行器 — 按阶段执行已解析的插件链
 pub struct PluginExecutor;
 
 impl PluginExecutor {
-    /// 解析请求相关的插件列表
+    /// Resolve plugins relevant to the request — 解析请求相关的插件列表
     ///
-    /// 匹配优先级（与 Kong 一致）:
-    /// 越特异性高的配置覆盖前面的（global < service < route < consumer < 组合）
+    /// Matching priority (consistent with Kong): — 匹配优先级（与 Kong 一致）:
+    /// More specific configs override earlier ones (global < service < route < consumer < combo) — 越特异性高的配置覆盖前面的（global < service < route < consumer < 组合）
     pub fn resolve_plugins(
         registry: &PluginRegistry,
         plugins: &[Plugin],
@@ -90,7 +90,7 @@ impl PluginExecutor {
 
         let mut candidates: Vec<&Plugin> = plugins.iter().filter(|p| p.enabled).collect();
 
-        // 按关联特异性排序（越特异性高的越后处理，覆盖前面的）
+        // Sort by association specificity (more specific processed later, overriding earlier ones) — 按关联特异性排序（越特异性高的越后处理，覆盖前面的）
         candidates.sort_by_key(|p| {
             let has_route = p.route.is_some();
             let has_service = p.service.is_some();
@@ -126,20 +126,20 @@ impl PluginExecutor {
             );
         }
 
-        // 按 handler 优先级降序排列（priority 越大越先执行）
+        // Sort by handler priority descending (higher priority executes first) — 按 handler 优先级降序排列（priority 越大越先执行）
         let mut result: Vec<ResolvedPlugin> = resolved.into_values().collect();
         result.sort_by(|a, b| b.handler.priority().cmp(&a.handler.priority()));
         result
     }
 
-    /// 执行指定阶段的所有插件
+    /// Execute all plugins for the specified phase — 执行指定阶段的所有插件
     pub async fn execute_phase(
         plugins: &[ResolvedPlugin],
         phase: Phase,
         ctx: &mut RequestCtx,
     ) -> Result<()> {
         for plugin in plugins {
-            // 短路后只有 Log 阶段继续执行
+            // After short-circuit, only Log phase continues — 短路后只有 Log 阶段继续执行
             if ctx.is_short_circuited() && phase != Phase::Log {
                 break;
             }
@@ -152,7 +152,7 @@ impl PluginExecutor {
                 Phase::Response => plugin.handler.response(&plugin.config, ctx).await,
                 Phase::HeaderFilter => plugin.handler.header_filter(&plugin.config, ctx).await,
                 Phase::BodyFilter => {
-                    // body_filter 需要 body 参数，使用 execute_body_filter 代替
+                    // body_filter requires body argument, use execute_body_filter instead — body_filter 需要 body 参数，使用 execute_body_filter 代替
                     Ok(())
                 }
                 Phase::Log => plugin.handler.log(&plugin.config, ctx).await,
@@ -175,7 +175,7 @@ impl PluginExecutor {
         Ok(())
     }
 
-    /// 执行 body_filter 阶段（需要额外的 body 和 end_of_stream 参数）
+    /// Execute body_filter phase (requires additional body and end_of_stream params) — 执行 body_filter 阶段（需要额外的 body 和 end_of_stream 参数）
     pub async fn execute_body_filter(
         plugins: &[ResolvedPlugin],
         ctx: &mut RequestCtx,
@@ -209,7 +209,7 @@ impl PluginExecutor {
     }
 }
 
-/// 检查插件是否匹配当前请求上下文
+/// Check if a plugin matches the current request context — 检查插件是否匹配当前请求上下文
 fn plugin_matches(
     plugin: &Plugin,
     route_id: Option<Uuid>,

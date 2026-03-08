@@ -1,4 +1,4 @@
-//! Kong-Rust API Gateway — 主入口
+//! Kong-Rust API Gateway — main entry point — Kong-Rust API Gateway — 主入口
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(name = "kong-rust", version = "0.1.0")]
 struct Cli {
-    /// 配置文件路径
+    /// Configuration file path — 配置文件路径
     #[arg(short, long, default_value = "/etc/kong/kong.conf")]
     conf: PathBuf,
 
@@ -33,25 +33,25 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DbAction {
-    /// 初始化数据库（创建所有表）
+    /// Initialize database (create all tables) — 初始化数据库（创建所有表）
     Bootstrap,
-    /// 执行新的 migration
+    /// Execute new migrations — 执行新的 migration
     Up,
-    /// 完成 pending migration 的 teardown
+    /// Complete teardown of pending migrations — 完成 pending migration 的 teardown
     Finish,
-    /// 列出所有 migration 状态
+    /// List all migration statuses — 列出所有 migration 状态
     List,
-    /// 重置数据库（删除所有表）
+    /// Reset database (drop all tables) — 重置数据库（删除所有表）
     Reset {
-        /// 跳过确认提示
+        /// Skip confirmation prompt — 跳过确认提示
         #[arg(short, long)]
         yes: bool,
     },
-    /// 输出 migration 状态 JSON
+    /// Output migration status as JSON — 输出 migration 状态 JSON
     Status,
 }
 
-/// 将 Kong 日志级别映射到 tracing EnvFilter 字符串
+/// Map Kong log level to tracing EnvFilter string — 将 Kong 日志级别映射到 tracing EnvFilter 字符串
 fn kong_log_level_to_filter(level: &str) -> &'static str {
     match level {
         "debug" => "debug",
@@ -62,7 +62,7 @@ fn kong_log_level_to_filter(level: &str) -> &'static str {
     }
 }
 
-/// 根据配置初始化日志系统，支持文件 + stderr 双写
+/// Initialize the logging system based on config, supports file + stderr dual output — 根据配置初始化日志系统，支持文件 + stderr 双写
 fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     let level = kong_log_level_to_filter(&config.log_level);
     let env_filter =
@@ -71,20 +71,20 @@ fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     let error_log_path = &config.proxy_error_log;
 
     if error_log_path == "off" {
-        // 仅 stderr 输出
+        // stderr output only — 仅 stderr 输出
         tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .init();
     } else {
-        // 文件 + stderr 双写
+        // File + stderr dual output — 文件 + stderr 双写
         let log_path = Path::new(error_log_path);
         let log_dir = log_path.parent().unwrap_or(Path::new("."));
         let log_file = log_path
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("无效的日志路径: {}", error_log_path))?;
+            .ok_or_else(|| anyhow::anyhow!("Invalid log path: {} — 无效的日志路径: {}", error_log_path, error_log_path))?;
 
-        // 自动创建日志目录
+        // Auto-create log directory — 自动创建日志目录
         std::fs::create_dir_all(log_dir)?;
 
         let file_appender = tracing_appender::rolling::never(log_dir, log_file);
@@ -106,8 +106,8 @@ fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pingora 不兼容 #[tokio::main]（它内部创建自己的 runtime），
-/// 所以 main 是普通函数，非 start 命令手动创建 tokio runtime 执行。
+/// Pingora is incompatible with #[tokio::main] (it creates its own runtime internally), — Pingora 不兼容 #[tokio::main]（它内部创建自己的 runtime），
+/// so main is a regular function; non-start commands manually create a tokio runtime. — 所以 main 是普通函数，非 start 命令手动创建 tokio runtime 执行。
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -119,7 +119,7 @@ fn main() -> anyhow::Result<()> {
 
     let config = kong_config::load_config(conf_path)?;
 
-    // 根据配置初始化日志（config 解析失败会在此之前通过默认 panic 输出）
+    // Initialize logging based on config (config parse failures output via default panic before this) — 根据配置初始化日志（config 解析失败会在此之前通过默认 panic 输出）
     init_logging(&config)?;
 
     let config = Arc::new(config);
@@ -145,7 +145,7 @@ fn main() -> anyhow::Result<()> {
             println!("已加载插件: {:?}", config.loaded_plugins());
         }
         Commands::Db { action } => {
-            // 非 start 命令：手动创建 tokio runtime
+            // Non-start commands: manually create tokio runtime — 非 start 命令：手动创建 tokio runtime
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(handle_db_command(&config, action))?;
         }
@@ -157,13 +157,13 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 处理 db 子命令
+/// Handle db subcommands — 处理 db 子命令
 async fn handle_db_command(
     config: &kong_config::KongConfig,
     action: DbAction,
 ) -> anyhow::Result<()> {
     if config.is_dbless() {
-        anyhow::bail!("数据库模式为 off，migration 命令不可用");
+        anyhow::bail!("Database mode is off, migration commands unavailable — 数据库模式为 off，migration 命令不可用");
     }
 
     let db = kong_db::Database::connect(config).await?;
@@ -242,7 +242,7 @@ async fn handle_db_command(
     Ok(())
 }
 
-/// 格式化监听地址列表
+/// Format listen address list — 格式化监听地址列表
 fn format_listen_addrs(addrs: &[kong_config::ListenAddr]) -> String {
     addrs
         .iter()
@@ -260,49 +260,50 @@ fn format_listen_addrs(addrs: &[kong_config::ListenAddr]) -> String {
         .join(", ")
 }
 
-/// 启动网关：Pingora 管理整个应用生命周期
+/// Start the gateway: Pingora manages the entire application lifecycle — 启动网关：Pingora 管理整个应用生命周期
 fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     tracing::info!("Kong-Rust API Gateway 启动中...");
     tracing::info!("数据库模式: {}", config.database);
     tracing::info!("路由风格: {}", config.router_flavor);
 
-    // 阶段 1：用 tokio runtime 做异步初始化（DB 连接、数据加载）
-    // 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
-    // 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
+    // Phase 1: Use tokio runtime for async initialization (DB connection, data loading) — 阶段 1：用 tokio runtime 做异步初始化（DB 连接、数据加载）
+    // Note: rt must survive until run_forever(), otherwise the sqlx connection pool background tasks — 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
+    // will terminate when runtime is dropped, requiring connection rebuilds and causing slow startup responses. — 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
     let (mut kong_proxy, mut admin_state, refresh_rx) =
         rt.block_on(init_proxy_and_admin(&config))?;
 
-    // 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
+    // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
     let access_log_writer = rt.block_on(async {
         kong_proxy::access_log::AccessLogWriter::new(&config.proxy_access_log)
     });
     kong_proxy.access_log_writer = access_log_writer.clone();
 
-    // 阶段 2：创建 Pingora Server
+    // Phase 2: Create Pingora Server — 阶段 2：创建 Pingora Server
     let mut server = pingora::server::Server::new(None)?;
 
-    // 阶段 3：创建 Proxy Service，绑定所有 proxy_listen 地址
+    // Phase 3: Create Proxy Service, bind all proxy_listen addresses — 阶段 3：创建 Proxy Service，绑定所有 proxy_listen 地址
     let mut proxy_service =
         pingora_proxy::http_proxy_service(&server.configuration, kong_proxy.clone());
     for addr in &config.proxy_listen {
         let listen_addr = format!("{}:{}", addr.ip, addr.port);
         if addr.ssl {
-            // SSL 端口：使用 add_tls 注册，Pingora 负责 TLS 终止
+            // SSL port: register with add_tls, Pingora handles TLS termination — SSL 端口：使用 add_tls 注册，Pingora 负责 TLS 终止
             if let (Some(cert), Some(key)) = (config.ssl_cert.first(), config.ssl_cert_key.first())
             {
                 match proxy_service.add_tls(&listen_addr, cert, key) {
                     Ok(_) => tracing::info!("Proxy 监听于: {} (TLS)", listen_addr),
                     Err(e) => {
                         tracing::error!("Proxy TLS 监听失败 {}: {}", listen_addr, e);
-                        // 回退到 TCP
+                        // Fallback to TCP — 回退到 TCP
                         proxy_service.add_tcp(&listen_addr);
                         tracing::warn!("Proxy 回退为 TCP 监听: {}", listen_addr);
                     }
                 }
             } else {
                 tracing::warn!(
-                    "Proxy SSL 端口 {} 缺少 ssl_cert/ssl_cert_key 配置，回退为 TCP",
+                    "Proxy SSL port {} missing ssl_cert/ssl_cert_key config, falling back to TCP — Proxy SSL 端口 {} 缺少 ssl_cert/ssl_cert_key 配置，回退为 TCP",
+                    listen_addr,
                     listen_addr
                 );
                 proxy_service.add_tcp(&listen_addr);
@@ -313,18 +314,18 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
         }
     }
 
-    // 阶段 3.5：创建 Stream Proxy Service（L4 TCP/TLS 代理）
-    // 获取初始路由列表用于 StreamRouter 构建（从 KongProxy 的路由器中获取不便，
-    // 直接从 AdminState 的 DAO 重新加载，init 阶段数据已在 DB 中）
+    // Phase 3.5: Create Stream Proxy Service (L4 TCP/TLS proxy) — 阶段 3.5：创建 Stream Proxy Service（L4 TCP/TLS 代理）
+    // Get initial route list for StreamRouter build (inconvenient to get from KongProxy's router, — 获取初始路由列表用于 StreamRouter 构建（从 KongProxy 的路由器中获取不便，
+    // reload from AdminState's DAO directly; data is already in DB during init phase) — 直接从 AdminState 的 DAO 重新加载，init 阶段数据已在 DB 中）
     let stream_router_ref = if !config.stream_listen.is_empty() {
-        // 从 AdminState 获取路由数据初始化 Stream 路由
+        // Get route data from AdminState to initialize Stream routing — 从 AdminState 获取路由数据初始化 Stream 路由
         let routes = rt.block_on(async {
             use kong_core::traits::PageParams;
             let params = PageParams { size: 10000, offset: None, tags: None };
             match admin_state.routes.page(&params).await {
                 Ok(page) => page.data,
                 Err(e) => {
-                    tracing::error!("加载 Stream 路由失败: {}", e);
+                    tracing::error!("Failed to load Stream routes: {} — 加载 Stream 路由失败: {}", e, e);
                     Vec::new()
                 }
             }
@@ -337,12 +338,12 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
             kong_proxy.cert_manager.clone(),
             kong_proxy.dns_resolver.clone(),
         );
-        // Stream access log 异步写入器
+        // Stream access log async writer — Stream access log 异步写入器
         stream_proxy.access_log_writer = rt.block_on(async {
             kong_proxy::access_log::AccessLogWriter::new(&config.proxy_stream_access_log)
         });
 
-        // 保存 stream_router 的 Arc 引用，后续传给 AdminState 用于热更新
+        // Save the Arc reference to stream_router for AdminState to use for hot-reloading — 保存 stream_router 的 Arc 引用，后续传给 AdminState 用于热更新
         let stream_router = stream_proxy.stream_router.clone();
 
         let mut stream_service = pingora_core::services::listening::Service::new(
@@ -360,10 +361,10 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
         None
     };
 
-    // 将 stream_router 引用注入 AdminState，使路由热更新同步到 Stream Proxy
+    // Inject stream_router reference into AdminState so route hot-updates sync to Stream Proxy — 将 stream_router 引用注入 AdminState，使路由热更新同步到 Stream Proxy
     admin_state.stream_router = stream_router_ref;
 
-    // 阶段 4：创建 Admin API BackgroundService
+    // Phase 4: Create Admin API BackgroundService — 阶段 4：创建 Admin API BackgroundService
     let admin_bg = AdminBgService {
         state: admin_state,
         config: Arc::clone(&config),
@@ -372,19 +373,19 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     let admin_service =
         pingora_core::services::background::background_service("Admin API", admin_bg);
 
-    // 阶段 5：注册服务
+    // Phase 5: Register services — 阶段 5：注册服务
     server.add_service(proxy_service);
     server.add_service(admin_service);
 
-    // 阶段 6：启动
+    // Phase 6: Bootstrap — 阶段 6：启动
     server.bootstrap();
     tracing::info!("Kong-Rust 启动完成");
 
-    // 阶段 7：阻塞运行（永不返回）
+    // Phase 7: Block and run forever — 阶段 7：阻塞运行（永不返回）
     server.run_forever();
 }
 
-/// 异步初始化：连接 DB、加载数据、构建 KongProxy 和 AdminState
+/// Async initialization: connect DB, load data, build KongProxy and AdminState — 异步初始化：连接 DB、加载数据、构建 KongProxy 和 AdminState
 async fn init_proxy_and_admin(
     config: &Arc<kong_config::KongConfig>,
 ) -> anyhow::Result<(
@@ -400,11 +401,11 @@ async fn init_proxy_and_admin(
     let node_id = uuid::Uuid::new_v4();
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // 创建共享异步 DNS 解析器
+    // Create shared async DNS resolver — 创建共享异步 DNS 解析器
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(config));
 
     if config.is_dbless() {
-        // db-less 模式：空路由表，内存存储
+        // db-less mode: empty routing table, in-memory store — db-less 模式：空路由表，内存存储
         let store = Arc::new(DblessStore::new());
 
         if let Some(ref path) = config.declarative_config {
@@ -436,24 +437,24 @@ async fn init_proxy_and_admin(
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
             refresh_tx,
-            stream_router: None, // start_gateway 中按需设置
+            stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
     } else {
-        // PostgreSQL 模式
+        // PostgreSQL mode — PostgreSQL 模式
         let db = Database::connect(config).await?;
 
-        // 检查 schema 状态
+        // Check schema state — 检查 schema 状态
         let migration_state = kong_db::migrations::schema_state(db.pool()).await?;
         if migration_state.needs_bootstrap {
-            anyhow::bail!("数据库未初始化，请先运行 'kong-rust db bootstrap'");
+            anyhow::bail!("Database not initialized, please run 'kong-rust db bootstrap' first — 数据库未初始化，请先运行 'kong-rust db bootstrap'");
         }
         if !migration_state.new_migrations.is_empty() {
-            anyhow::bail!("有新的 migration 待执行，请先运行 'kong-rust db up'");
+            anyhow::bail!("New migrations pending, please run 'kong-rust db up' first — 有新的 migration 待执行，请先运行 'kong-rust db up'");
         }
 
-        // 从 DB 全量加载初始数据
+        // Full data load from DB — 从 DB 全量加载初始数据
         let all_params = PageParams {
             size: 1000,
             offset: None,
@@ -489,11 +490,11 @@ async fn init_proxy_and_admin(
             ca_certificates_page.data.len(),
         );
 
-        // 构建 CertificateManager 并加载证书
+        // Build CertificateManager and load certificates — 构建 CertificateManager 并加载证书
         let cert_manager = kong_proxy::tls::CertificateManager::new();
         cert_manager.load_certificates(&certificates_page.data, &snis_page.data);
 
-        // 构建 KongProxy 并填充数据
+        // Build KongProxy and populate data — 构建 KongProxy 并填充数据
         let kong_proxy = kong_proxy::KongProxy::new(
             &routes_page.data,
             &config.router_flavor,
@@ -521,18 +522,18 @@ async fn init_proxy_and_admin(
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
             refresh_tx,
-            stream_router: None, // start_gateway 中按需设置
+            stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
     }
 }
 
-/// Admin API 后台服务，由 Pingora 管理生命周期
+/// Admin API background service, lifecycle managed by Pingora — Admin API 后台服务，由 Pingora 管理生命周期
 struct AdminBgService {
     state: kong_admin::AdminState,
     config: Arc<kong_config::KongConfig>,
-    /// 缓存刷新防抖接收端，用 Mutex<Option<...>> 包装以便在 &self 方法中 take
+    /// Cache refresh debounce receiver, wrapped in Mutex<Option<...>> for take in &self methods — 缓存刷新防抖接收端，用 Mutex<Option<...>> 包装以便在 &self 方法中 take
     refresh_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<&'static str>>>,
 }
 
@@ -546,7 +547,7 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
         };
         tracing::info!("Admin API 监听于: {}", bind_addr);
 
-        // 启动缓存刷新防抖后台任务
+        // Start cache refresh debounce background task — 启动缓存刷新防抖后台任务
         if let Some(rx) = self.refresh_rx.lock().unwrap().take() {
             let state = self.state.clone();
             tokio::spawn(kong_admin::run_cache_refresher(rx, state));
@@ -563,7 +564,7 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
             }
         };
 
-        // 用 tokio::select 同时等待 axum serve 和 shutdown 信号
+        // Use tokio::select to wait for both axum serve and shutdown signal — 用 tokio::select 同时等待 axum serve 和 shutdown 信号
         tokio::select! {
             result = axum::serve(listener, app) => {
                 if let Err(e) = result {

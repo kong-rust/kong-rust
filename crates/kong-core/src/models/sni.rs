@@ -4,18 +4,18 @@ use uuid::Uuid;
 use super::common::ForeignKey;
 use crate::traits::Entity;
 
-/// SNI 实体 — 与 Kong snis 表完全一致
+/// SNI entity — fully consistent with Kong snis table — SNI 实体 — 与 Kong snis 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sni {
     pub id: Uuid,
-    /// SNI 名称（支持通配符如 *.example.com），唯一
+    /// SNI name (supports wildcards like *.example.com), unique — SNI 名称（支持通配符如 *.example.com），唯一
     pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    /// 关联的证书（外键引用 certificates），必填
+    /// Associated certificate (foreign key to certificates), required — 关联的证书（外键引用 certificates），必填
     pub certificate: ForeignKey,
 }
 

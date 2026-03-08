@@ -1,10 +1,10 @@
-//! DB-less 模式 — 从声明式配置文件加载实体到内存
+//! DB-less mode — load entities from declarative config into memory — DB-less 模式 — 从声明式配置文件加载实体到内存
 //!
-//! 与 Kong 的 declarative config 格式完全兼容：
-//! - 支持 YAML 和 JSON 格式
-//! - 支持 _format_version 字段
-//! - 所有实体加载到内存 HashMap
-//! - 写操作返回错误（只读模式）
+//! Fully compatible with Kong's declarative config format: — 与 Kong 的 declarative config 格式完全兼容：
+//! - Supports YAML and JSON formats — 支持 YAML 和 JSON 格式
+//! - Supports _format_version field — 支持 _format_version 字段
+//! - All entities loaded into in-memory HashMap — 所有实体加载到内存 HashMap
+//! - Write operations return errors (read-only mode) — 写操作返回错误（只读模式）
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -15,21 +15,21 @@ use uuid::Uuid;
 use kong_core::error::{KongError, Result};
 use kong_core::traits::{Dao, Entity, Page, PageParams, PrimaryKey};
 
-/// 声明式配置格式版本
+/// Supported declarative config format versions — 声明式配置格式版本
 const SUPPORTED_FORMAT_VERSIONS: &[&str] = &["1.1", "2.1", "3.0"];
 
-/// DB-less 内存存储
+/// DB-less in-memory store — DB-less 内存存储
 pub struct DblessStore {
-    /// 按实体类型存储的数据: table_name -> id -> entity_json
+    /// Data stored by entity type: table_name -> id -> entity_json — 按实体类型存储的数据: table_name -> id -> entity_json
     data: RwLock<HashMap<String, HashMap<Uuid, Value>>>,
-    /// 端点键索引: table_name -> (key_name, key_value) -> id
+    /// Endpoint key index: table_name -> (key_name, key_value) -> id — 端点键索引: table_name -> (key_name, key_value) -> id
     endpoint_keys: RwLock<HashMap<String, HashMap<String, Uuid>>>,
-    /// 外键索引: table_name -> fk_column -> fk_value -> Vec<id>
+    /// Foreign key index: table_name -> fk_column -> fk_value -> Vec<id> — 外键索引: table_name -> fk_column -> fk_value -> Vec<id>
     foreign_keys: RwLock<HashMap<String, HashMap<String, HashMap<Uuid, Vec<Uuid>>>>>,
 }
 
 impl DblessStore {
-    /// 创建空的内存存储
+    /// Create an empty in-memory store — 创建空的内存存储
     pub fn new() -> Self {
         Self {
             data: RwLock::new(HashMap::new()),
@@ -38,13 +38,13 @@ impl DblessStore {
         }
     }
 
-    /// 从声明式配置 JSON 加载数据
+    /// Load data from declarative config JSON — 从声明式配置 JSON 加载数据
     pub fn load_from_json(&self, config: &Value) -> Result<()> {
         let obj = config
             .as_object()
             .ok_or_else(|| KongError::ConfigError("声明式配置必须是 JSON 对象".to_string()))?;
 
-        // 检查 format_version
+        // Check format_version — 检查 format_version
         if let Some(version) = obj.get("_format_version") {
             let version_str = version
                 .as_str()
@@ -70,12 +70,12 @@ impl DblessStore {
             .write()
             .map_err(|e| KongError::InternalError(format!("锁获取失败: {}", e)))?;
 
-        // 清空现有数据
+        // Clear existing data — 清空现有数据
         data.clear();
         endpoint_keys.clear();
         foreign_keys.clear();
 
-        // 加载各实体类型
+        // Load each entity type — 加载各实体类型
         let entity_types = [
             ("services", "name"),
             ("routes", "name"),
@@ -99,13 +99,13 @@ impl DblessStore {
                 let ek_map = endpoint_keys.entry(table_name.to_string()).or_default();
 
                 for entity_json in arr {
-                    // 提取 ID
+                    // Extract ID — 提取 ID
                     let id = extract_uuid(entity_json, "id")?;
 
-                    // 存储实体
+                    // Store entity — 存储实体
                     table.insert(id, entity_json.clone());
 
-                    // 建立端点键索引
+                    // Build endpoint key index — 建立端点键索引
                     if !endpoint_key.is_empty() {
                         if let Some(key_val) = entity_json.get(endpoint_key).and_then(|v| v.as_str())
                         {
@@ -113,7 +113,7 @@ impl DblessStore {
                         }
                     }
 
-                    // 建立外键索引
+                    // Build foreign key index — 建立外键索引
                     build_fk_index(
                         &mut foreign_keys,
                         table_name,
@@ -132,14 +132,14 @@ impl DblessStore {
         Ok(())
     }
 
-    /// 从文件加载声明式配置
+    /// Load declarative config from file — 从文件加载声明式配置
     pub fn load_from_file(&self, path: &str) -> Result<()> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| KongError::ConfigError(format!("读取声明式配置文件失败: {}", e)))?;
 
         let config: Value = if path.ends_with(".yml") || path.ends_with(".yaml") {
-            // YAML 支持（通过 serde_json 的 from_str 不支持 YAML，此处简化处理）
-            // 实际使用时需要 serde_yaml crate
+            // YAML support (serde_json's from_str doesn't support YAML, simplified here) — YAML 支持（通过 serde_json 的 from_str 不支持 YAML，此处简化处理）
+            // Actual usage requires serde_yaml crate — 实际使用时需要 serde_yaml crate
             serde_json::from_str(&content).map_err(|_| {
                 KongError::ConfigError(
                     "YAML 格式解析失败，请确保文件为有效的 JSON 或 YAML".to_string(),
@@ -153,7 +153,7 @@ impl DblessStore {
         self.load_from_json(&config)
     }
 
-    /// 获取指定实体
+    /// Get a specific entity — 获取指定实体
     fn get_entity(&self, table_name: &str, id: &Uuid) -> Result<Option<Value>> {
         let data = self
             .data
@@ -166,7 +166,7 @@ impl DblessStore {
             .cloned())
     }
 
-    /// 通过端点键获取实体
+    /// Get entity by endpoint key — 通过端点键获取实体
     fn get_entity_by_endpoint_key(
         &self,
         table_name: &str,
@@ -187,7 +187,7 @@ impl DblessStore {
         }
     }
 
-    /// 分页获取实体列表
+    /// List entities with pagination — 分页获取实体列表
     fn list_entities(
         &self,
         table_name: &str,
@@ -204,11 +204,11 @@ impl DblessStore {
             None => return Ok((vec![], None)),
         };
 
-        // 排序后的 ID 列表（保证顺序一致）
+        // Sorted ID list (ensures consistent ordering) — 排序后的 ID 列表（保证顺序一致）
         let mut ids: Vec<&Uuid> = table.keys().collect();
         ids.sort();
 
-        // 应用 offset
+        // Apply offset — 应用 offset
         let start = if let Some(offset_id) = offset {
             ids.iter()
                 .position(|id| *id > offset_id)
@@ -240,7 +240,7 @@ impl DblessStore {
         Ok((result, next_offset))
     }
 
-    /// 按外键获取实体列表
+    /// List entities by foreign key — 按外键获取实体列表
     fn list_by_foreign_key(
         &self,
         table_name: &str,
@@ -315,7 +315,7 @@ impl Default for DblessStore {
     }
 }
 
-/// DB-less DAO 实现（只读）
+/// DB-less DAO implementation (read-only) — DB-less DAO 实现（只读）
 pub struct DblessDao<T: Entity> {
     store: std::sync::Arc<DblessStore>,
     _phantom: std::marker::PhantomData<T>,
@@ -446,9 +446,9 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
     }
 }
 
-// ========== 辅助函数 ==========
+// ========== Helper functions — 辅助函数 ==========
 
-/// 从 JSON 对象提取 UUID
+/// Extract UUID from JSON object — 从 JSON 对象提取 UUID
 fn extract_uuid(json: &Value, field: &str) -> Result<Uuid> {
     let s = json
         .get(field)
@@ -458,7 +458,7 @@ fn extract_uuid(json: &Value, field: &str) -> Result<Uuid> {
         .map_err(|e| KongError::ConfigError(format!("无效的 UUID {}: {}", field, e)))
 }
 
-/// 构建外键索引
+/// Build foreign key index — 构建外键索引
 fn build_fk_index(
     foreign_keys: &mut HashMap<String, HashMap<String, HashMap<Uuid, Vec<Uuid>>>>,
     table_name: &str,
@@ -510,14 +510,14 @@ fn build_fk_index(
     }
 }
 
-/// 编码 offset token
+/// Encode offset token — 编码 offset token
 fn encode_offset(id: &Uuid) -> String {
     use base64::Engine;
     let json = serde_json::to_string(&[id.to_string()]).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes())
 }
 
-/// 解码 offset token
+/// Decode offset token — 解码 offset token
 fn decode_offset(token: &str) -> Result<Uuid> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -569,18 +569,18 @@ mod tests {
 
         store.load_from_json(&config).unwrap();
 
-        // 验证 service 加载
+        // Verify service loaded — 验证 service 加载
         let service_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let service = store.get_entity("services", &service_id).unwrap();
         assert!(service.is_some());
 
-        // 验证端点键索引
+        // Verify endpoint key index — 验证端点键索引
         let service = store
             .get_entity_by_endpoint_key("services", "test-service")
             .unwrap();
         assert!(service.is_some());
 
-        // 验证外键索引
+        // Verify foreign key index — 验证外键索引
         let (routes, _) = store
             .list_by_foreign_key("routes", "service", &service_id, None, 100)
             .unwrap();

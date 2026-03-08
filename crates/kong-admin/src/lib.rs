@@ -1,11 +1,11 @@
 #![recursion_limit = "512"]
-//! Kong Admin API — 100% 兼容 Kong 的 REST Admin API
+//! Kong Admin API — 100% compatible REST Admin API for Kong — Kong Admin API — 100% 兼容 Kong 的 REST Admin API
 //!
-//! 基于 axum 实现，支持:
-//! - 所有核心实体的 CRUD
-//! - 分页、标签过滤
-//! - 嵌套端点（如 /services/{service}/routes）
-//! - 特殊端点（/, /status, /config）
+//! Built on axum, supports: — 基于 axum 实现，支持:
+//! - CRUD for all core entities — 所有核心实体的 CRUD
+//! - Pagination and tag filtering — 分页、标签过滤
+//! - Nested endpoints (e.g. /services/{service}/routes) — 嵌套端点（如 /services/{service}/routes）
+//! - Special endpoints (/, /status, /config) — 特殊端点（/, /status, /config）
 
 pub mod handlers;
 
@@ -20,7 +20,7 @@ use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
 
-/// Admin API 应用状态
+/// Admin API application state — Admin API 应用状态
 #[derive(Clone)]
 pub struct AdminState {
     pub services: Arc<dyn Dao<Service>>,
@@ -35,15 +35,15 @@ pub struct AdminState {
     pub vaults: Arc<dyn Dao<Vault>>,
     pub node_id: uuid::Uuid,
     pub config: Arc<kong_config::KongConfig>,
-    /// 代理引擎引用（Clone 语义，共享底层 Arc 数据），用于写操作后刷新内存缓存
+    /// Proxy engine reference (Clone semantics, sharing underlying Arc data), used to refresh in-memory cache after write operations — 代理引擎引用（Clone 语义，共享底层 Arc 数据），用于写操作后刷新内存缓存
     pub proxy: kong_proxy::KongProxy,
-    /// 缓存刷新防抖信号发送端：CUD 操作后发送实体类型名，后台任务合并执行
+    /// Cache refresh debounce signal sender: sends entity type name after CUD operations, background task merges and executes — 缓存刷新防抖信号发送端：CUD 操作后发送实体类型名，后台任务合并执行
     pub refresh_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
-    /// Stream 路由器引用（与 Stream Proxy 共享），路由变更时同步更新
+    /// Stream router reference (shared with Stream Proxy), synced on route changes — Stream 路由器引用（与 Stream Proxy 共享），路由变更时同步更新
     pub stream_router: Option<Arc<RwLock<StreamRouter>>>,
 }
 
-/// 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
+/// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
 pub async fn run_cache_refresher(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<&'static str>,
     state: AdminState,
@@ -52,14 +52,14 @@ pub async fn run_cache_refresher(
     use tokio::time::{Duration, Instant};
 
     loop {
-        // 阻塞等待第一个刷新信号
+        // Block waiting for the first refresh signal — 阻塞等待第一个刷新信号
         let Some(first) = rx.recv().await else {
             break;
         };
         let mut pending = HashSet::new();
         pending.insert(first);
 
-        // 100ms 窗口内收集所有待刷新实体类型
+        // Collect all pending entity types within a 100ms window — 100ms 窗口内收集所有待刷新实体类型
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
             tokio::select! {
@@ -73,7 +73,7 @@ pub async fn run_cache_refresher(
             }
         }
 
-        // 合并后一次性刷新
+        // Refresh all at once after merging — 合并后一次性刷新
         for entity_type in &pending {
             state.refresh_proxy_cache(entity_type).await;
         }
@@ -81,12 +81,12 @@ pub async fn run_cache_refresher(
     }
 }
 
-/// 构建 Admin API 路由
+/// Build the Admin API router — 构建 Admin API 路由
 pub fn build_admin_router(state: AdminState) -> Router {
     use handlers::*;
 
     Router::new()
-        // 根信息端点
+        // Root info endpoint — 根信息端点
         .route("/", get(root_info))
         .route("/status", get(status_info))
         // Services
@@ -97,16 +97,16 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/routes", get(list_routes).post(create_route))
         .route("/routes/{id_or_name}",
             get(get_route).patch(update_route).put(upsert_route).delete(delete_route))
-        // 嵌套: Service 下的 Routes 和 Plugins
+        // Nested: Routes and Plugins under Service — 嵌套: Service 下的 Routes 和 Plugins
         .route("/services/{service_id_or_name}/routes", get(list_nested_routes).post(create_nested_route))
         .route("/services/{service_id_or_name}/plugins", get(list_service_plugins))
-        // 嵌套: Route 下的 Plugins
+        // Nested: Plugins under Route — 嵌套: Route 下的 Plugins
         .route("/routes/{route_id_or_name}/plugins", get(list_route_plugins))
         // Consumers
         .route("/consumers", get(list_consumers).post(create_consumer))
         .route("/consumers/{id_or_name}",
             get(get_consumer).patch(update_consumer).put(upsert_consumer).delete(delete_consumer))
-        // 嵌套: Consumer 下的 Plugins
+        // Nested: Plugins under Consumer — 嵌套: Consumer 下的 Plugins
         .route("/consumers/{consumer_id_or_name}/plugins", get(list_consumer_plugins))
         // Plugins
         .route("/plugins", get(list_plugins).post(create_plugin))

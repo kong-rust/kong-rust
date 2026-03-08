@@ -2,35 +2,35 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// 监听地址 — 解析 Kong 的 listen 指令格式
-/// 例如: "0.0.0.0:8000 reuseport backlog=16384"
-///       "0.0.0.0:8443 http2 ssl reuseport backlog=16384"
-///       "unix:/tmp/kong.sock"
+/// Listen address — parses Kong's listen directive format — 监听地址 — 解析 Kong 的 listen 指令格式
+/// Examples: "0.0.0.0:8000 reuseport backlog=16384" — 例如: "0.0.0.0:8000 reuseport backlog=16384"
+///           "0.0.0.0:8443 http2 ssl reuseport backlog=16384"
+///           "unix:/tmp/kong.sock"
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenAddr {
-    /// 监听地址（ip:port 或 unix socket 路径）
+    /// Listen address (ip:port or unix socket path) — 监听地址（ip:port 或 unix socket 路径）
     pub address: String,
-    /// 是否启用 SSL/TLS
+    /// Whether SSL/TLS is enabled — 是否启用 SSL/TLS
     pub ssl: bool,
-    /// 是否启用 HTTP/2
+    /// Whether HTTP/2 is enabled — 是否启用 HTTP/2
     pub http2: bool,
-    /// 是否启用 SO_REUSEPORT
+    /// Whether SO_REUSEPORT is enabled — 是否启用 SO_REUSEPORT
     pub reuseport: bool,
-    /// 是否为代理协议
+    /// Whether proxy protocol is enabled — 是否为代理协议
     pub proxy_protocol: bool,
-    /// backlog 大小
+    /// Backlog size — backlog 大小
     pub backlog: Option<u32>,
-    /// 是否启用延迟绑定
+    /// Whether deferred binding is enabled — 是否启用延迟绑定
     pub deferred: bool,
-    /// 接收缓冲大小
+    /// Receive buffer size — 接收缓冲大小
     pub rcvbuf: Option<u32>,
-    /// 发送缓冲大小
+    /// Send buffer size — 发送缓冲大小
     pub sndbuf: Option<u32>,
-    /// 绑定到指定网络设备
+    /// Bind to specific network device — 绑定到指定网络设备
     pub bind: bool,
-    /// ip 地址部分
+    /// IP address part — ip 地址部分
     pub ip: String,
-    /// 端口部分
+    /// Port part — 端口部分
     pub port: u16,
 }
 
@@ -59,7 +59,7 @@ impl FromStr for ListenAddr {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
 
-        // 特殊值 "off" 表示禁用
+        // Special value "off" means disabled — 特殊值 "off" 表示禁用
         if s == "off" {
             return Err("listener is disabled".to_string());
         }
@@ -73,7 +73,7 @@ impl FromStr for ListenAddr {
         let mut listen = ListenAddr::default();
         listen.address = addr_part.to_string();
 
-        // 解析 ip:port
+        // Parse ip:port — 解析 ip:port
         if addr_part.starts_with("unix:") {
             listen.ip = addr_part.to_string();
             listen.port = 0;
@@ -92,7 +92,7 @@ impl FromStr for ListenAddr {
                 .parse()
                 .map_err(|e| format!("invalid port: {}", e))?;
         } else {
-            // 仅端口号
+            // Port only — 仅端口号
             listen.port = addr_part
                 .parse()
                 .map_err(|e| format!("invalid address: {}", e))?;
@@ -101,7 +101,7 @@ impl FromStr for ListenAddr {
 
         listen.address = format!("{}:{}", listen.ip, listen.port);
 
-        // 解析修饰符
+        // Parse modifiers — 解析修饰符
         for part in &parts[1..] {
             match *part {
                 "ssl" => listen.ssl = true,
@@ -166,8 +166,8 @@ impl fmt::Display for ListenAddr {
     }
 }
 
-/// 解析逗号分隔的多个 listen 地址
-/// 例如: "0.0.0.0:8000 reuseport backlog=16384, 0.0.0.0:8443 http2 ssl reuseport backlog=16384"
+/// Parse multiple comma-separated listen addresses — 解析逗号分隔的多个 listen 地址
+/// Example: "0.0.0.0:8000 reuseport backlog=16384, 0.0.0.0:8443 http2 ssl reuseport backlog=16384" — 例如: "0.0.0.0:8000 reuseport backlog=16384, 0.0.0.0:8443 http2 ssl reuseport backlog=16384"
 pub fn parse_listen_addresses(s: &str) -> Result<Vec<ListenAddr>, String> {
     let s = s.trim();
     if s == "off" || s.is_empty() {

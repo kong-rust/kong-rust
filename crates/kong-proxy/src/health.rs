@@ -1,35 +1,35 @@
-//! 健康检查器 — 支持主动和被动健康检查
+//! Health checker — supports active and passive health checks — 健康检查器 — 支持主动和被动健康检查
 //!
-//! 与 Kong 的健康检查行为一致:
-//! - 主动: 定时向目标发送 HTTP/TCP 请求探测
-//! - 被动: 根据代理请求的响应状态码统计
+//! Consistent with Kong's health check behavior: — 与 Kong 的健康检查行为一致:
+//! - Active: periodically send HTTP/TCP probe requests to targets — 主动: 定时向目标发送 HTTP/TCP 请求探测
+//! - Passive: track response status codes from proxied requests — 被动: 根据代理请求的响应状态码统计
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-/// 目标健康状态
+/// Target health status — 目标健康状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthStatus {
     Healthy,
     Unhealthy,
-    /// DNS 错误等情况
+    /// DNS errors and similar cases — DNS 错误等情况
     #[allow(dead_code)]
     DnsError,
 }
 
-/// 单个目标的健康统计
+/// Health statistics for a single target — 单个目标的健康统计
 #[derive(Debug, Clone)]
 struct TargetHealth {
-    /// 当前状态
+    /// Current status — 当前状态
     status: HealthStatus,
-    /// 连续成功次数
+    /// Consecutive success count — 连续成功次数
     successes: i32,
-    /// 连续 TCP 失败次数
+    /// Consecutive TCP failure count — 连续 TCP 失败次数
     tcp_failures: i32,
-    /// 连续超时次数
+    /// Consecutive timeout count — 连续超时次数
     timeouts: i32,
-    /// 连续 HTTP 失败次数
+    /// Consecutive HTTP failure count — 连续 HTTP 失败次数
     http_failures: i32,
 }
 
@@ -45,24 +45,24 @@ impl Default for TargetHealth {
     }
 }
 
-/// 健康检查配置
+/// Health check configuration — 健康检查配置
 #[derive(Debug, Clone)]
 pub struct HealthCheckerConfig {
-    /// 主动检查间隔（秒），0 表示禁用
+    /// Active check interval (seconds), 0 means disabled — 主动检查间隔（秒），0 表示禁用
     pub active_interval: f64,
-    /// 主动检查路径
+    /// Active check HTTP path — 主动检查路径
     pub active_http_path: String,
-    /// 健康判定所需连续成功次数
+    /// Consecutive successes required to be deemed healthy — 健康判定所需连续成功次数
     pub healthy_successes: i32,
-    /// 不健康判定所需连续 TCP 失败次数
+    /// Consecutive TCP failures required to be deemed unhealthy — 不健康判定所需连续 TCP 失败次数
     pub unhealthy_tcp_failures: i32,
-    /// 不健康判定所需连续超时次数
+    /// Consecutive timeouts required to be deemed unhealthy — 不健康判定所需连续超时次数
     pub unhealthy_timeouts: i32,
-    /// 不健康判定所需连续 HTTP 失败次数
+    /// Consecutive HTTP failures required to be deemed unhealthy — 不健康判定所需连续 HTTP 失败次数
     pub unhealthy_http_failures: i32,
-    /// 被动检查 — 健康 HTTP 状态码
+    /// Passive check — healthy HTTP status codes — 被动检查 — 健康 HTTP 状态码
     pub passive_healthy_statuses: Vec<i32>,
-    /// 被动检查 — 不健康 HTTP 状态码
+    /// Passive check — unhealthy HTTP status codes — 被动检查 — 不健康 HTTP 状态码
     pub passive_unhealthy_statuses: Vec<i32>,
 }
 
@@ -84,11 +84,11 @@ impl Default for HealthCheckerConfig {
     }
 }
 
-/// 健康检查器
+/// Health checker — 健康检查器
 pub struct HealthChecker {
-    /// upstream_name -> 目标地址 -> 健康状态
+    /// upstream_name -> target address -> health status — upstream_name -> 目标地址 -> 健康状态
     targets: Arc<RwLock<HashMap<String, HashMap<String, TargetHealth>>>>,
-    /// upstream_name -> 配置
+    /// upstream_name -> configuration — upstream_name -> 配置
     configs: Arc<RwLock<HashMap<String, HealthCheckerConfig>>>,
 }
 
@@ -100,7 +100,7 @@ impl HealthChecker {
         }
     }
 
-    /// 注册 upstream 的健康检查
+    /// Register health checks for an upstream — 注册 upstream 的健康检查
     pub fn register_upstream(
         &self,
         upstream_name: &str,
@@ -120,7 +120,7 @@ impl HealthChecker {
         }
     }
 
-    /// 检查目标是否健康
+    /// Check if target is healthy — 检查目标是否健康
     pub fn is_healthy(&self, upstream_name: &str, target_addr: &str) -> bool {
         if let Ok(targets) = self.targets.read() {
             if let Some(target_map) = targets.get(upstream_name) {
@@ -129,11 +129,11 @@ impl HealthChecker {
                 }
             }
         }
-        // 默认健康（未注册的目标视为健康）
+        // Default healthy (unregistered targets are considered healthy) — 默认健康（未注册的目标视为健康）
         true
     }
 
-    /// 报告被动健康检查事件 — 成功
+    /// Report passive health check event — success — 报告被动健康检查事件 — 成功
     pub fn report_success(&self, upstream_name: &str, target_addr: &str) {
         self.update_health(upstream_name, target_addr, |health, config| {
             health.successes += 1;
@@ -154,7 +154,7 @@ impl HealthChecker {
         });
     }
 
-    /// 报告被动健康检查事件 — HTTP 响应
+    /// Report passive health check event — HTTP response — 报告被动健康检查事件 — HTTP 响应
     pub fn report_http_status(
         &self,
         upstream_name: &str,
@@ -196,7 +196,7 @@ impl HealthChecker {
         });
     }
 
-    /// 报告被动健康检查事件 — TCP 失败
+    /// Report passive health check event — TCP failure — 报告被动健康检查事件 — TCP 失败
     pub fn report_tcp_failure(&self, upstream_name: &str, target_addr: &str) {
         self.update_health(upstream_name, target_addr, |health, config| {
             health.tcp_failures += 1;
@@ -217,7 +217,7 @@ impl HealthChecker {
         });
     }
 
-    /// 报告被动健康检查事件 — 超时
+    /// Report passive health check event — timeout — 报告被动健康检查事件 — 超时
     pub fn report_timeout(&self, upstream_name: &str, target_addr: &str) {
         self.update_health(upstream_name, target_addr, |health, config| {
             health.timeouts += 1;
@@ -236,7 +236,7 @@ impl HealthChecker {
         });
     }
 
-    /// 获取 upstream 下所有目标的健康状态
+    /// Get health status of all targets under an upstream — 获取 upstream 下所有目标的健康状态
     pub fn get_upstream_health(
         &self,
         upstream_name: &str,
@@ -252,7 +252,7 @@ impl HealthChecker {
         HashMap::new()
     }
 
-    /// 内部 — 更新健康状态
+    /// Internal — update health status — 内部 — 更新健康状态
     fn update_health<F>(&self, upstream_name: &str, target_addr: &str, f: F)
     where
         F: FnOnce(&mut TargetHealth, &HealthCheckerConfig),
@@ -277,7 +277,7 @@ impl HealthChecker {
         }
     }
 
-    /// 启动主动健康检查后台任务
+    /// Start active health check background task — 启动主动健康检查后台任务
     pub fn start_active_checks(self: Arc<Self>) {
         let checker = self.clone();
         tokio::spawn(async move {
@@ -288,7 +288,7 @@ impl HealthChecker {
         });
     }
 
-    /// 执行一轮主动健康检查
+    /// Execute one round of active health checks — 执行一轮主动健康检查
     async fn run_active_checks(&self) {
         let check_tasks: Vec<(String, String, String)> = {
             let configs = match self.configs.read() {
@@ -346,7 +346,7 @@ impl Default for HealthChecker {
     }
 }
 
-/// 发送真正的 HTTP GET 请求进行健康检查
+/// Send a real HTTP GET request for health checking — 发送真正的 HTTP GET 请求进行健康检查
 async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -355,7 +355,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
         .strip_prefix("http://")
         .unwrap_or(url);
 
-    // 解析地址和路径
+    // Parse address and path — 解析地址和路径
     let (addr, path) = match url_without_scheme.find('/') {
         Some(i) => (&url_without_scheme[..i], &url_without_scheme[i..]),
         None => (url_without_scheme, "/"),
@@ -365,7 +365,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // 发送简单的 HTTP/1.1 GET 请求
+    // Send a simple HTTP/1.1 GET request — 发送简单的 HTTP/1.1 GET 请求
     let host = addr.split(':').next().unwrap_or(addr);
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: kong-rust-healthcheck/0.1\r\n\r\n",
@@ -377,7 +377,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // 读取响应状态行
+    // Read response status line — 读取响应状态行
     let mut buf = vec![0u8; 1024];
     let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
     if n == 0 {
@@ -385,7 +385,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
     }
 
     let response = String::from_utf8_lossy(&buf[..n]);
-    // 解析 "HTTP/1.1 200 OK" 中的状态码
+    // Parse status code from "HTTP/1.1 200 OK" — 解析 "HTTP/1.1 200 OK" 中的状态码
     let status_str = response
         .lines()
         .next()
@@ -418,21 +418,21 @@ mod tests {
             config,
         );
 
-        // 初始状态: 健康
+        // Initial state: healthy — 初始状态: 健康
         assert!(hc.is_healthy("test-upstream", "10.0.0.1:80"));
 
-        // 报告 3 次 500 错误
+        // Report 3 HTTP 500 errors — 报告 3 次 500 错误
         hc.report_http_status("test-upstream", "10.0.0.1:80", 500);
         hc.report_http_status("test-upstream", "10.0.0.1:80", 500);
-        assert!(hc.is_healthy("test-upstream", "10.0.0.1:80")); // 还是2次
+        assert!(hc.is_healthy("test-upstream", "10.0.0.1:80")); // Still only 2 — 还是2次
         hc.report_http_status("test-upstream", "10.0.0.1:80", 500);
-        assert!(!hc.is_healthy("test-upstream", "10.0.0.1:80")); // 变不健康
+        assert!(!hc.is_healthy("test-upstream", "10.0.0.1:80")); // Becomes unhealthy — 变不健康
 
-        // 报告 2 次成功恢复
+        // Report 2 successes to recover — 报告 2 次成功恢复
         hc.report_http_status("test-upstream", "10.0.0.1:80", 200);
-        assert!(!hc.is_healthy("test-upstream", "10.0.0.1:80")); // 1次不够
+        assert!(!hc.is_healthy("test-upstream", "10.0.0.1:80")); // 1 is not enough — 1次不够
         hc.report_http_status("test-upstream", "10.0.0.1:80", 200);
-        assert!(hc.is_healthy("test-upstream", "10.0.0.1:80")); // 恢复
+        assert!(hc.is_healthy("test-upstream", "10.0.0.1:80")); // Recovered — 恢复
     }
 
     #[test]

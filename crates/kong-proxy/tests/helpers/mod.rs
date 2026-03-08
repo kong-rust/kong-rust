@@ -1,4 +1,4 @@
-//! 测试辅助模块 — 提供 MockUpstream、TestPlugin 等测试基础设施
+//! Test helper module — provides MockUpstream, TestPlugin and other test infrastructure — 测试辅助模块 — 提供 MockUpstream、TestPlugin 等测试基础设施
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -9,28 +9,28 @@ use bytes::Bytes;
 use kong_core::error::Result;
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 
-/// 测试插件 — 在各阶段设置标记，用于验证阶段执行顺序和行为
+/// Test plugin — sets flags in each phase to verify phase execution order and behavior — 测试插件 — 在各阶段设置标记，用于验证阶段执行顺序和行为
 #[derive(Clone)]
 pub struct TestPlugin {
     pub name: String,
     pub priority: i32,
-    /// 各阶段是否被调用的标记
+    /// Flags indicating whether each phase was called — 各阶段是否被调用的标记
     pub rewrite_called: Arc<AtomicBool>,
     pub access_called: Arc<AtomicBool>,
     pub header_filter_called: Arc<AtomicBool>,
     pub body_filter_called: Arc<AtomicBool>,
     pub log_called: Arc<AtomicBool>,
-    /// 调用计数
+    /// Call count — 调用计数
     pub call_count: Arc<AtomicU32>,
-    /// 是否在 access 阶段短路
+    /// Whether to short-circuit in access phase — 是否在 access 阶段短路
     pub short_circuit_in_access: bool,
-    /// 短路状态码
+    /// Short-circuit status code — 短路状态码
     pub short_circuit_status: u16,
-    /// 短路响应体
+    /// Short-circuit response body — 短路响应体
     pub short_circuit_body: Option<String>,
-    /// 是否在 header_filter 阶段修改响应头
+    /// Whether to modify response headers in header_filter phase — 是否在 header_filter 阶段修改响应头
     pub modify_response_header: Option<(String, String)>,
-    /// 是否在 rewrite 阶段设置 ctx.shared
+    /// Whether to set ctx.shared in rewrite phase — 是否在 rewrite 阶段设置 ctx.shared
     pub set_shared_in_rewrite: Option<(String, serde_json::Value)>,
 }
 
@@ -53,7 +53,7 @@ impl TestPlugin {
         }
     }
 
-    /// 创建一个在 access 阶段短路的测试插件
+    /// Create a test plugin that short-circuits in the access phase — 创建一个在 access 阶段短路的测试插件
     pub fn with_short_circuit(name: &str, priority: i32, status: u16) -> Self {
         let mut p = Self::new(name, priority);
         p.short_circuit_in_access = true;
@@ -61,7 +61,7 @@ impl TestPlugin {
         p
     }
 
-    /// 创建一个修改响应头的测试插件
+    /// Create a test plugin that modifies response headers — 创建一个修改响应头的测试插件
     pub fn with_header_modify(name: &str, priority: i32, header_name: &str, header_value: &str) -> Self {
         let mut p = Self::new(name, priority);
         p.modify_response_header = Some((header_name.to_string(), header_value.to_string()));
@@ -137,7 +137,7 @@ impl PluginHandler for TestPlugin {
     }
 }
 
-/// 构建测试用的 ResolvedPlugin
+/// Build a ResolvedPlugin for testing — 构建测试用的 ResolvedPlugin
 pub fn make_resolved_plugin(handler: Arc<dyn PluginHandler>) -> kong_plugin_system::ResolvedPlugin {
     let name = handler.name().to_string();
     kong_plugin_system::ResolvedPlugin {

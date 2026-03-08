@@ -3,63 +3,63 @@ use bytes::Bytes;
 
 use crate::error::Result;
 
-/// 请求上下文 — 在整个请求生命周期中传递，供插件读写
+/// Request context — passed throughout the request lifecycle for plugins to read and write — 请求上下文 — 在整个请求生命周期中传递，供插件读写
 pub struct RequestCtx {
-    /// 匹配的路由 ID
+    /// Matched route ID — 匹配的路由 ID
     pub route_id: Option<uuid::Uuid>,
-    /// 匹配的服务 ID
+    /// Matched service ID — 匹配的服务 ID
     pub service_id: Option<uuid::Uuid>,
-    /// 匹配的消费者 ID
+    /// Matched consumer ID — 匹配的消费者 ID
     pub consumer_id: Option<uuid::Uuid>,
-    /// 请求级别的共享数据（对应 kong.ctx.shared）
+    /// Request-level shared data (corresponds to kong.ctx.shared) — 请求级别的共享数据（对应 kong.ctx.shared）
     pub shared: std::collections::HashMap<String, serde_json::Value>,
-    /// 是否已经由某个插件短路（如 kong.response.exit）
+    /// Whether a plugin has short-circuited the request (e.g. kong.response.exit) — 是否已经由某个插件短路（如 kong.response.exit）
     pub short_circuited: bool,
-    /// 短路时的状态码
+    /// Status code when short-circuited — 短路时的状态码
     pub exit_status: Option<u16>,
-    /// 短路时的响应体
+    /// Response body when short-circuited — 短路时的响应体
     pub exit_body: Option<String>,
-    /// 短路时的响应头
+    /// Response headers when short-circuited — 短路时的响应头
     pub exit_headers: Option<std::collections::HashMap<String, String>>,
-    /// 上游请求头修改队列
+    /// Upstream request header modification queue — 上游请求头修改队列
     pub upstream_headers_to_set: Vec<(String, String)>,
-    /// 上游请求头删除队列
+    /// Upstream request header removal queue — 上游请求头删除队列
     pub upstream_headers_to_remove: Vec<String>,
-    /// 响应头修改队列
+    /// Response header modification queue — 响应头修改队列
     pub response_headers_to_set: Vec<(String, String)>,
-    /// 响应头删除队列
+    /// Response header removal queue — 响应头删除队列
     pub response_headers_to_remove: Vec<String>,
-    /// 认证后的凭据信息
+    /// Authenticated credential info — 认证后的凭据信息
     pub authenticated_credential: Option<serde_json::Value>,
-    /// 认证后的消费者信息
+    /// Authenticated consumer info — 认证后的消费者信息
     pub authenticated_consumer: Option<serde_json::Value>,
 
-    // ====== 请求快照字段（PDK 使用） ======
+    // ====== Request snapshot fields (used by PDK) — 请求快照字段（PDK 使用） ======
 
-    /// 请求方法
+    /// Request method — 请求方法
     pub request_method: String,
-    /// 请求路径
+    /// Request path — 请求路径
     pub request_path: String,
-    /// 请求 scheme（http/https）
+    /// Request scheme (http/https) — 请求 scheme（http/https）
     pub request_scheme: String,
-    /// 请求 host
+    /// Request host — 请求 host
     pub request_host: String,
-    /// 请求端口
+    /// Request port — 请求端口
     pub request_port: u16,
-    /// 请求头快照
+    /// Request headers snapshot — 请求头快照
     pub request_headers: std::collections::HashMap<String, String>,
-    /// 客户端 IP
+    /// Client IP — 客户端 IP
     pub client_ip: String,
-    /// 查询字符串
+    /// Query string — 查询字符串
     pub request_query_string: String,
-    /// 上游响应状态码（header_filter/log 阶段可用）
+    /// Upstream response status code (available in header_filter/log phases) — 上游响应状态码（header_filter/log 阶段可用）
     pub response_status: Option<u16>,
-    /// 上游响应头
+    /// Upstream response headers — 上游响应头
     pub response_headers: std::collections::HashMap<String, String>,
 }
 
 impl RequestCtx {
-    /// 创建新的请求上下文
+    /// Create a new request context — 创建新的请求上下文
     pub fn new() -> Self {
         Self {
             route_id: None,
@@ -89,7 +89,7 @@ impl RequestCtx {
         }
     }
 
-    /// 检查是否已短路
+    /// Check if the request has been short-circuited — 检查是否已短路
     pub fn is_short_circuited(&self) -> bool {
         self.short_circuited
     }
@@ -101,79 +101,79 @@ impl Default for RequestCtx {
     }
 }
 
-/// 插件配置 — 从数据库 Plugin.config 字段解析
+/// Plugin configuration — parsed from the database Plugin.config field — 插件配置 — 从数据库 Plugin.config 字段解析
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginConfig {
-    /// 插件名称
+    /// Plugin name — 插件名称
     pub name: String,
-    /// 插件配置 JSON
+    /// Plugin configuration JSON — 插件配置 JSON
     pub config: serde_json::Value,
 }
 
-/// 插件执行阶段
+/// Plugin execution phase — 插件执行阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// Worker 进程初始化
+    /// Worker process initialization — Worker 进程初始化
     InitWorker,
-    /// TLS 证书选择阶段
+    /// TLS certificate selection phase — TLS 证书选择阶段
     Certificate,
-    /// 请求重写阶段
+    /// Request rewrite phase — 请求重写阶段
     Rewrite,
-    /// 访问控制阶段（最常用）
+    /// Access control phase (most commonly used) — 访问控制阶段（最常用）
     Access,
-    /// 响应处理阶段（同时处理头和体）
+    /// Response processing phase (handles both headers and body) — 响应处理阶段（同时处理头和体）
     Response,
-    /// 响应头过滤阶段
+    /// Response header filter phase — 响应头过滤阶段
     HeaderFilter,
-    /// 响应体过滤阶段
+    /// Response body filter phase — 响应体过滤阶段
     BodyFilter,
-    /// 日志阶段（请求完成后）
+    /// Log phase (after request completion) — 日志阶段（请求完成后）
     Log,
 }
 
-/// 插件生命周期 trait — 所有插件（Rust 原生或 Lua）必须实现
+/// Plugin lifecycle trait — all plugins (native Rust or Lua) must implement this — 插件生命周期 trait — 所有插件（Rust 原生或 Lua）必须实现
 #[async_trait]
 pub trait PluginHandler: Send + Sync {
-    /// 插件优先级（数字越大越先执行，与 Kong 一致）
+    /// Plugin priority (higher number executes first, consistent with Kong) — 插件优先级（数字越大越先执行，与 Kong 一致）
     fn priority(&self) -> i32;
 
-    /// 插件版本
+    /// Plugin version — 插件版本
     fn version(&self) -> &str;
 
-    /// 插件名称
+    /// Plugin name — 插件名称
     fn name(&self) -> &str;
 
-    /// Worker 进程初始化
+    /// Worker process initialization — Worker 进程初始化
     async fn init_worker(&self, _config: &PluginConfig) -> Result<()> {
         Ok(())
     }
 
-    /// TLS 证书选择阶段
+    /// TLS certificate selection phase — TLS 证书选择阶段
     async fn certificate(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 
-    /// 请求重写阶段
+    /// Request rewrite phase — 请求重写阶段
     async fn rewrite(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 
-    /// 访问控制阶段
+    /// Access control phase — 访问控制阶段
     async fn access(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 
-    /// 响应处理阶段（header + body 一起处理）
+    /// Response processing phase (header + body combined) — 响应处理阶段（header + body 一起处理）
     async fn response(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 
-    /// 响应头过滤阶段
+    /// Response header filter phase — 响应头过滤阶段
     async fn header_filter(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 
-    /// 响应体过滤阶段
+    /// Response body filter phase — 响应体过滤阶段
     async fn body_filter(
         &self,
         _config: &PluginConfig,
@@ -184,16 +184,16 @@ pub trait PluginHandler: Send + Sync {
         Ok(())
     }
 
-    /// 日志阶段（请求完成后，总是执行）
+    /// Log phase (always executes after request completion) — 日志阶段（请求完成后，总是执行）
     async fn log(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
         Ok(())
     }
 }
 
-/// 插件工厂 trait — 用于创建插件实例
+/// Plugin factory trait — used to create plugin instances — 插件工厂 trait — 用于创建插件实例
 pub trait PluginFactory: Send + Sync {
-    /// 创建插件 handler 实例
+    /// Create a plugin handler instance — 创建插件 handler 实例
     fn create(&self) -> Box<dyn PluginHandler>;
-    /// 插件名称
+    /// Plugin name — 插件名称
     fn name(&self) -> &str;
 }

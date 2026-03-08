@@ -1,25 +1,25 @@
-//! Kong PDK 兼容层 — 在 Lua VM 中注入 kong.* 和 ngx.* 全局表
+//! Kong PDK compatibility layer — injects kong.* and ngx.* global tables into Lua VM — Kong PDK 兼容层 — 在 Lua VM 中注入 kong.* 和 ngx.* 全局表
 //!
-//! 实现的 PDK 模块:
-//! - kong.request: 读取请求信息（从 __kong_req_data 全局表）
-//! - kong.response: 设置响应信息、短路（通过 __kong_short_circuited 等全局变量）
-//! - kong.service.request: 修改发往上游的请求（通过 __kong_upstream_headers 等）
-//! - kong.log: 日志输出
-//! - kong.ctx: 请求级共享数据
-//! - ngx.req / ngx.log / ngx.var: 基本兼容
+//! Implemented PDK modules: — 实现的 PDK 模块:
+//! - kong.request: read request info (from __kong_req_data global table) — kong.request: 读取请求信息（从 __kong_req_data 全局表）
+//! - kong.response: set response info, short-circuit (via __kong_short_circuited etc.) — kong.response: 设置响应信息、短路（通过 __kong_short_circuited 等全局变量）
+//! - kong.service.request: modify upstream request (via __kong_upstream_headers etc.) — kong.service.request: 修改发往上游的请求（通过 __kong_upstream_headers 等）
+//! - kong.log: log output — kong.log: 日志输出
+//! - kong.ctx: request-level shared data — kong.ctx: 请求级共享数据
+//! - ngx.req / ngx.log / ngx.var: basic compatibility — ngx.req / ngx.log / ngx.var: 基本兼容
 
 use kong_core::traits::RequestCtx;
 use mlua::prelude::*;
 use mlua::LuaSerdeExt;
 
-/// 注入 kong 全局 PDK 表到 Lua VM
+/// Inject the kong global PDK table into the Lua VM — 注入 kong 全局 PDK 表到 Lua VM
 ///
-/// 核心机制：将 RequestCtx 快照写入 Lua 全局变量 __kong_req_data，
-/// PDK 函数从这个表读取，而非硬编码返回值。
+/// Core mechanism: snapshot RequestCtx into the Lua global __kong_req_data, — 核心机制：将 RequestCtx 快照写入 Lua 全局变量 __kong_req_data，
+/// PDK functions read from this table instead of returning hardcoded values. — PDK 函数从这个表读取，而非硬编码返回值。
 pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     let globals = lua.globals();
 
-    // ====== 1. 将请求数据写入 Lua 全局表 ======
+    // ====== 1. Write request data into Lua global table — 将请求数据写入 Lua 全局表 ======
     let req_data = lua.create_table()?;
     req_data.set("method", ctx.request_method.as_str())?;
     req_data.set("path", ctx.request_path.as_str())?;
@@ -29,7 +29,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     req_data.set("query_string", ctx.request_query_string.as_str())?;
     req_data.set("client_ip", ctx.client_ip.as_str())?;
 
-    // 请求头表
+    // Request headers table — 请求头表
     let headers_table = lua.create_table()?;
     for (name, value) in &ctx.request_headers {
         headers_table.set(name.as_str(), value.as_str())?;
@@ -37,7 +37,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     req_data.set("headers", headers_table)?;
     globals.set("__kong_req_data", req_data)?;
 
-    // 响应数据表（header_filter/log 阶段填充）
+    // Response data table (populated during header_filter/log phases) — 响应数据表（header_filter/log 阶段填充）
     let resp_data = lua.create_table()?;
     if let Some(status) = ctx.response_status {
         resp_data.set("status", status as i32)?;
@@ -49,21 +49,21 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     resp_data.set("headers", resp_headers_table)?;
     globals.set("__kong_resp_data", resp_data)?;
 
-    // 初始化短路标志
+    // Initialize short-circuit flags — 初始化短路标志
     globals.set("__kong_short_circuited", false)?;
     globals.set("__kong_exit_status", LuaValue::Nil)?;
     globals.set("__kong_exit_body", LuaValue::Nil)?;
     globals.set("__kong_exit_headers", lua.create_table()?)?;
 
-    // 初始化上游请求头修改队列
+    // Initialize upstream request header modification queue — 初始化上游请求头修改队列
     globals.set("__kong_upstream_headers_set", lua.create_table()?)?;
     globals.set("__kong_upstream_headers_remove", lua.create_table()?)?;
 
-    // 初始化响应头修改队列
+    // Initialize response header modification queue — 初始化响应头修改队列
     globals.set("__kong_response_headers_set", lua.create_table()?)?;
     globals.set("__kong_response_headers_remove", lua.create_table()?)?;
 
-    // ====== 2. 创建 kong 主表 ======
+    // ====== 2. Create kong main table — 创建 kong 主表 ======
     let kong = lua.create_table()?;
 
     // ====== kong.request ======
@@ -129,7 +129,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     })?)?;
 
     request.set("get_query", lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
-        // 简化实现：返回空表（完整实现需要解析 query string）
+        // Simplified implementation: returns empty table (full impl needs query string parsing) — 简化实现：返回空表（完整实现需要解析 query string）
         lua.create_table()
     })?)?;
 
@@ -212,7 +212,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     })?)?;
 
     service_request.set("set_scheme", lua.create_function(|_, _scheme: String| -> LuaResult<()> {
-        // scheme 修改暂不支持（需要在 upstream_peer 中处理）
+        // Scheme modification not yet supported (needs handling in upstream_peer) — scheme 修改暂不支持（需要在 upstream_peer 中处理）
         Ok(())
     })?)?;
 
@@ -279,7 +279,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     // ====== kong.ctx ======
     let ctx_table = lua.create_table()?;
     let shared = lua.create_table()?;
-    // 预填充现有 shared 数据
+    // Pre-populate with existing shared data — 预填充现有 shared 数据
     for (key, value) in &ctx.shared {
         if let Ok(lua_val) = lua.to_value(value) {
             shared.set(key.as_str(), lua_val)?;
@@ -307,7 +307,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     Ok(())
 }
 
-/// 注入 ngx 兼容层到 Lua VM
+/// Inject ngx compatibility layer into the Lua VM — 注入 ngx 兼容层到 Lua VM
 pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
@@ -331,7 +331,7 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
-    // ngx 日志级别常量
+    // ngx log level constants — ngx 日志级别常量
     ngx.set("DEBUG", 8)?;
     ngx.set("INFO", 7)?;
     ngx.set("NOTICE", 6)?;
@@ -341,14 +341,14 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     ngx.set("ALERT", 2)?;
     ngx.set("EMERG", 1)?;
 
-    // ngx.OK, ngx.ERROR 等常量
+    // ngx.OK, ngx.ERROR and other constants — ngx.OK, ngx.ERROR 等常量
     ngx.set("OK", 0)?;
     ngx.set("ERROR", -1)?;
     ngx.set("AGAIN", -2)?;
     ngx.set("DONE", -4)?;
     ngx.set("DECLINED", -5)?;
 
-    // HTTP 状态码
+    // HTTP status codes — HTTP 状态码
     ngx.set("HTTP_OK", 200)?;
     ngx.set("HTTP_CREATED", 201)?;
     ngx.set("HTTP_NO_CONTENT", 204)?;
@@ -420,7 +420,7 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     )?;
     ngx.set("re", re)?;
 
-    // ngx.req — 从 __kong_req_data 读取真实数据
+    // ngx.req — reads real data from __kong_req_data — ngx.req — 从 __kong_req_data 读取真实数据
     let req = lua.create_table()?;
     req.set("get_headers", lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
         let data: LuaTable = lua.globals().get("__kong_req_data")?;
@@ -437,7 +437,7 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     })?)?;
     ngx.set("req", req)?;
 
-    // ngx.var — 从 __kong_req_data 动态读取
+    // ngx.var — dynamically reads from __kong_req_data — ngx.var — 从 __kong_req_data 动态读取
     let var_meta = lua.create_table()?;
     var_meta.set("__index", lua.create_function(|lua, (_table, key): (LuaTable, String)| -> LuaResult<LuaValue> {
         let data: LuaResult<LuaTable> = lua.globals().get("__kong_req_data");
@@ -482,11 +482,11 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// 从 Lua VM 中同步上下文变更回 RequestCtx
+/// Sync context changes from the Lua VM back to RequestCtx — 从 Lua VM 中同步上下文变更回 RequestCtx
 pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     let globals = lua.globals();
 
-    // 1. 同步 kong.ctx.shared 回 RequestCtx
+    // 1. Sync kong.ctx.shared back to RequestCtx — 同步 kong.ctx.shared 回 RequestCtx
     if let Ok(kong) = globals.get::<LuaTable>("kong") {
         if let Ok(ctx_table) = kong.get::<LuaTable>("ctx") {
             if let Ok(shared) = ctx_table.get::<LuaTable>("shared") {
@@ -501,13 +501,13 @@ pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         }
     }
 
-    // 2. 同步短路标志
+    // 2. Sync short-circuit flags — 同步短路标志
     if let Ok(true) = globals.get::<bool>("__kong_short_circuited") {
         ctx.short_circuited = true;
         ctx.exit_status = globals.get::<Option<u16>>("__kong_exit_status").ok().flatten();
         ctx.exit_body = globals.get::<Option<String>>("__kong_exit_body").ok().flatten();
 
-        // 同步短路响应头
+        // Sync short-circuit response headers — 同步短路响应头
         if let Ok(exit_headers) = globals.get::<LuaTable>("__kong_exit_headers") {
             let mut headers = std::collections::HashMap::new();
             for pair in exit_headers.pairs::<String, String>() {
@@ -521,7 +521,7 @@ pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         }
     }
 
-    // 3. 同步上游请求头修改
+    // 3. Sync upstream request header modifications — 同步上游请求头修改
     if let Ok(headers_set) = globals.get::<LuaTable>("__kong_upstream_headers_set") {
         for pair in headers_set.pairs::<String, String>() {
             if let Ok((name, value)) = pair {
@@ -538,7 +538,7 @@ pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         }
     }
 
-    // 4. 同步响应头修改
+    // 4. Sync response header modifications — 同步响应头修改
     if let Ok(headers_set) = globals.get::<LuaTable>("__kong_response_headers_set") {
         for pair in headers_set.pairs::<String, String>() {
             if let Ok((name, value)) = pair {

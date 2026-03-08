@@ -1,10 +1,10 @@
-//! 处理链路阶段测试
+//! Phase chain tests — 处理链路阶段测试
 //!
-//! 验证 Kong 阶段链的正确执行：
-//! - 阶段执行顺序：rewrite → access → header_filter → body_filter → log
-//! - 短路行为：access 短路后 header_filter 不执行，但 log 始终执行
-//! - 插件按优先级排序执行
-//! - ctx.shared 在阶段间传递
+//! Verifies correct execution of the Kong phase chain: — 验证 Kong 阶段链的正确执行：
+//! - Phase execution order: rewrite → access → header_filter → body_filter → log — 阶段执行顺序：rewrite → access → header_filter → body_filter → log
+//! - Short-circuit behavior: header_filter skipped after access short-circuit, but log always executes — 短路行为：access 短路后 header_filter 不执行，但 log 始终执行
+//! - Plugins execute in priority order — 插件按优先级排序执行
+//! - ctx.shared is passed between phases — ctx.shared 在阶段间传递
 
 mod helpers;
 
@@ -44,11 +44,11 @@ async fn test_access_phase_called() {
 
 #[tokio::test]
 async fn test_access_short_circuit_skips_header_filter() {
-    // 注册一个在 access 阶段短路的插件
+    // Register a plugin that short-circuits in access phase — 注册一个在 access 阶段短路的插件
     let access_plugin = TestPlugin::with_short_circuit("auth-blocker", 1000, 403);
     let access_arc = Arc::new(access_plugin.clone());
 
-    // 注册一个 header_filter 插件（应该不被调用）
+    // Register a header_filter plugin (should not be called) — 注册一个 header_filter 插件（应该不被调用）
     let hf_plugin = TestPlugin::new("header-modifier", 800);
     let hf_arc = Arc::new(hf_plugin.clone());
 
@@ -59,12 +59,12 @@ async fn test_access_short_circuit_skips_header_filter() {
 
     let mut ctx = RequestCtx::new();
 
-    // 执行 access 阶段
+    // Execute access phase — 执行 access 阶段
     let _ = PhaseRunner::run_access(&resolved, &mut ctx).await;
     assert!(ctx.is_short_circuited());
     assert_eq!(ctx.exit_status, Some(403));
 
-    // 执行 header_filter — 应该因为短路而跳过
+    // Execute header_filter — should be skipped due to short-circuit — 执行 header_filter — 应该因为短路而跳过
     let _ = PhaseRunner::run_header_filter(&resolved, &mut ctx).await;
     assert!(
         !hf_plugin.header_filter_called.load(Ordering::SeqCst),
@@ -87,11 +87,11 @@ async fn test_log_phase_always_executes_after_short_circuit() {
 
     let mut ctx = RequestCtx::new();
 
-    // access 短路
+    // Access short-circuit — access 短路
     let _ = PhaseRunner::run_access(&resolved, &mut ctx).await;
     assert!(ctx.is_short_circuited());
 
-    // log 阶段仍应执行
+    // Log phase should still execute — log 阶段仍应执行
     let _ = PhaseRunner::run_log(&resolved, &mut ctx).await;
     assert!(
         log_plugin.log_called.load(Ordering::SeqCst),
@@ -101,7 +101,7 @@ async fn test_log_phase_always_executes_after_short_circuit() {
 
 #[tokio::test]
 async fn test_plugins_execute_in_priority_order() {
-    // 高优先级插件先执行
+    // Higher priority plugins execute first — 高优先级插件先执行
     let high = TestPlugin::new("high-priority", 2000);
     let mut high_p = high.clone();
     high_p.set_shared_in_rewrite = Some((
@@ -116,7 +116,7 @@ async fn test_plugins_execute_in_priority_order() {
         serde_json::Value::String("low".to_string()),
     ));
 
-    // 插件按优先级降序排列（高优先级先执行）
+    // Plugins ordered by descending priority (higher priority executes first) — 插件按优先级降序排列（高优先级先执行）
     let resolved = vec![
         make_resolved_plugin(Arc::new(high_p)),
         make_resolved_plugin(Arc::new(low_p)),
@@ -125,7 +125,7 @@ async fn test_plugins_execute_in_priority_order() {
     let mut ctx = RequestCtx::new();
     let _ = PhaseRunner::run_rewrite(&resolved, &mut ctx).await;
 
-    // 低优先级插件后执行，覆盖了 shared 值
+    // Lower priority plugin executes later, overwriting the shared value — 低优先级插件后执行，覆盖了 shared 值
     assert_eq!(
         ctx.shared.get("order").unwrap().as_str().unwrap(),
         "low",
@@ -151,14 +151,14 @@ async fn test_ctx_shared_passes_between_phases() {
 
     let mut ctx = RequestCtx::new();
 
-    // rewrite 阶段写入 shared
+    // Rewrite phase writes to shared — rewrite 阶段写入 shared
     let _ = PhaseRunner::run_rewrite(&resolved, &mut ctx).await;
     assert_eq!(ctx.shared.get("auth_passed").unwrap(), &serde_json::Value::Bool(true));
 
-    // access 阶段可以读到 rewrite 写入的数据
+    // Access phase can read data written by rewrite — access 阶段可以读到 rewrite 写入的数据
     let _ = PhaseRunner::run_access(&resolved, &mut ctx).await;
     assert!(access_plugin.access_called.load(Ordering::SeqCst));
-    // shared 数据在整个请求生命周期内持续存在
+    // Shared data persists throughout the entire request lifecycle — shared 数据在整个请求生命周期内持续存在
     assert!(ctx.shared.contains_key("auth_passed"));
 }
 
@@ -196,7 +196,7 @@ async fn test_empty_plugin_chain() {
     let resolved: Vec<kong_plugin_system::ResolvedPlugin> = vec![];
     let mut ctx = RequestCtx::new();
 
-    // 空插件链不应出错
+    // Empty plugin chain should not error — 空插件链不应出错
     assert!(PhaseRunner::run_rewrite(&resolved, &mut ctx).await.is_ok());
     assert!(PhaseRunner::run_access(&resolved, &mut ctx).await.is_ok());
     assert!(PhaseRunner::run_header_filter(&resolved, &mut ctx).await.is_ok());
@@ -209,7 +209,7 @@ async fn test_empty_plugin_chain() {
 
 #[tokio::test]
 async fn test_full_phase_chain() {
-    // 模拟完整的 Kong 处理链路
+    // Simulate full Kong processing chain — 模拟完整的 Kong 处理链路
     let plugin = TestPlugin::new("full-chain-test", 1000);
     let plugin_arc = Arc::new(plugin.clone());
     let resolved = vec![make_resolved_plugin(plugin_arc)];
@@ -238,6 +238,6 @@ async fn test_full_phase_chain() {
     let _ = PhaseRunner::run_log(&resolved, &mut ctx).await;
     assert!(plugin.log_called.load(Ordering::SeqCst));
 
-    // 验证所有阶段都被调用了
+    // Verify all phases were called — 验证所有阶段都被调用了
     assert_eq!(plugin.call_count.load(Ordering::SeqCst), 5);
 }

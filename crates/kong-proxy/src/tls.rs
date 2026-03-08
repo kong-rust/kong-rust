@@ -1,10 +1,10 @@
-//! TLS 证书管理 — 基于 SNI 的动态证书选择
+//! TLS certificate management — dynamic certificate selection based on SNI — TLS 证书管理 — 基于 SNI 的动态证书选择
 //!
-//! 实现与 Kong 一致的证书匹配逻辑：
-//! 1. 精确匹配 SNI
-//! 2. 前缀通配符匹配（*.example.com）
-//! 3. 后缀通配符匹配（example.*）
-//! 4. 回退到默认证书
+//! Implements certificate matching logic consistent with Kong: — 实现与 Kong 一致的证书匹配逻辑：
+//! 1. Exact SNI match — 精确匹配 SNI
+//! 2. Prefix wildcard match (*.example.com) — 前缀通配符匹配（*.example.com）
+//! 3. Suffix wildcard match (example.*) — 后缀通配符匹配（example.*）
+//! 4. Fall back to default certificate — 回退到默认证书
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -13,26 +13,26 @@ use uuid::Uuid;
 
 use kong_core::models::{Certificate, Sni};
 
-/// 证书和密钥对
+/// Certificate and key pair — 证书和密钥对
 #[derive(Debug, Clone)]
 pub struct CertKeyPair {
-    /// PEM 格式证书
+    /// PEM format certificate — PEM 格式证书
     pub cert: String,
-    /// PEM 格式私钥
+    /// PEM format private key — PEM 格式私钥
     pub key: String,
-    /// 备选证书（RSA + ECDSA 双证书场景）
+    /// Alternative certificate (RSA + ECDSA dual certificate scenario) — 备选证书（RSA + ECDSA 双证书场景）
     pub cert_alt: Option<String>,
-    /// 备选私钥
+    /// Alternative private key — 备选私钥
     pub key_alt: Option<String>,
 }
 
-/// TLS 证书管理器
+/// TLS certificate manager — TLS 证书管理器
 pub struct CertificateManager {
-    /// SNI 名称 -> 证书对（包含通配符 SNI）
+    /// SNI name -> certificate pair (including wildcard SNIs) — SNI 名称 -> 证书对（包含通配符 SNI）
     sni_map: Arc<RwLock<HashMap<String, CertKeyPair>>>,
-    /// 证书 ID -> 证书对
+    /// Certificate ID -> certificate pair — 证书 ID -> 证书对
     cert_cache: Arc<RwLock<HashMap<Uuid, CertKeyPair>>>,
-    /// 默认证书（当 SNI 无匹配时使用）
+    /// Default certificate (used when no SNI match found) — 默认证书（当 SNI 无匹配时使用）
     default_cert: Arc<RwLock<Option<CertKeyPair>>>,
 }
 
@@ -45,7 +45,7 @@ impl CertificateManager {
         }
     }
 
-    /// 设置默认证书（从 kong.conf 的 ssl_cert/ssl_cert_key 加载）
+    /// Set default certificate (loaded from kong.conf ssl_cert/ssl_cert_key) — 设置默认证书（从 kong.conf 的 ssl_cert/ssl_cert_key 加载）
     pub fn set_default_cert(&self, cert: String, key: String) {
         if let Ok(mut default) = self.default_cert.write() {
             *default = Some(CertKeyPair {
@@ -57,9 +57,9 @@ impl CertificateManager {
         }
     }
 
-    /// 从数据库加载所有证书和 SNI 映射
+    /// Load all certificates and SNI mappings from database — 从数据库加载所有证书和 SNI 映射
     pub fn load_certificates(&self, certificates: &[Certificate], snis: &[Sni]) {
-        // 构建证书缓存
+        // Build certificate cache — 构建证书缓存
         let mut cert_map = HashMap::new();
         for cert in certificates {
             let pair = CertKeyPair {
@@ -71,7 +71,7 @@ impl CertificateManager {
             cert_map.insert(cert.id, pair);
         }
 
-        // 构建 SNI -> 证书映射
+        // Build SNI -> certificate mapping — 构建 SNI -> 证书映射
         let mut sni_map = HashMap::new();
         for sni in snis {
             if let Some(pair) = cert_map.get(&sni.certificate.id) {
@@ -79,7 +79,7 @@ impl CertificateManager {
             }
         }
 
-        // 原子更新
+        // Atomic update — 原子更新
         if let Ok(mut cache) = self.cert_cache.write() {
             *cache = cert_map;
         }
@@ -88,19 +88,19 @@ impl CertificateManager {
         }
     }
 
-    /// 根据 SNI 查找证书
+    /// Find certificate by SNI — 根据 SNI 查找证书
     ///
-    /// 匹配优先级（与 Kong 一致）：
-    /// 1. 精确匹配
-    /// 2. 前缀通配符（*.example.com）
-    /// 3. 后缀通配符（example.*）
-    /// 4. 默认 SNI（"*"）
-    /// 5. 默认证书
+    /// Match priority (consistent with Kong): — 匹配优先级（与 Kong 一致）：
+    /// 1. Exact match — 精确匹配
+    /// 2. Prefix wildcard (*.example.com) — 前缀通配符（*.example.com）
+    /// 3. Suffix wildcard (example.*) — 后缀通配符（example.*）
+    /// 4. Default SNI ("*") — 默认 SNI（"*"）
+    /// 5. Default certificate — 默认证书
     pub fn find_certificate(&self, sni: Option<&str>) -> Option<CertKeyPair> {
         let sni = match sni {
             Some(s) if !s.is_empty() => s,
             _ => {
-                // 无 SNI，返回默认证书
+                // No SNI, return default certificate — 无 SNI，返回默认证书
                 return self.get_default_cert();
             }
         };
@@ -108,36 +108,36 @@ impl CertificateManager {
         let sni_lower = sni.to_lowercase();
 
         if let Ok(map) = self.sni_map.read() {
-            // 1. 精确匹配
+            // 1. Exact match — 精确匹配
             if let Some(pair) = map.get(&sni_lower) {
                 return Some(pair.clone());
             }
 
-            // 2. 前缀通配符匹配（*.example.com）
+            // 2. Prefix wildcard match (*.example.com) — 前缀通配符匹配
             if let Some(wild_prefix) = produce_wild_prefix(&sni_lower) {
                 if let Some(pair) = map.get(&wild_prefix) {
                     return Some(pair.clone());
                 }
             }
 
-            // 3. 后缀通配符匹配（example.*）
+            // 3. Suffix wildcard match (example.*) — 后缀通配符匹配
             if let Some(wild_suffix) = produce_wild_suffix(&sni_lower) {
                 if let Some(pair) = map.get(&wild_suffix) {
                     return Some(pair.clone());
                 }
             }
 
-            // 4. 默认 SNI（通配符 "*"）
+            // 4. Default SNI (wildcard "*") — 默认 SNI（通配符 "*"）
             if let Some(pair) = map.get("*") {
                 return Some(pair.clone());
             }
         }
 
-        // 5. 回退到默认证书
+        // 5. Fall back to default certificate — 回退到默认证书
         self.get_default_cert()
     }
 
-    /// 根据证书 ID 查找证书（用于 Service 的 client_certificate）
+    /// Find certificate by ID (for Service's client_certificate) — 根据证书 ID 查找证书（用于 Service 的 client_certificate）
     pub fn get_certificate_by_id(&self, id: &Uuid) -> Option<CertKeyPair> {
         if let Ok(cache) = self.cert_cache.read() {
             cache.get(id).cloned()
@@ -146,7 +146,7 @@ impl CertificateManager {
         }
     }
 
-    /// 获取默认证书
+    /// Get default certificate — 获取默认证书
     fn get_default_cert(&self) -> Option<CertKeyPair> {
         if let Ok(default) = self.default_cert.read() {
             default.clone()
@@ -155,7 +155,7 @@ impl CertificateManager {
         }
     }
 
-    /// 热更新单个证书
+    /// Hot-reload a single certificate — 热更新单个证书
     pub fn update_certificate(&self, cert: &Certificate) {
         let pair = CertKeyPair {
             cert: cert.cert.clone(),
@@ -169,7 +169,7 @@ impl CertificateManager {
         }
     }
 
-    /// 热更新 SNI 映射
+    /// Hot-reload SNI mapping — 热更新 SNI 映射
     pub fn update_sni(&self, sni: &Sni) {
         if let Ok(cert_cache) = self.cert_cache.read() {
             if let Some(pair) = cert_cache.get(&sni.certificate.id) {
@@ -180,7 +180,7 @@ impl CertificateManager {
         }
     }
 
-    /// 删除 SNI 映射
+    /// Remove SNI mapping — 删除 SNI 映射
     pub fn remove_sni(&self, sni_name: &str) {
         if let Ok(mut map) = self.sni_map.write() {
             map.remove(sni_name);
@@ -188,20 +188,20 @@ impl CertificateManager {
     }
 }
 
-/// 生成前缀通配符变体
-/// 例如：api.example.com → *.example.com
+/// Generate prefix wildcard variant — 生成前缀通配符变体
+/// e.g.: api.example.com → *.example.com — 例如：api.example.com → *.example.com
 ///       sub.api.example.com → *.api.example.com
 fn produce_wild_prefix(sni: &str) -> Option<String> {
-    // 如果已经是通配符，直接返回
+    // If already a wildcard, return as-is — 如果已经是通配符，直接返回
     if sni.starts_with('*') {
         return Some(sni.to_string());
     }
 
-    // 找第一个点的位置，替换第一段为 *
+    // Find position of first dot, replace first segment with * — 找第一个点的位置，替换第一段为 *
     let dot_pos = sni.find('.')?;
     let remainder = &sni[dot_pos..];
 
-    // 至少需要 *.x.y 格式（余下部分需要包含至少一个点）
+    // Must be at least *.x.y format (remainder must contain at least one dot) — 至少需要 *.x.y 格式（余下部分需要包含至少一个点）
     if remainder[1..].contains('.') {
         Some(format!("*{}", remainder))
     } else {
@@ -209,16 +209,16 @@ fn produce_wild_prefix(sni: &str) -> Option<String> {
     }
 }
 
-/// 生成后缀通配符变体
-/// 例如：example.com → example.*
+/// Generate suffix wildcard variant — 生成后缀通配符变体
+/// e.g.: example.com → example.* — 例如：example.com → example.*
 ///       api.example.com → api.example.*
 fn produce_wild_suffix(sni: &str) -> Option<String> {
-    // 如果已经是通配符，直接返回
+    // If already a wildcard, return as-is — 如果已经是通配符，直接返回
     if sni.ends_with('*') {
         return Some(sni.to_string());
     }
 
-    // 找最后一个点的位置，替换最后一段为 *
+    // Find position of last dot, replace last segment with * — 找最后一个点的位置，替换最后一段为 *
     let dot_pos = sni.rfind('.')?;
     if dot_pos == 0 {
         return None;
@@ -227,33 +227,33 @@ fn produce_wild_suffix(sni: &str) -> Option<String> {
     Some(format!("{}.*", &sni[..dot_pos]))
 }
 
-/// 上游 TLS 配置 — 用于 Service 级别的 TLS 设置
+/// Upstream TLS configuration — for Service-level TLS settings — 上游 TLS 配置 — 用于 Service 级别的 TLS 设置
 #[derive(Debug, Clone)]
 pub struct UpstreamTlsConfig {
-    /// 客户端证书（用于 mTLS）
+    /// Client certificate (for mTLS) — 客户端证书（用于 mTLS）
     pub client_cert: Option<CertKeyPair>,
-    /// 是否验证上游证书
+    /// Whether to verify upstream certificate — 是否验证上游证书
     pub tls_verify: bool,
-    /// 验证深度
+    /// Verification depth — 验证深度
     pub tls_verify_depth: i32,
-    /// CA 证书列表（PEM 格式）
+    /// CA certificate list (PEM format) — CA 证书列表（PEM 格式）
     pub ca_certs: Vec<String>,
 }
 
 impl UpstreamTlsConfig {
-    /// 从 Service 配置构建上游 TLS 配置
+    /// Build upstream TLS configuration from Service settings — 从 Service 配置构建上游 TLS 配置
     pub fn from_service(
         service: &kong_core::models::Service,
         cert_manager: &CertificateManager,
         ca_certificates: &[kong_core::models::CaCertificate],
     ) -> Self {
-        // 获取客户端证书
+        // Get client certificate — 获取客户端证书
         let client_cert = service
             .client_certificate
             .as_ref()
             .and_then(|fk| cert_manager.get_certificate_by_id(&fk.id));
 
-        // 收集 CA 证书
+        // Collect CA certificates — 收集 CA 证书
         let ca_certs = service
             .ca_certificates
             .as_ref()
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(result.unwrap().cert, "cert-wild");
 
         // sub.api.example.com 不应该匹配 *.example.com
-        // （因为生成的通配符是 *.api.example.com）
+        // (because the generated wildcard is *.api.example.com) — （因为生成的通配符是 *.api.example.com）
         let result = manager.find_certificate(Some("sub.api.example.com"));
         assert!(result.is_none());
     }
@@ -370,12 +370,12 @@ mod tests {
         ];
         manager.load_certificates(&certs, &snis);
 
-        // 精确匹配优先
+        // Exact match takes priority — 精确匹配优先
         let result = manager.find_certificate(Some("api.example.com"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "cert-exact");
 
-        // 其他子域名走通配符
+        // Other subdomains fall through to wildcard — 其他子域名走通配符
         let result = manager.find_certificate(Some("other.example.com"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "cert-wild");
@@ -386,12 +386,12 @@ mod tests {
         let manager = CertificateManager::new();
         manager.set_default_cert("default-cert".to_string(), "default-key".to_string());
 
-        // 无 SNI 返回默认
+        // No SNI returns default — 无 SNI 返回默认
         let result = manager.find_certificate(None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "default-cert");
 
-        // 无匹配也返回默认
+        // No match also returns default — 无匹配也返回默认
         let result = manager.find_certificate(Some("unknown.example.com"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "default-cert");
@@ -406,7 +406,7 @@ mod tests {
         let snis = vec![make_sni("*", cert_id)];
         manager.load_certificates(&certs, &snis);
 
-        // 任何 SNI 在无精确/通配符匹配时应该回退到 "*"
+        // Any SNI should fall back to "*" when no exact/wildcard match is found — 任何 SNI 在无精确/通配符匹配时应该回退到 "*"
         let result = manager.find_certificate(Some("anything.random.com"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "cert-default-sni");
@@ -432,7 +432,7 @@ mod tests {
         let snis = vec![make_sni("api.example.com", cert_id)];
         manager.load_certificates(&certs, &snis);
 
-        // SNI 匹配应该不区分大小写
+        // SNI matching should be case-insensitive — SNI 匹配应该不区分大小写
         let result = manager.find_certificate(Some("API.Example.COM"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "cert-case");
@@ -448,9 +448,9 @@ mod tests {
             produce_wild_prefix("sub.api.example.com"),
             Some("*.api.example.com".to_string())
         );
-        // 不能从顶级域名生成通配符
+        // Cannot generate wildcard from top-level domain — 不能从顶级域名生成通配符
         assert_eq!(produce_wild_prefix("example.com"), None);
-        // 已经是通配符
+        // Already a wildcard — 已经是通配符
         assert_eq!(
             produce_wild_prefix("*.example.com"),
             Some("*.example.com".to_string())
@@ -482,7 +482,7 @@ mod tests {
         let snis = vec![make_sni("api.example.com", cert_id)];
         manager.load_certificates(&certs, &snis);
 
-        // 添加新 SNI
+        // Add new SNI — 添加新 SNI
         let new_sni = make_sni("new.example.com", cert_id);
         manager.update_sni(&new_sni);
 
@@ -490,7 +490,7 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().cert, "cert-1");
 
-        // 删除 SNI
+        // Delete SNI — 删除 SNI
         manager.remove_sni("api.example.com");
         let result = manager.find_certificate(Some("api.example.com"));
         assert!(result.is_none());

@@ -1,11 +1,11 @@
-//! Stream (L4) 代理引擎 — 基于 Pingora ServerApp trait
+//! Stream (L4) proxy engine — built on Pingora ServerApp trait — Stream (L4) 代理引擎 — 基于 Pingora ServerApp trait
 //!
-//! 支持三种代理模式：
-//! 1. TCP — 明文 TCP 转发，按 source/dest IP:port 路由
-//! 2. TLS Passthrough — peek ClientHello 提取 SNI，不终止 TLS，原样转发
-//! 3. TLS Termination — 终止 TLS，获取 SNI 路由，转发明文到上游
+//! Supports three proxy modes: — 支持三种代理模式：
+//! 1. TCP — plaintext TCP forwarding, routed by source/dest IP:port — 明文 TCP 转发，按 source/dest IP:port 路由
+//! 2. TLS Passthrough — peek ClientHello to extract SNI, no TLS termination, forward as-is — peek ClientHello 提取 SNI，不终止 TLS，原样转发
+//! 3. TLS Termination — terminate TLS, route by SNI, forward plaintext to upstream — 终止 TLS，获取 SNI 路由，转发明文到上游
 //!
-//! 所有 stream_listen 端口统一注册为纯 TCP（add_tcp），由应用层决定 TLS 处理方式。
+//! All stream_listen ports are registered as plain TCP (add_tcp); the application layer decides TLS handling. — 所有 stream_listen 端口统一注册为纯 TCP（add_tcp），由应用层决定 TLS 处理方式。
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -28,26 +28,26 @@ use crate::dns::SharedDnsResolver;
 use crate::stream_tls::{is_tls_handshake, parse_sni_from_client_hello, CLIENT_HELLO_PEEK_SIZE};
 use crate::tls::CertificateManager;
 
-/// Stream 代理服务 — 实现 Pingora ServerApp trait
+/// Stream proxy service — implements Pingora ServerApp trait — Stream 代理服务 — 实现 Pingora ServerApp trait
 pub struct KongStreamProxy {
-    /// Stream 路由器（可热更新）
+    /// Stream router (hot-reloadable) — Stream 路由器（可热更新）
     pub stream_router: Arc<RwLock<StreamRouter>>,
-    /// 负载均衡器（与 HTTP 代理共享）
+    /// Load balancers (shared with HTTP proxy) — 负载均衡器（与 HTTP 代理共享）
     pub balancers: Arc<RwLock<HashMap<String, LoadBalancer>>>,
-    /// Service 缓存（与 HTTP 代理共享）
+    /// Service cache (shared with HTTP proxy) — Service 缓存（与 HTTP 代理共享）
     pub services: Arc<RwLock<HashMap<Uuid, Service>>>,
-    /// TLS 证书管理器（与 HTTP 代理共享）
+    /// TLS certificate manager (shared with HTTP proxy) — TLS 证书管理器（与 HTTP 代理共享）
     pub cert_manager: Arc<CertificateManager>,
-    /// 上游连接器
+    /// Upstream connector — 上游连接器
     pub connector: TransportConnector,
-    /// Access log 异步写入器
+    /// Async access log writer — Access log 异步写入器
     pub access_log_writer: Option<AccessLogWriter>,
-    /// 异步 DNS 解析器
+    /// Async DNS resolver — 异步 DNS 解析器
     pub dns_resolver: SharedDnsResolver,
 }
 
 impl KongStreamProxy {
-    /// 创建 Stream 代理
+    /// Create Stream proxy — 创建 Stream 代理
     pub fn new(
         routes: &[kong_core::models::Route],
         balancers: Arc<RwLock<HashMap<String, LoadBalancer>>>,
@@ -66,21 +66,21 @@ impl KongStreamProxy {
         }
     }
 
-    /// 更新 Stream 路由表
+    /// Update Stream routing table — 更新 Stream 路由表
     pub fn update_routes(&self, routes: &[kong_core::models::Route]) {
         if let Ok(mut router) = self.stream_router.write() {
             router.rebuild(routes);
         }
     }
 
-    /// 解析上游地址（复用 HTTP 代理的负载均衡逻辑）
+    /// Resolve upstream address (reuses HTTP proxy load balancing logic) — 解析上游地址（复用 HTTP 代理的负载均衡逻辑）
     fn resolve_upstream(&self, service: &Service) -> Option<(String, bool)> {
         let use_tls = matches!(
             service.protocol,
             Protocol::Https | Protocol::Tls | Protocol::Grpcs
         );
 
-        // 尝试通过负载均衡器解析
+        // Try resolving via load balancer — 尝试通过负载均衡器解析
         if let Ok(balancers) = self.balancers.read() {
             if let Some(lb) = balancers.get(&service.host) {
                 if let Some(addr) = lb.select() {
@@ -89,28 +89,28 @@ impl KongStreamProxy {
             }
         }
 
-        // 直接使用 Service 的 host:port
+        // Use Service's host:port directly — 直接使用 Service 的 host:port
         Some((format!("{}:{}", service.host, service.port), use_tls))
     }
 
-    /// 处理单个 Stream 连接
+    /// Handle a single Stream connection — 处理单个 Stream 连接
     async fn handle_connection(&self, mut downstream: Stream) {
         let start = std::time::Instant::now();
 
-        // 获取客户端和本地地址
+        // Get client and local addresses — 获取客户端和本地地址
         let (source_ip, source_port, dest_ip, dest_port) = extract_addrs(&*downstream);
         let remote_addr = source_ip
             .map(|ip| format!("{}:{}", ip, source_port.unwrap_or(0)))
             .unwrap_or_else(|| "-".to_string());
 
-        // 1. Peek 首字节判断是否 TLS
+        // 1. Peek first byte to determine if TLS — Peek 首字节判断是否 TLS
         let mut peek_buf = [0u8; 1];
         let is_tls = match downstream.try_peek(&mut peek_buf).await {
             Ok(true) => is_tls_handshake(peek_buf[0]),
             _ => false,
         };
 
-        // 2. 如果是 TLS，peek ClientHello 解析 SNI
+        // 2. If TLS, peek ClientHello to parse SNI — 如果是 TLS，peek ClientHello 解析 SNI
         let sni = if is_tls {
             let mut hello_buf = vec![0u8; CLIENT_HELLO_PEEK_SIZE];
             match downstream.try_peek(&mut hello_buf).await {
@@ -121,7 +121,7 @@ impl KongStreamProxy {
             None
         };
 
-        // 3. 构建路由上下文
+        // 3. Build routing context — 构建路由上下文
         let ctx = StreamRequestContext {
             source_ip,
             source_port,
@@ -130,7 +130,7 @@ impl KongStreamProxy {
             sni: sni.clone(),
         };
 
-        // 4. 路由匹配
+        // 4. Route matching — 路由匹配
         let route_match = {
             let router = match self.stream_router.read() {
                 Ok(r) => r,
@@ -154,7 +154,7 @@ impl KongStreamProxy {
             }
         };
 
-        // 5. 查找 Service
+        // 5. Find Service — 查找 Service
         let service = match route_match.service_id {
             Some(service_id) => {
                 let services = match self.services.read() {
@@ -174,7 +174,7 @@ impl KongStreamProxy {
             }
         };
 
-        // 6. 解析上游地址
+        // 6. Resolve upstream address — 解析上游地址
         let (upstream_addr, upstream_tls) = match self.resolve_upstream(&service) {
             Some(r) => r,
             None => {
@@ -183,18 +183,18 @@ impl KongStreamProxy {
             }
         };
 
-        // 7. 判断代理模式并执行
+        // 7. Determine proxy mode and execute — 判断代理模式并执行
         let is_passthrough = route_match
             .protocols
             .iter()
             .any(|p| matches!(p, Protocol::TlsPassthrough));
 
         let result = if is_passthrough {
-            // TLS Passthrough：直接透传加密数据
+            // TLS Passthrough: forward encrypted data as-is — 直接透传加密数据
             self.proxy_passthrough(downstream, &upstream_addr).await
         } else if is_tls && route_match.protocols.iter().any(|p| matches!(p, Protocol::Tls)) {
-            // TLS Termination：终止 TLS 后转发
-            // 当前简化实现：作为 TCP 透传
+            // TLS Termination: forward after terminating TLS — 终止 TLS 后转发
+            // Current simplified implementation: treated as TCP passthrough — 当前简化实现：作为 TCP 透传
             // TODO: 实现完整 TLS termination（SslAcceptor + CertificateManager）
             tracing::warn!(
                 "TLS Termination 模式暂作为 TCP 透传处理 (route={})",
@@ -202,7 +202,7 @@ impl KongStreamProxy {
             );
             self.proxy_passthrough(downstream, &upstream_addr).await
         } else {
-            // TCP：明文双向转发
+            // TCP: plaintext bidirectional forwarding — 明文双向转发
             self.proxy_tcp(downstream, &upstream_addr, upstream_tls)
                 .await
         };
@@ -253,7 +253,7 @@ impl KongStreamProxy {
         }
     }
 
-    /// TCP 明文代理：建立上游连接后双向转发
+    /// TCP plaintext proxy: bidirectional forwarding after establishing upstream connection — TCP 明文代理：建立上游连接后双向转发
     async fn proxy_tcp(
         &self,
         mut downstream: Stream,
@@ -265,25 +265,25 @@ impl KongStreamProxy {
         Ok(())
     }
 
-    /// TLS Passthrough 代理：不终止 TLS，原样转发
+    /// TLS Passthrough proxy: no TLS termination, forward as-is — TLS Passthrough 代理：不终止 TLS，原样转发
     async fn proxy_passthrough(
         &self,
         mut downstream: Stream,
         upstream_addr: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Passthrough 模式上游不做 TLS（数据已加密）
+        // Passthrough mode: no TLS to upstream (data is already encrypted) — Passthrough 模式上游不做 TLS（数据已加密）
         let mut upstream = self.connect_upstream(upstream_addr, false).await?;
         bidirectional_copy(&mut downstream, &mut upstream).await?;
         Ok(())
     }
 
-    /// 连接上游
+    /// Connect to upstream — 连接上游
     async fn connect_upstream(
         &self,
         addr: &str,
         _tls: bool,
     ) -> Result<Stream, Box<dyn std::error::Error + Send + Sync>> {
-        // 异步 DNS 解析
+        // Async DNS resolution — 异步 DNS 解析
         let (host, port) = if let Some(colon_pos) = addr.rfind(':') {
             let h = &addr[..colon_pos];
             let p: u16 = addr[colon_pos + 1..].parse().unwrap_or(80);
@@ -297,7 +297,7 @@ impl KongStreamProxy {
                 Box::from(format!("上游��址解析失败 {}: {}", addr, e))
             })?;
 
-        // 使用 BasicPeer 构建连接（纯 TCP，不做 TLS）
+        // Build connection using BasicPeer (plain TCP, no TLS) — 使用 BasicPeer 构建连接（纯 TCP，不做 TLS）
         let peer = BasicPeer::new(&socket_addr.to_string());
 
         let stream = self
@@ -320,11 +320,11 @@ impl ServerApp for KongStreamProxy {
         _shutdown: &ShutdownWatch,
     ) -> Option<Stream> {
         self.handle_connection(session).await;
-        None // Stream 代理不复用连接
+        None // Stream proxy does not reuse connections — Stream 代理不复用连接
     }
 }
 
-/// 从 Stream 的 SocketDigest 中提取客户端和本地地址
+/// Extract client and local addresses from Stream's SocketDigest — 从 Stream 的 SocketDigest 中提取客户端和本地地址
 fn extract_addrs(stream: &dyn pingora_core::protocols::IO) -> (Option<IpAddr>, Option<u16>, Option<IpAddr>, Option<u16>) {
     let digest = stream.get_socket_digest();
 
@@ -345,7 +345,7 @@ fn extract_addrs(stream: &dyn pingora_core::protocols::IO) -> (Option<IpAddr>, O
     (source_ip, source_port, dest_ip, dest_port)
 }
 
-/// 双向数据拷贝（downstream ↔ upstream）
+/// Bidirectional data copy (downstream ↔ upstream) — 双向数据拷贝（downstream ↔ upstream）
 async fn bidirectional_copy(
     a: &mut Stream,
     b: &mut Stream,
@@ -360,7 +360,7 @@ async fn bidirectional_copy(
             Ok(())
         }
         Err(e) => {
-            // 连接重置等正常关闭情况不记为错误
+            // Normal close cases like connection reset are not treated as errors — 连接重置等正常关闭情况不记为错误
             if e.kind() == std::io::ErrorKind::ConnectionReset
                 || e.kind() == std::io::ErrorKind::BrokenPipe
                 || e.kind() == std::io::ErrorKind::UnexpectedEof

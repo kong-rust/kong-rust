@@ -4,68 +4,68 @@ use uuid::Uuid;
 use super::common::{ForeignKey, HashOn, LbAlgorithm};
 use crate::traits::Entity;
 
-/// 主动健康检查 — 健康阈值配置
+/// Active healthcheck — healthy threshold configuration — 主动健康检查 — 健康阈值配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthyConfig {
-    /// 检查间隔（秒），0 表示禁用
+    /// Check interval in seconds, 0 means disabled — 检查间隔（秒），0 表示禁用
     #[serde(default)]
     pub interval: f64,
-    /// 被认为健康的 HTTP 状态码列表
+    /// HTTP status codes considered healthy — 被认为健康的 HTTP 状态码列表
     #[serde(default)]
     pub http_statuses: Vec<i32>,
-    /// 连续成功次数达到此值后标记为健康，0 表示禁用
+    /// Mark as healthy after this many consecutive successes, 0 means disabled — 连续成功次数达到此值后标记为健康，0 表示禁用
     #[serde(default)]
     pub successes: i32,
 }
 
-/// 主动健康检查 — 不健康阈值配置
+/// Active healthcheck — unhealthy threshold configuration — 主动健康检查 — 不健康阈值配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UnhealthyConfig {
-    /// 检查间隔（秒），0 表示禁用
+    /// Check interval in seconds, 0 means disabled — 检查间隔（秒），0 表示禁用
     #[serde(default)]
     pub interval: f64,
-    /// 被认为不健康的 HTTP 状态码列表
+    /// HTTP status codes considered unhealthy — 被认为不健康的 HTTP 状态码列表
     #[serde(default)]
     pub http_statuses: Vec<i32>,
-    /// TCP 失败次数阈值，0 表示禁用
+    /// TCP failure count threshold, 0 means disabled — TCP 失败次数阈值，0 表示禁用
     #[serde(default)]
     pub tcp_failures: i32,
-    /// 超时次数阈值，0 表示禁用
+    /// Timeout count threshold, 0 means disabled — 超时次数阈值，0 表示禁用
     #[serde(default)]
     pub timeouts: i32,
-    /// HTTP 失败次数阈值，0 表示禁用
+    /// HTTP failure count threshold, 0 means disabled — HTTP 失败次数阈值，0 表示禁用
     #[serde(default)]
     pub http_failures: i32,
 }
 
-/// 主动健康检查配置
+/// Active healthcheck configuration — 主动健康检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveHealthcheck {
-    /// 检查类型：tcp, http, https, grpc, grpcs
+    /// Check type: tcp, http, https, grpc, grpcs — 检查类型：tcp, http, https, grpc, grpcs
     #[serde(rename = "type", default = "default_check_type")]
     pub check_type: String,
-    /// 超时时间（秒），默认 1
+    /// Timeout in seconds, default 1 — 超时时间（秒），默认 1
     #[serde(default = "default_timeout")]
     pub timeout: f64,
-    /// 并发数，默认 10
+    /// Concurrency, default 10 — 并发数，默认 10
     #[serde(default = "default_concurrency")]
     pub concurrency: i32,
-    /// HTTP 检查路径，默认 "/"
+    /// HTTP check path, default "/" — HTTP 检查路径，默认 "/"
     #[serde(default = "default_http_path")]
     pub http_path: String,
-    /// HTTPS SNI
+    /// HTTPS SNI — HTTPS SNI
     #[serde(skip_serializing_if = "Option::is_none")]
     pub https_sni: Option<String>,
-    /// 是否验证 HTTPS 证书，默认 true
+    /// Whether to verify HTTPS certificate, default true — 是否验证 HTTPS 证书，默认 true
     #[serde(default = "default_true")]
     pub https_verify_certificate: bool,
-    /// 自定义请求头
+    /// Custom request headers — 自定义请求头
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::HashMap<String, Vec<String>>>,
-    /// 健康阈值配置
+    /// Healthy threshold configuration — 健康阈值配置
     #[serde(default)]
     pub healthy: HealthyConfig,
-    /// 不健康阈值配置
+    /// Unhealthy threshold configuration — 不健康阈值配置
     #[serde(default)]
     pub unhealthy: UnhealthyConfig,
 }
@@ -86,16 +86,16 @@ impl Default for ActiveHealthcheck {
     }
 }
 
-/// 被动健康检查配置
+/// Passive healthcheck configuration — 被动健康检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PassiveHealthcheck {
-    /// 检查类型
+    /// Check type — 检查类型
     #[serde(rename = "type", default = "default_check_type")]
     pub check_type: String,
-    /// 健康阈值配置
+    /// Healthy threshold configuration — 健康阈值配置
     #[serde(default)]
     pub healthy: HealthyConfig,
-    /// 不健康阈值配置
+    /// Unhealthy threshold configuration — 不健康阈值配置
     #[serde(default)]
     pub unhealthy: UnhealthyConfig,
 }
@@ -110,16 +110,16 @@ impl Default for PassiveHealthcheck {
     }
 }
 
-/// 健康检查配置
+/// Healthcheck configuration — 健康检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthcheckConfig {
-    /// 主动健康检查
+    /// Active healthcheck — 主动健康检查
     #[serde(default)]
     pub active: ActiveHealthcheck,
-    /// 被动健康检查
+    /// Passive healthcheck — 被动健康检查
     #[serde(default)]
     pub passive: PassiveHealthcheck,
-    /// 健康阈值百分比（0-100），默认 0
+    /// Health threshold percentage (0-100), default 0 — 健康阈值百分比（0-100），默认 0
     #[serde(default)]
     pub threshold: f64,
 }
@@ -191,22 +191,22 @@ impl Default for HealthcheckConfig {
     }
 }
 
-/// Upstream 实体 — 与 Kong upstreams 表完全一致
+/// Upstream entity — fully consistent with Kong upstreams table — Upstream 实体 — 与 Kong upstreams 表完全一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Upstream {
     pub id: Uuid,
     pub created_at: i64,
     pub updated_at: i64,
-    /// 上游名称（必须是有效的主机名，不能是 IP），唯一
+    /// Upstream name (must be a valid hostname, not an IP), unique — 上游名称（必须是有效的主机名，不能是 IP），唯一
     pub name: String,
-    /// 负载均衡算法，默认 round-robin
+    /// Load balancing algorithm, default round-robin — 负载均衡算法，默认 round-robin
     #[serde(default)]
     pub algorithm: LbAlgorithm,
-    /// 哈希方式，默认 none
+    /// Hash method, default none — 哈希方式，默认 none
     #[serde(default)]
     pub hash_on: HashOn,
-    /// 哈希回退方式，默认 none
+    /// Hash fallback method, default none — 哈希回退方式，默认 none
     #[serde(default)]
     pub hash_fallback: HashOn,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,20 +225,20 @@ pub struct Upstream {
     pub hash_on_uri_capture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_fallback_uri_capture: Option<String>,
-    /// 一致性哈希槽位数，默认 10000，范围 10-65536
+    /// Consistent hashing slot count, default 10000, range 10-65536 — 一致性哈希槽位数，默认 10000，范围 10-65536
     pub slots: i32,
-    /// 健康检查配置
+    /// Healthcheck configuration — 健康检查配置
     #[serde(default)]
     pub healthchecks: HealthcheckConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    /// 自定义 Host 头（发送到上游时使用）
+    /// Custom Host header (used when sending to upstream) — 自定义 Host 头（发送到上游时使用）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_header: Option<String>,
-    /// 客户端证书（外键引用 certificates）
+    /// Client certificate (foreign key to certificates) — 客户端证书（外键引用 certificates）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate: Option<ForeignKey>,
-    /// 是否使用 SRV 主机名，默认 false
+    /// Whether to use SRV hostname, default false — 是否使用 SRV 主机名，默认 false
     #[serde(default)]
     pub use_srv_name: bool,
 }

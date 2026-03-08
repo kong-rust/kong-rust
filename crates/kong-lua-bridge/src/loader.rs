@@ -1,9 +1,9 @@
-//! Lua 插件加载器 — 扫描并加载 Kong Lua 插件
+//! Lua plugin loader — scans and loads Kong Lua plugins — Lua 插件加载器 — 扫描并加载 Kong Lua 插件
 //!
-//! 从 Kong 的插件目录加载 Lua 插件:
-//! - 读取 handler.lua 获取优先级和版本
-//! - 检测插件支持的阶段
-//! - 创建 LuaPluginHandler 实例
+//! Loads Lua plugins from Kong's plugin directories: — 从 Kong 的插件目录加载 Lua 插件:
+//! - Reads handler.lua for priority and version — 读取 handler.lua 获取优先级和版本
+//! - Detects supported phases — 检测插件支持的阶段
+//! - Creates LuaPluginHandler instances — 创建 LuaPluginHandler 实例
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use kong_core::traits::{Phase, PluginHandler};
 
 use crate::LuaPluginHandler;
 
-/// 扫描并加载指定目录下的 Kong Lua 插件
+/// Scan and load Kong Lua plugins from the specified directories — 扫描并加载指定目录下的 Kong Lua 插件
 pub fn load_lua_plugins(
     plugin_dirs: &[PathBuf],
     plugin_names: &[String],
@@ -30,7 +30,7 @@ pub fn load_lua_plugins(
                     Ok(handler) => {
                         tracing::info!("加载 Lua 插件: {} (优先级: {})", name, handler.priority());
                         handlers.push(handler);
-                        break; // 找到就不继续搜索其他目录
+                        break; // Found it, stop searching other directories — 找到就不继续搜索其他目录
                     }
                     Err(e) => {
                         tracing::warn!("加载 Lua 插件 {} 失败: {}", name, e);
@@ -43,17 +43,17 @@ pub fn load_lua_plugins(
     Ok(handlers)
 }
 
-/// 加载单个 Lua 插件
+/// Load a single Lua plugin — 加载单个 Lua 插件
 fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler> {
     let handler_file = plugin_path.join("handler.lua");
     let handler_code = std::fs::read_to_string(&handler_file)
-        .map_err(|e| KongError::LuaError(format!("读取 {} 失败: {}", handler_file.display(), e)))?;
+        .map_err(|e| KongError::LuaError(format!("Failed to read {}: {} — 读取 {} 失败: {}", handler_file.display(), e, handler_file.display(), e)))?;
 
-    // 从 handler.lua 中提取优先级和版本
+    // Extract priority and version from handler.lua — 从 handler.lua 中提取优先级和版本
     let priority = extract_priority(&handler_code).unwrap_or(1000);
     let version = extract_version(&handler_code).unwrap_or_else(|| "0.1.0".to_string());
 
-    // 检测支持的阶段
+    // Detect supported phases — 检测支持的阶段
     let phases = detect_phases(&handler_code);
 
     Ok(LuaPluginHandler::new(
@@ -65,9 +65,9 @@ fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler
     ))
 }
 
-/// 从 handler.lua 源码中提取插件优先级
+/// Extract plugin priority from handler.lua source code — 从 handler.lua 源码中提取插件优先级
 ///
-/// Kong 插件通常定义为:
+/// Kong plugins are typically defined as: — Kong 插件通常定义为:
 /// ```lua
 /// local MyPlugin = {
 ///     PRIORITY = 1000,
@@ -75,7 +75,7 @@ fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler
 /// }
 /// ```
 pub fn extract_priority(code: &str) -> Option<i32> {
-    // 匹配 PRIORITY = 数字 或 PRIORITY=数字
+    // Match PRIORITY = number or PRIORITY=number — 匹配 PRIORITY = 数字 或 PRIORITY=数字
     for line in code.lines() {
         let line = line.trim();
         if let Some(pos) = line.find("PRIORITY") {
@@ -93,13 +93,13 @@ pub fn extract_priority(code: &str) -> Option<i32> {
     None
 }
 
-/// 从 handler.lua 源码中提取插件版本
+/// Extract plugin version from handler.lua source code — 从 handler.lua 源码中提取插件版本
 pub fn extract_version(code: &str) -> Option<String> {
     for line in code.lines() {
         let line = line.trim();
         if let Some(pos) = line.find("VERSION") {
             let rest = &line[pos + 7..];
-            // 查找引号内的版本号
+            // Find the version string within quotes — 查找引号内的版本号
             if let Some(start) = rest.find('"') {
                 let version_part = &rest[start + 1..];
                 if let Some(end) = version_part.find('"') {
@@ -111,7 +111,7 @@ pub fn extract_version(code: &str) -> Option<String> {
     None
 }
 
-/// 检测 Lua 插件支持的阶段
+/// Detect phases supported by a Lua plugin — 检测 Lua 插件支持的阶段
 pub fn detect_phases(code: &str) -> HashMap<Phase, bool> {
     let mut phases = HashMap::new();
 
@@ -126,9 +126,9 @@ pub fn detect_phases(code: &str) -> HashMap<Phase, bool> {
         ("function%s*%w+[.:]response", Phase::Response),
     ];
 
-    // 简化检测：检查函数名是否出现在代码中
+    // Simplified detection: check if function name appears in the code — 简化检测：检查函数名是否出现在代码中
     for (_pattern_key, phase) in &phase_map {
-        // 简单匹配：检查 "function" 和阶段名是否在同一行
+        // Simple match: check if "function" and phase name are on the same line — 简单匹配：检查 "function" 和阶段名是否在同一行
         let phase_name = match phase {
             Phase::Access => "access",
             Phase::Rewrite => "rewrite",

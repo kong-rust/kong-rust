@@ -1,15 +1,15 @@
-//! Kong 配置解析器 — 完全兼容 Kong 的 kong.conf 格式
+//! Kong configuration parser, fully compatible with Kong's kong.conf format — Kong 配置解析器，完全兼容 Kong 的 kong.conf 格式
 //!
-//! 支持:
-//! - kong.conf 文件解析（key = value 格式，# 注释）
-//! - KONG_* 环境变量覆盖
-//! - 所有 Kong 配置项及其默认值
-//! - 监听地址格式（ip:port + ssl/http2/reuseport 等修饰符）
+//! Supported features: — 支持:
+//! - kong.conf file parsing (key = value format, # comments) — kong.conf 文件解析（key = value 格式，# 注释）
+//! - KONG_* environment variable overrides — KONG_* 环境变量覆盖
+//! - All Kong configuration options with their defaults — 所有 Kong 配置项及其默认值
+//! - Listen address format (ip:port + ssl/http2/reuseport modifiers) — 监听地址格式（ip:port + ssl/http2/reuseport 等修饰符）
 //!
-//! 配置优先级（从低到高）:
-//! 1. 默认值（KongConfig::default()）
-//! 2. 配置文件值（kong.conf）
-//! 3. 环境变量（KONG_*）
+//! Configuration priority (low to high): — 配置优先级（从低到高）:
+//! 1. Defaults (KongConfig::default()) — 默认值（KongConfig::default()）
+//! 2. Config file values (kong.conf) — 配置文件值（kong.conf）
+//! 3. Environment variables (KONG_*) — 环境变量（KONG_*）
 
 pub mod config;
 pub mod listen;
@@ -20,19 +20,19 @@ pub use listen::{parse_listen_addresses, ListenAddr};
 
 use std::path::Path;
 
-/// 加载 Kong 配置
+/// Load Kong configuration — 加载 Kong 配置
 ///
-/// 按优先级合并: defaults < conf_file < env_vars
+/// Merges by priority: defaults < conf_file < env_vars — 按优先级合并: defaults < conf_file < env_vars
 ///
-/// # 参数
-/// - `conf_path`: 配置文件路径（None 时搜索默认路径）
+/// # Arguments — 参数
+/// - `conf_path`: Config file path (None to search default paths) — 配置文件路径（None 时搜索默认路径）
 ///
-/// # 返回
-/// 完整的 KongConfig 实例
+/// # Returns — 返回
+/// A complete KongConfig instance — 完整的 KongConfig 实例
 pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigError> {
     let mut config = KongConfig::default();
 
-    // 1. 尝试加载配置文件
+    // 1. Try to load config file — 尝试加载配置文件
     let file_conf = if let Some(path) = conf_path {
         if !path.exists() {
             return Err(KongConfigError::FileNotFound(
@@ -44,7 +44,7 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
             KongConfigError::IoError(format!("读取配置文件失败: {}", e))
         })?)
     } else {
-        // 搜索默认路径
+        // Search default paths — 搜索默认路径
         if let Some(default_path) = parser::find_default_conf() {
             tracing::info!("使用默认配置文件: {}", default_path.display());
             Some(parser::load_conf_file(&default_path).map_err(|e| {
@@ -56,7 +56,7 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
         }
     };
 
-    // 2. 应用配置文件值
+    // 2. Apply config file values — 应用配置文件值
     if let Some(file_conf) = &file_conf {
         for (key, value) in file_conf {
             tracing::debug!(
@@ -68,7 +68,7 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
         config.apply_raw(file_conf);
     }
 
-    // 3. 收集并应用环境变量覆盖
+    // 3. Collect and apply environment variable overrides — 收集并应用环境变量覆盖
     let env_conf = parser::collect_env_overrides();
     if !env_conf.is_empty() {
         for (key, value) in &env_conf {
@@ -81,19 +81,19 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
         config.apply_raw(&env_conf);
     }
 
-    // 4. 验证配置
+    // 4. Validate configuration — 验证配置
     validate_config(&config)?;
 
     Ok(config)
 }
 
-/// 从字符串内容加载配置（用于测试或内联配置）
+/// Load configuration from string content (for testing or inline config) — 从字符串内容加载配置（用于测试或内联配置）
 pub fn load_config_from_string(content: &str) -> Result<KongConfig, KongConfigError> {
     let mut config = KongConfig::default();
     let file_conf = parser::parse_conf_file(content);
     config.apply_raw(&file_conf);
 
-    // 应用环境变量
+    // Apply environment variables — 应用环境变量
     let env_conf = parser::collect_env_overrides();
     config.apply_raw(&env_conf);
 
@@ -101,9 +101,9 @@ pub fn load_config_from_string(content: &str) -> Result<KongConfig, KongConfigEr
     Ok(config)
 }
 
-/// 验证配置有效性
+/// Validate configuration — 验证配置有效性
 fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
-    // 验证 database 类型
+    // Validate database type — 验证 database 类型
     if !matches!(config.database.as_str(), "postgres" | "off") {
         return Err(KongConfigError::ValidationError(format!(
             "不支持的数据库类型: {}，仅支持 postgres 或 off",
@@ -111,7 +111,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         )));
     }
 
-    // db-less 模式需要声明式配置
+    // db-less mode requires declarative config — db-less 模式需要声明式配置
     if config.is_dbless()
         && config.declarative_config.is_none()
         && config.declarative_config_string.is_none()
@@ -122,7 +122,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         );
     }
 
-    // 验证 log_level
+    // Validate log_level — 验证 log_level
     let valid_log_levels = [
         "debug", "info", "notice", "warn", "error", "crit", "alert", "emerg",
     ];
@@ -133,7 +133,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         )));
     }
 
-    // 验证 router_flavor
+    // Validate router_flavor — 验证 router_flavor
     let valid_router_flavors = ["traditional", "traditional_compatible", "expressions"];
     if !valid_router_flavors.contains(&config.router_flavor.as_str()) {
         return Err(KongConfigError::ValidationError(format!(
@@ -142,7 +142,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         )));
     }
 
-    // 验证 role
+    // Validate role — 验证 role
     let valid_roles = ["traditional", "control_plane", "data_plane"];
     if !valid_roles.contains(&config.role.as_str()) {
         return Err(KongConfigError::ValidationError(format!(
@@ -151,7 +151,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         )));
     }
 
-    // 验证 worker_consistency
+    // Validate worker_consistency — 验证 worker_consistency
     let valid_consistency = ["strict", "eventual"];
     if !valid_consistency.contains(&config.worker_consistency.as_str()) {
         return Err(KongConfigError::ValidationError(format!(
@@ -163,7 +163,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
     Ok(())
 }
 
-/// 配置错误类型
+/// Configuration error types — 配置错误类型
 #[derive(Debug, thiserror::Error)]
 pub enum KongConfigError {
     #[error("配置文件未找到: {0}")]

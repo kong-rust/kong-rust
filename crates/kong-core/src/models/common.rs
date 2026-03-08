@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 协议类型 — 与 Kong 的 protocol 枚举完全一致
+/// Protocol type — fully consistent with Kong's protocol enum — 协议类型 — 与 Kong 的 protocol 枚举完全一致
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
@@ -37,7 +37,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-/// 负载均衡算法 — 与 Kong 的 algorithm 字段一致
+/// Load balancing algorithm — consistent with Kong's algorithm field — 负载均衡算法 — 与 Kong 的 algorithm 字段一致
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LbAlgorithm {
     #[serde(rename = "round-robin")]
@@ -56,7 +56,7 @@ impl Default for LbAlgorithm {
     }
 }
 
-/// 哈希方式 — 与 Kong 的 hash_on / hash_fallback 一致
+/// Hash method — consistent with Kong's hash_on / hash_fallback — 哈希方式 — 与 Kong 的 hash_on / hash_fallback 一致
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HashOn {
@@ -78,7 +78,7 @@ impl Default for HashOn {
     }
 }
 
-/// 路径处理方式 — 与 Kong 的 path_handling 一致
+/// Path handling mode — consistent with Kong's path_handling — 路径处理方式 — 与 Kong 的 path_handling 一致
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathHandling {
     #[serde(rename = "v0")]
@@ -93,8 +93,8 @@ impl Default for PathHandling {
     }
 }
 
-/// 外键引用 — 用于 JSON 序列化时表示关联关系
-/// Kong 的 JSON 格式为 { "id": "uuid-string" }
+/// Foreign key reference — used to represent associations in JSON serialization — 外键引用 — 用于 JSON 序列化时表示关联关系
+/// Kong's JSON format is { "id": "uuid-string" } — Kong 的 JSON 格式为 { "id": "uuid-string" }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKey {
     pub id: Uuid,
@@ -112,7 +112,7 @@ impl From<Uuid> for ForeignKey {
     }
 }
 
-/// IP + 端口对 — 用于 Route 的 sources/destinations
+/// IP + port pair — used for Route sources/destinations — IP + 端口对 — 用于 Route 的 sources/destinations
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CidrPort {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,7 +121,7 @@ pub struct CidrPort {
     pub port: Option<u16>,
 }
 
-/// 插件排序配置
+/// Plugin ordering configuration — 插件排序配置
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginOrdering {
     #[serde(skip_serializing_if = "Option::is_none")]

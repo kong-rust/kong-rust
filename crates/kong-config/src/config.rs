@@ -1,35 +1,35 @@
 use crate::listen::{parse_listen_addresses, ListenAddr};
 use std::collections::HashMap;
 
-/// Kong 配置 — 与 Kong 的 kong.conf 完全兼容
-/// 所有字段名和默认值严格参照 Kong 源码（kong/templates/kong_defaults.lua）
+/// Kong configuration, fully compatible with Kong's kong.conf — Kong 配置，与 Kong 的 kong.conf 完全兼容
+/// All field names and defaults strictly follow Kong source (kong/templates/kong_defaults.lua) — 所有字段名和默认值严格参照 Kong 源码（kong/templates/kong_defaults.lua）
 #[derive(Debug, Clone)]
 pub struct KongConfig {
-    // ========== 通用配置 ==========
-    /// 工作目录前缀
+    // ========== General — 通用配置 ==========
+    /// Working directory prefix — 工作目录前缀
     pub prefix: String,
-    /// 日志级别: debug, info, notice, warn, error, crit, alert, emerg
+    /// Log level: debug, info, notice, warn, error, crit, alert, emerg — 日志级别: debug, info, notice, warn, error, crit, alert, emerg
     pub log_level: String,
-    /// 节点 ID（自动生成 UUID）
+    /// Node ID (auto-generated UUID) — 节点 ID（自动生成 UUID）
     pub node_id: Option<String>,
-    /// 是否启用匿名报告
+    /// Whether to enable anonymous reports — 是否启用匿名报告
     pub anonymous_reports: bool,
 
-    // ========== 监听器 ==========
-    /// 代理监听器列表
+    // ========== Listeners — 监听器 ==========
+    /// Proxy listener list — 代理监听器列表
     pub proxy_listen: Vec<ListenAddr>,
-    /// Admin API 监听器列表
+    /// Admin API listener list — Admin API 监听器列表
     pub admin_listen: Vec<ListenAddr>,
-    /// Status API 监听器列表
+    /// Status API listener list — Status API 监听器列表
     pub status_listen: Vec<ListenAddr>,
-    /// Stream 代理监听器列表
+    /// Stream proxy listener list — Stream 代理监听器列表
     pub stream_listen: Vec<ListenAddr>,
-    /// Admin GUI（Kong Manager）监听器列表
+    /// Admin GUI (Kong Manager) listener list — Admin GUI（Kong Manager）监听器列表
     pub admin_gui_listen: Vec<ListenAddr>,
-    /// Admin GUI URL（Kong Manager 访问地址）
+    /// Admin GUI URL (Kong Manager access address) — Admin GUI URL（Kong Manager 访问地址）
     pub admin_gui_url: String,
 
-    // ========== 日志配置 ==========
+    // ========== Log configuration — 日志配置 ==========
     pub proxy_access_log: String,
     pub proxy_error_log: String,
     pub admin_access_log: String,
@@ -39,8 +39,8 @@ pub struct KongConfig {
     pub proxy_stream_access_log: String,
     pub proxy_stream_error_log: String,
 
-    // ========== 数据库配置 ==========
-    /// 数据库类型: postgres, off
+    // ========== Database configuration — 数据库配置 ==========
+    /// Database type: postgres, off — 数据库类型: postgres, off
     pub database: String,
     pub pg_host: String,
     pub pg_port: u16,
@@ -57,7 +57,7 @@ pub struct KongConfig {
     pub pg_pool_size: Option<u32>,
     pub pg_backlog: Option<u32>,
 
-    // 只读副本
+    // Read-only replica — 只读副本
     pub pg_ro_host: Option<String>,
     pub pg_ro_port: Option<u16>,
     pub pg_ro_database: Option<String>,
@@ -73,29 +73,29 @@ pub struct KongConfig {
     pub pg_ro_pool_size: Option<u32>,
     pub pg_ro_backlog: Option<u32>,
 
-    // ========== 无数据库模式 ==========
+    // ========== DB-less mode — 无数据库模式 ==========
     pub declarative_config: Option<String>,
     pub declarative_config_string: Option<String>,
-    /// 集群角色: traditional, control_plane, data_plane
+    /// Cluster role: traditional, control_plane, data_plane — 集群角色: traditional, control_plane, data_plane
     pub role: String,
 
-    // ========== 缓存配置 ==========
-    /// 内存缓存大小（字节）
+    // ========== Cache configuration — 缓存配置 ==========
+    /// In-memory cache size (bytes) — 内存缓存大小（字节）
     pub mem_cache_size: String,
-    /// 实体缓存 TTL（秒），0=永不过期
+    /// Entity cache TTL (seconds), 0=never expire — 实体缓存 TTL（秒），0=永不过期
     pub db_cache_ttl: u64,
-    /// 负缓存 TTL（秒）
+    /// Negative cache TTL (seconds) — 负缓存 TTL（秒）
     pub db_cache_neg_ttl: Option<u64>,
-    /// 陈旧实体复活 TTL（秒）
+    /// Stale entity resurrection TTL (seconds) — 陈旧实体复活 TTL（秒）
     pub db_resurrect_ttl: u64,
-    /// 启动时预热缓存的实体列表
+    /// Entities to warm up in cache at startup — 启动时预热缓存的实体列表
     pub db_cache_warmup_entities: Vec<String>,
-    /// 数据库轮询频率（秒）
+    /// Database polling frequency (seconds) — 数据库轮询频率（秒）
     pub db_update_frequency: u64,
-    /// 数据库更新传播延迟（秒）
+    /// Database update propagation delay (seconds) — 数据库更新传播延迟（秒）
     pub db_update_propagation: u64,
 
-    // ========== DNS 配置 ==========
+    // ========== DNS configuration — DNS 配置 ==========
     pub dns_resolver: Vec<String>,
     pub dns_hostsfile: String,
     pub dns_order: Vec<String>,
@@ -106,7 +106,7 @@ pub struct KongConfig {
     pub dns_error_ttl: u64,
     pub dns_no_sync: bool,
 
-    // ========== SSL/TLS 配置 ==========
+    // ========== SSL/TLS configuration — SSL/TLS 配置 ==========
     pub ssl_cipher_suite: String,
     pub ssl_ciphers: Option<String>,
     pub ssl_protocols: String,
@@ -131,7 +131,7 @@ pub struct KongConfig {
     pub lua_ssl_verify_depth: u32,
     pub lua_ssl_protocols: String,
 
-    // ========== HTTP 头和上游连接 ==========
+    // ========== HTTP headers and upstream connections — HTTP 头和上游连接 ==========
     pub headers: Vec<String>,
     pub headers_upstream: Vec<String>,
     pub trusted_ips: Vec<String>,
@@ -141,18 +141,18 @@ pub struct KongConfig {
     pub upstream_keepalive_max_requests: u32,
     pub upstream_keepalive_idle_timeout: u64,
 
-    // ========== 路由配置 ==========
-    /// 路由引擎: traditional, traditional_compatible, expressions
+    // ========== Routing configuration — 路由配置 ==========
+    /// Router engine: traditional, traditional_compatible, expressions — 路由引擎: traditional, traditional_compatible, expressions
     pub router_flavor: String,
-    /// 状态一致性模式: strict, eventual
+    /// State consistency mode: strict, eventual — 状态一致性模式: strict, eventual
     pub worker_consistency: String,
-    /// worker 状态更新频率（秒）
+    /// Worker state update frequency (seconds) — worker 状态更新频率（秒）
     pub worker_state_update_frequency: u64,
 
-    // ========== 插件和代码加载 ==========
-    /// 加载的插件列表（bundled 表示加载所有内置插件）
+    // ========== Plugins and code loading — 插件和代码加载 ==========
+    /// Loaded plugin list (bundled means load all built-in plugins) — 加载的插件列表（bundled 表示加载所有内置插件）
     pub plugins: Vec<String>,
-    /// 加载的 Vault 列表
+    /// Loaded Vault list — 加载的 Vault 列表
     pub vaults: Vec<String>,
 
     pub lua_socket_pool_size: u32,
@@ -163,18 +163,18 @@ pub struct KongConfig {
     pub lua_max_uri_args: u32,
     pub lua_max_post_args: u32,
 
-    // ========== Nginx worker 配置 ==========
+    // ========== Nginx worker configuration — Nginx worker 配置 ==========
     pub nginx_user: String,
     pub nginx_worker_processes: String,
     pub nginx_daemon: bool,
 
-    // ========== 错误配置 ==========
+    // ========== Error configuration — 错误配置 ==========
     pub error_default_type: String,
 
-    // ========== 端口映射（容器环境） ==========
+    // ========== Port mapping (container environments) — 端口映射（容器环境） ==========
     pub port_maps: Vec<String>,
 
-    // ========== 混合模式配置 ==========
+    // ========== Hybrid mode configuration — 混合模式配置 ==========
     pub cluster_control_plane: String,
     pub cluster_listen: Vec<ListenAddr>,
     pub cluster_mtls: String,
@@ -184,28 +184,28 @@ pub struct KongConfig {
     pub cluster_server_name: Option<String>,
     pub cluster_data_plane_purge_delay: u64,
 
-    // ========== 可观测性 ==========
+    // ========== Observability — 可观测性 ==========
     pub tracing_instrumentations: Vec<String>,
     pub tracing_sampling_rate: f64,
 
-    // ========== Nginx 动态指令注入 ==========
-    /// 存储 nginx_* 前缀的动态配置
+    // ========== Nginx dynamic directive injection — Nginx 动态指令注入 ==========
+    /// Stores dynamic configuration with nginx_* prefix — 存储 nginx_* 前缀的动态配置
     pub nginx_directives: HashMap<String, String>,
 
-    // ========== 原始配置数据（用于自定义访问） ==========
+    // ========== Raw configuration data (for custom access) — 原始配置数据（用于自定义访问） ==========
     pub raw: HashMap<String, String>,
 }
 
 impl Default for KongConfig {
     fn default() -> Self {
         Self {
-            // 通用
+            // General — 通用
             prefix: "/usr/local/kong/".to_string(),
             log_level: "notice".to_string(),
             node_id: None,
             anonymous_reports: true,
 
-            // 监听器
+            // Listeners — 监听器
             proxy_listen: parse_listen_addresses(
                 "0.0.0.0:8000 reuseport backlog=16384, 0.0.0.0:8443 http2 ssl reuseport backlog=16384",
             ).unwrap_or_default(),
@@ -219,7 +219,7 @@ impl Default for KongConfig {
             ).unwrap_or_default(),
             admin_gui_url: "http://localhost:8002".to_string(),
 
-            // 日志
+            // Logs — 日志
             proxy_access_log: "logs/access.log".to_string(),
             proxy_error_log: "logs/error.log".to_string(),
             admin_access_log: "logs/admin_access.log".to_string(),
@@ -229,7 +229,7 @@ impl Default for KongConfig {
             proxy_stream_access_log: "logs/stream_access.log".to_string(),
             proxy_stream_error_log: "logs/stream_error.log".to_string(),
 
-            // 数据库
+            // Database — 数据库
             database: "postgres".to_string(),
             pg_host: "127.0.0.1".to_string(),
             pg_port: 5432,
@@ -246,7 +246,7 @@ impl Default for KongConfig {
             pg_pool_size: None,
             pg_backlog: None,
 
-            // 只读副本
+            // Read-only replica — 只读副本
             pg_ro_host: None,
             pg_ro_port: None,
             pg_ro_database: None,
@@ -262,12 +262,12 @@ impl Default for KongConfig {
             pg_ro_pool_size: None,
             pg_ro_backlog: None,
 
-            // 无数据库模式
+            // DB-less mode — 无数据库模式
             declarative_config: None,
             declarative_config_string: None,
             role: "traditional".to_string(),
 
-            // 缓存
+            // Cache — 缓存
             mem_cache_size: "128m".to_string(),
             db_cache_ttl: 0,
             db_cache_neg_ttl: None,
@@ -317,7 +317,7 @@ impl Default for KongConfig {
             lua_ssl_verify_depth: 1,
             lua_ssl_protocols: "TLSv1.2 TLSv1.3".to_string(),
 
-            // HTTP 头和上游
+            // HTTP headers and upstream — HTTP 头和上游
             headers: vec![
                 "server_tokens".to_string(),
                 "latency_tokens".to_string(),
@@ -331,12 +331,12 @@ impl Default for KongConfig {
             upstream_keepalive_max_requests: 10000,
             upstream_keepalive_idle_timeout: 60,
 
-            // 路由
+            // Routing — 路由
             router_flavor: "traditional_compatible".to_string(),
             worker_consistency: "eventual".to_string(),
             worker_state_update_frequency: 5,
 
-            // 插件
+            // Plugins — 插件
             plugins: vec!["bundled".to_string()],
             vaults: vec!["bundled".to_string()],
 
@@ -353,13 +353,13 @@ impl Default for KongConfig {
             nginx_worker_processes: "auto".to_string(),
             nginx_daemon: true,
 
-            // 错误
+            // Error — 错误
             error_default_type: "text/plain".to_string(),
 
-            // 端口映射
+            // Port mapping — 端口映射
             port_maps: vec![],
 
-            // 混合模式
+            // Hybrid mode — 混合模式
             cluster_control_plane: "127.0.0.1:8005".to_string(),
             cluster_listen: parse_listen_addresses("0.0.0.0:8005").unwrap_or_default(),
             cluster_mtls: "shared".to_string(),
@@ -369,21 +369,21 @@ impl Default for KongConfig {
             cluster_server_name: None,
             cluster_data_plane_purge_delay: 1209600,
 
-            // 可观测性
+            // Observability — 可观测性
             tracing_instrumentations: vec!["off".to_string()],
             tracing_sampling_rate: 0.01,
 
-            // Nginx 动态指令
+            // Nginx dynamic directives — Nginx 动态指令
             nginx_directives: HashMap::new(),
 
-            // 原始数据
+            // Raw data — 原始数据
             raw: HashMap::new(),
         }
     }
 }
 
 impl KongConfig {
-    /// 从原始 key-value 映射应用配置值
+    /// Apply configuration values from raw key-value map — 从原始 key-value 映射应用配置值
     pub fn apply_raw(&mut self, raw: &HashMap<String, String>) {
         for (key, value) in raw {
             self.set(key, value);
@@ -391,17 +391,17 @@ impl KongConfig {
         self.raw.extend(raw.clone());
     }
 
-    /// 设置单个配置项
+    /// Set a single configuration item — 设置单个配置项
     pub fn set(&mut self, key: &str, value: &str) {
         let value = value.trim();
         match key {
-            // 通用
+            // General — 通用
             "prefix" => self.prefix = value.to_string(),
             "log_level" => self.log_level = value.to_string(),
             "node_id" => self.node_id = none_if_empty(value),
             "anonymous_reports" => self.anonymous_reports = parse_bool(value),
 
-            // 监听器
+            // Listeners — 监听器
             "proxy_listen" => {
                 self.proxy_listen = parse_listen_addresses(value).unwrap_or_default()
             }
@@ -419,7 +419,7 @@ impl KongConfig {
             }
             "admin_gui_url" => self.admin_gui_url = value.to_string(),
 
-            // 日志
+            // Logs — 日志
             "proxy_access_log" => self.proxy_access_log = value.to_string(),
             "proxy_error_log" => self.proxy_error_log = value.to_string(),
             "admin_access_log" => self.admin_access_log = value.to_string(),
@@ -429,7 +429,7 @@ impl KongConfig {
             "proxy_stream_access_log" => self.proxy_stream_access_log = value.to_string(),
             "proxy_stream_error_log" => self.proxy_stream_error_log = value.to_string(),
 
-            // 数据库
+            // Database — 数据库
             "database" => self.database = value.to_string(),
             "pg_host" => self.pg_host = value.to_string(),
             "pg_port" => self.pg_port = value.parse().unwrap_or(5432),
@@ -450,7 +450,7 @@ impl KongConfig {
             "pg_pool_size" => self.pg_pool_size = value.parse().ok(),
             "pg_backlog" => self.pg_backlog = value.parse().ok(),
 
-            // 只读副本
+            // Read-only replica — 只读副本
             "pg_ro_host" => self.pg_ro_host = none_if_empty(value),
             "pg_ro_port" => self.pg_ro_port = value.parse().ok(),
             "pg_ro_database" => self.pg_ro_database = none_if_empty(value),
@@ -468,12 +468,12 @@ impl KongConfig {
             "pg_ro_pool_size" => self.pg_ro_pool_size = value.parse().ok(),
             "pg_ro_backlog" => self.pg_ro_backlog = value.parse().ok(),
 
-            // 无数据库模式
+            // DB-less mode — 无数据库模式
             "declarative_config" => self.declarative_config = none_if_empty(value),
             "declarative_config_string" => self.declarative_config_string = none_if_empty(value),
             "role" => self.role = value.to_string(),
 
-            // 缓存
+            // Cache — 缓存
             "mem_cache_size" => self.mem_cache_size = value.to_string(),
             "db_cache_ttl" => self.db_cache_ttl = value.parse().unwrap_or(0),
             "db_cache_neg_ttl" => self.db_cache_neg_ttl = value.parse().ok(),
@@ -522,7 +522,7 @@ impl KongConfig {
             "lua_ssl_verify_depth" => self.lua_ssl_verify_depth = value.parse().unwrap_or(1),
             "lua_ssl_protocols" => self.lua_ssl_protocols = value.to_string(),
 
-            // HTTP 头和上游
+            // HTTP headers and upstream — HTTP 头和上游
             "headers" => self.headers = parse_array(value),
             "headers_upstream" => self.headers_upstream = parse_array(value),
             "trusted_ips" => self.trusted_ips = parse_array(value),
@@ -538,14 +538,14 @@ impl KongConfig {
                 self.upstream_keepalive_idle_timeout = value.parse().unwrap_or(60)
             }
 
-            // 路由
+            // Routing — 路由
             "router_flavor" => self.router_flavor = value.to_string(),
             "worker_consistency" => self.worker_consistency = value.to_string(),
             "worker_state_update_frequency" => {
                 self.worker_state_update_frequency = value.parse().unwrap_or(5)
             }
 
-            // 插件
+            // Plugins — 插件
             "plugins" => self.plugins = parse_array(value),
             "vaults" => self.vaults = parse_array(value),
 
@@ -562,13 +562,13 @@ impl KongConfig {
             "nginx_worker_processes" => self.nginx_worker_processes = value.to_string(),
             "nginx_daemon" => self.nginx_daemon = parse_bool(value),
 
-            // 错误
+            // Error — 错误
             "error_default_type" => self.error_default_type = value.to_string(),
 
-            // 端口映射
+            // Port mapping — 端口映射
             "port_maps" => self.port_maps = parse_array(value),
 
-            // 混合模式
+            // Hybrid mode — 混合模式
             "cluster_control_plane" => self.cluster_control_plane = value.to_string(),
             "cluster_listen" => {
                 self.cluster_listen = parse_listen_addresses(value).unwrap_or_default()
@@ -582,25 +582,25 @@ impl KongConfig {
                 self.cluster_data_plane_purge_delay = value.parse().unwrap_or(1209600)
             }
 
-            // 可观测性
+            // Observability — 可观测性
             "tracing_instrumentations" => self.tracing_instrumentations = parse_array(value),
             "tracing_sampling_rate" => {
                 self.tracing_sampling_rate = value.parse().unwrap_or(0.01)
             }
 
-            // nginx_* 动态指令
+            // nginx_* dynamic directives — nginx_* 动态指令
             _ if key.starts_with("nginx_") => {
                 self.nginx_directives.insert(key.to_string(), value.to_string());
             }
 
-            // 其他未知配置存入 raw
+            // Store other unknown config in raw — 其他未知配置存入 raw
             _ => {
                 tracing::debug!("未识别的配置项: {} = {}", key, value);
             }
         }
     }
 
-    /// 获取有效的 pg_ro 值（未设置时回退到主连接值）
+    /// Get effective pg_ro value (falls back to primary connection value if not set) — 获取有效的 pg_ro 值（未设置时回退到主连接值）
     pub fn effective_pg_ro_host(&self) -> Option<&str> {
         self.pg_ro_host.as_deref()
     }
@@ -633,27 +633,27 @@ impl KongConfig {
         self.pg_ro_ssl_verify.unwrap_or(self.pg_ssl_verify)
     }
 
-    /// 判断是否为 db-less 模式
+    /// Check if in db-less mode — 判断是否为 db-less 模式
     pub fn is_dbless(&self) -> bool {
         self.database == "off"
     }
 
-    /// 判断是否为控制面
+    /// Check if this is a control plane — 判断是否为控制面
     pub fn is_control_plane(&self) -> bool {
         self.role == "control_plane"
     }
 
-    /// 判断是否为数据面
+    /// Check if this is a data plane — 判断是否为数据面
     pub fn is_data_plane(&self) -> bool {
         self.role == "data_plane"
     }
 
-    /// 解析 mem_cache_size 为字节数
+    /// Parse mem_cache_size to bytes — 解析 mem_cache_size 为字节数
     pub fn mem_cache_size_bytes(&self) -> u64 {
         parse_size_string(&self.mem_cache_size)
     }
 
-    /// 获取需要加载的插件列表（展开 bundled）
+    /// Get the list of plugins to load (expanding bundled) — 获取需要加载的插件列表（展开 bundled）
     pub fn loaded_plugins(&self) -> Vec<String> {
         let mut result = Vec::new();
         for p in &self.plugins {
@@ -667,7 +667,7 @@ impl KongConfig {
     }
 }
 
-/// Kong 内置插件列表
+/// Kong built-in plugin list — Kong 内置插件列表
 pub const BUNDLED_PLUGINS: &[&str] = &[
     "cors",
     "grpc-gateway",
@@ -717,7 +717,7 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "standard-webhooks",
 ];
 
-/// 解析布尔值（兼容 Kong 的 on/off/true/false）
+/// Parse boolean value (compatible with Kong's on/off/true/false) — 解析布尔值（兼容 Kong 的 on/off/true/false）
 fn parse_bool(value: &str) -> bool {
     matches!(
         value.trim().to_lowercase().as_str(),
@@ -725,7 +725,7 @@ fn parse_bool(value: &str) -> bool {
     )
 }
 
-/// 解析逗号分隔的数组
+/// Parse comma-separated array — 解析逗号分隔的数组
 fn parse_array(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed == "off" {
@@ -738,7 +738,7 @@ fn parse_array(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// 空字符串转 None
+/// Convert empty string to None — 空字符串转 None
 fn none_if_empty(value: &str) -> Option<String> {
     let v = value.trim();
     if v.is_empty() {
@@ -748,7 +748,7 @@ fn none_if_empty(value: &str) -> Option<String> {
     }
 }
 
-/// 解析大小字符串（如 "128m" -> 字节数）
+/// Parse size string (e.g., "128m" -> bytes) — 解析大小字符串（如 "128m" -> 字节数）
 pub fn parse_size_string(s: &str) -> u64 {
     let s = s.trim().to_lowercase();
     if let Some(num) = s.strip_suffix('g') {

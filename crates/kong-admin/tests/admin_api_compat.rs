@@ -1,7 +1,7 @@
-//! Admin API 兼容性集成测试
+//! Admin API compatibility integration tests — Admin API 兼容性集成测试
 //!
-//! 使用 db-less 模式（内存存储）+ axum 测试客户端，
-//! 验证所有 Admin API 端点的请求/响应格式与 Kong 兼容
+//! Uses db-less mode (in-memory store) + axum test client, — 使用 db-less 模式（内存存储）+ axum 测试客户端，
+//! verifying all Admin API endpoints' request/response formats are Kong-compatible — 验证所有 Admin API 端点的请求/响应格式与 Kong 兼容
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use kong_admin::{build_admin_router, AdminState};
 use kong_core::models::*;
 use kong_db::{DblessDao, DblessStore};
 
-/// 创建测试用的 Admin API 应用
+/// Create a test Admin API application — 创建测试用的 Admin API 应用
 fn create_test_app() -> axum::Router {
     let store = Arc::new(DblessStore::new());
 
@@ -53,11 +53,11 @@ fn create_test_app() -> axum::Router {
     build_admin_router(state)
 }
 
-/// 创建预加载数据的测试应用
+/// Create a test application with preloaded data — 创建预加载数据的测试应用
 fn create_test_app_with_data() -> axum::Router {
     let store = Arc::new(DblessStore::new());
 
-    // 预加载测试数据
+    // Preload test data — 预加载测试数据
     let test_data = json!({
         "_format_version": "3.0",
         "services": [
@@ -176,7 +176,7 @@ fn create_test_app_with_data() -> axum::Router {
     build_admin_router(state)
 }
 
-// ========== 特殊端点测试 ==========
+// ========== Special endpoint tests — 特殊端点测试 ==========
 
 #[tokio::test]
 async fn test_root_info() {
@@ -194,7 +194,7 @@ async fn test_root_info() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    // 验证 Kong 兼容的根信息格式
+    // Verify Kong-compatible root info format — 验证 Kong 兼容的根信息格式
     assert!(json.get("version").is_some());
     assert!(json.get("tagline").is_some());
     assert!(json.get("node_id").is_some());
@@ -227,7 +227,7 @@ async fn test_status_endpoint() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    // 验证 Kong 兼容的状态格式
+    // Verify Kong-compatible status format — 验证 Kong 兼容的状态格式
     assert!(json.get("server").is_some());
     assert!(json.get("database").is_some());
     assert!(json.get("memory").is_some());
@@ -236,7 +236,7 @@ async fn test_status_endpoint() {
     assert!(db.get("reachable").is_some());
 }
 
-// ========== Service CRUD 测试 ==========
+// ========== Service CRUD tests — Service CRUD 测试 ==========
 
 #[tokio::test]
 async fn test_list_services_empty() {
@@ -259,7 +259,7 @@ async fn test_list_services_empty() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    // Kong 格式：{ "data": [], "offset": null, "next": null }
+    // Kong format: { "data": [], "offset": null, "next": null } — Kong 格式：{ "data": [], "offset": null, "next": null }
     assert!(json.get("data").is_some());
     let data = json.get("data").unwrap().as_array().unwrap();
     assert!(data.is_empty());
@@ -362,13 +362,13 @@ async fn test_get_service_not_found() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    // Kong 兼容的 404 错误格式
+    // Kong-compatible 404 error format — Kong 兼容的 404 错误格式
     assert!(json.get("message").is_some());
     assert_eq!(json.get("name").unwrap().as_str().unwrap(), "not found");
     assert_eq!(json.get("code").unwrap().as_u64().unwrap(), 3);
 }
 
-// ========== DB-less 写操作测试 ==========
+// ========== DB-less write operation tests — DB-less 写操作测试 ==========
 
 #[tokio::test]
 async fn test_create_service_dbless_rejected() {
@@ -393,11 +393,11 @@ async fn test_create_service_dbless_rejected() {
         .await
         .unwrap();
 
-    // db-less 模式下写操作应返回错误
+    // Write operations should return error in db-less mode — db-less 模式下写操作应返回错误
     assert_ne!(response.status(), StatusCode::CREATED);
 }
 
-// ========== Route 端点测试 ==========
+// ========== Route endpoint tests — Route 端点测试 ==========
 
 #[tokio::test]
 async fn test_list_routes() {
@@ -453,7 +453,7 @@ async fn test_get_route_by_id() {
     assert_eq!(paths[0].as_str().unwrap(), "/test");
 }
 
-// ========== Consumer 端点测试 ==========
+// ========== Consumer endpoint tests — Consumer 端点测试 ==========
 
 #[tokio::test]
 async fn test_list_consumers() {
@@ -484,7 +484,7 @@ async fn test_list_consumers() {
     );
 }
 
-// ========== 嵌套端点测试 ==========
+// ========== Nested endpoint tests — 嵌套端点测试 ==========
 
 #[tokio::test]
 async fn test_nested_service_routes() {
@@ -565,7 +565,7 @@ async fn test_nested_upstream_targets() {
     );
 }
 
-// ========== 分页测试 ==========
+// ========== Pagination tests — 分页测试 ==========
 
 #[tokio::test]
 async fn test_pagination_params() {
@@ -591,11 +591,11 @@ async fn test_pagination_params() {
     let data = json.get("data").unwrap().as_array().unwrap();
     assert_eq!(data.len(), 1);
 
-    // 应该有 next 分页指示
+    // Should have next pagination indicator — 应该有 next 分页指示
     assert!(json.get("next").is_some());
 }
 
-// ========== 错误格式验证 ==========
+// ========== Error format validation — 错误格式验证 ==========
 
 #[tokio::test]
 async fn test_not_found_error_format() {
@@ -618,7 +618,7 @@ async fn test_not_found_error_format() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    // Kong 兼容的错误格式
+    // Kong-compatible error format — Kong 兼容的错误格式
     assert!(json.get("message").is_some());
     assert_eq!(json.get("name").unwrap().as_str().unwrap(), "not found");
     assert_eq!(json.get("code").unwrap().as_u64().unwrap(), 3);
