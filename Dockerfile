@@ -71,8 +71,7 @@ RUN groupadd -r kong && useradd -r -g kong kong && \
     chown -R kong:kong /etc/kong /usr/local/kong
 
 # 复制二进制和入口脚本 — Copy binary and entrypoint
-COPY --from=builder /build/target/release/kong-rust /usr/local/bin/kong-rust
-RUN ln -s /usr/local/bin/kong-rust /usr/local/bin/kong
+COPY --from=builder /build/target/release/kong /usr/local/bin/kong
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
@@ -91,7 +90,7 @@ EXPOSE 8000 8443 8001 8444
 STOPSIGNAL SIGQUIT
 
 HEALTHCHECK --interval=60s --timeout=10s --retries=10 \
-    CMD kong-rust health || exit 1
+    CMD kong health || exit 1
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["kong", "docker-start"]

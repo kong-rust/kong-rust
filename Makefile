@@ -47,25 +47,25 @@ test-integration:
 
 # 启动服务（默认配置）
 run:
-	cargo run -p kong-server
+	cargo run -p kong-server --bin kong
 
 # 指定配置文件启动
 # 用法: make conf=/path/to/kong.conf run-conf
 run-conf:
-	cargo run -p kong-server -- -c $(conf)
+	cargo run -p kong-server --bin kong -- -c $(conf)
 
 # Debug 模式启动（详细日志）
 run-debug:
-	RUST_LOG=debug cargo run -p kong-server
+	RUST_LOG=debug cargo run -p kong-server --bin kong
 
 # Trace 级别日志（最详细）
 run-trace:
-	RUST_LOG=trace cargo run -p kong-server
+	RUST_LOG=trace cargo run -p kong-server --bin kong
 
 # 指定单个模块的日志级别
 # 用法: make mod=kong_router run-mod-debug
 run-mod-debug:
-	RUST_LOG=warn,$(mod)=debug cargo run -p kong-server
+	RUST_LOG=warn,$(mod)=debug cargo run -p kong-server --bin kong
 
 # ---------- 代码质量 ----------
 
@@ -136,19 +136,19 @@ dev:
 		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE up && \
 		. $$KONG_SERVICE_ENV_FILE && \
 		echo "PostgreSQL 端口: $$KONG_PG_PORT" && \
-		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server -- -c kong.conf.default db bootstrap; \
+		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server --bin kong -- -c kong.conf.default db bootstrap; \
 		. $$KONG_SERVICE_ENV_FILE && \
-		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server -- -c kong.conf.default; \
+		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server --bin kong -- -c kong.conf.default; \
 		rm -f $$KONG_SERVICE_ENV_FILE
 
 # db-less 模式，无需 docker
 dev-dbless:
-	KONG_DATABASE=off RUST_LOG=info cargo run -p kong-server
+	KONG_DATABASE=off RUST_LOG=info cargo run -p kong-server --bin kong
 
 # 同时启动 kong-server（后台）+ kong-manager（前台）
 dev-full:
 	@echo "启动 kong-server (后台)..."
-	@RUST_LOG=info cargo run -p kong-server &
+	@RUST_LOG=info cargo run -p kong-server --bin kong &
 	@sleep 2
 	@echo "启动 kong-manager (前台, http://localhost:$(MANAGER_PORT))..."
 	@cd $(MANAGER_DIR) && KONG_GUI_URL=$(ADMIN_API) pnpm serve

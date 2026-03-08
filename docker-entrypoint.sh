@@ -38,10 +38,10 @@ if [ ! -w /usr/local/kong ]; then
 fi
 
 # 如果第一个参数不是 kong 命令，直接执行
-if [ "$1" != "kong" ] && [ "$1" != "kong-rust" ]; then
+if [ "$1" != "kong" ]; then
     exec "$@"
 fi
 
-# 跳过 "kong" 本身，传递子命令
+# 跳过 "kong" 本身，传递子命令给 kong 二进制
 shift
-exec kong-rust "$@"
+exec kong "$@"

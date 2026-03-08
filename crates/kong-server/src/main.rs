@@ -10,7 +10,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "kong-rust", version = "0.1.0")]
+#[command(name = "kong", version = "0.1.0")]
 struct Cli {
     /// Configuration file path — 配置文件路径
     #[arg(short, long, default_value = "/etc/kong/kong.conf")]
@@ -28,7 +28,13 @@ enum Commands {
     /// Health check: probe Admin API /status endpoint — 健康检查：探测 Admin API /status 端点
     Health,
     Check,
+    /// Database management (alias: migrations) — 数据库管理（别名：migrations）
     Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+    /// Database migrations (alias for db) — 数据库 migration（db 的别名）
+    Migrations {
         #[command(subcommand)]
         action: DbAction,
     },
@@ -127,7 +133,7 @@ fn main() -> anyhow::Result<()> {
     // Health and Version commands don't need logging, execute early — Health 和 Version 命令不需要日志系统，提前执行
     match &cli.command {
         Some(Commands::Version) => {
-            println!("kong-rust 0.1.0");
+            println!("kong 0.1.0 (kong-rust)");
             println!("基于 Pingora 和 mlua 的 Kong API Gateway Rust 实现");
             return Ok(());
         }
@@ -159,13 +165,17 @@ fn main() -> anyhow::Result<()> {
             println!("Proxy 监听: {}", format_listen_addrs(&config.proxy_listen));
             println!("已加载插件: {:?}", config.loaded_plugins());
         }
-        Commands::Db { action } => {
+        Commands::Db { action } | Commands::Migrations { action } => {
             // Non-start commands: manually create tokio runtime — 非 start 命令：手动创建 tokio runtime
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(handle_db_command(&config, action))?;
         }
-        Commands::Start | Commands::DockerStart => {
-            start_gateway(config)?;
+        Commands::Start => {
+            start_gateway(config, false)?;
+        }
+        Commands::DockerStart => {
+            // docker-start: auto-run migrations before starting — docker-start：启动前自动执行 migration
+            start_gateway(config, true)?;
         }
         // Already handled above — 已在上方处理
         Commands::Version | Commands::Health => unreachable!(),
@@ -283,10 +293,10 @@ fn health_check(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     stream.read_to_string(&mut response)?;
 
     if response.contains("200") {
-        println!("kong-rust is healthy at {} — kong-rust 健康检查通过 {}", addr, addr);
+        println!("kong is healthy at {} — kong-rust 健康检查通过 {}", addr, addr);
         Ok(())
     } else {
-        anyhow::bail!("kong-rust is NOT healthy: unexpected response from {} — kong-rust 健康检查失败: {} 返回异常响应", addr, addr);
+        anyhow::bail!("kong is NOT healthy: unexpected response from {} — kong-rust 健康检查失败: {} 返回异常响应", addr, addr);
     }
 }
 
@@ -309,7 +319,8 @@ fn format_listen_addrs(addrs: &[kong_config::ListenAddr]) -> String {
 }
 
 /// Start the gateway: Pingora manages the entire application lifecycle — 启动网关：Pingora 管理整个应用生命周期
-fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
+/// auto_migrate: if true, auto-run bootstrap + up before starting (for docker-start) — auto_migrate: 为 true 时启动前自动执行 bootstrap + up（用于 docker-start）
+fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> anyhow::Result<()> {
     tracing::info!("Kong-Rust API Gateway 启动中...");
     tracing::info!("数据库模式: {}", config.database);
     tracing::info!("路由风格: {}", config.router_flavor);
@@ -319,7 +330,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
     // will terminate when runtime is dropped, requiring connection rebuilds and causing slow startup responses. — 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
     let (mut kong_proxy, mut admin_state, refresh_rx) =
-        rt.block_on(init_proxy_and_admin(&config))?;
+        rt.block_on(init_proxy_and_admin(&config, auto_migrate))?;
 
     // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
     let access_log_writer = rt.block_on(async {
@@ -434,8 +445,10 @@ fn start_gateway(config: Arc<kong_config::KongConfig>) -> anyhow::Result<()> {
 }
 
 /// Async initialization: connect DB, load data, build KongProxy and AdminState — 异步初始化：连接 DB、加载数据、构建 KongProxy 和 AdminState
+/// auto_migrate: if true, auto-run bootstrap + up instead of failing on pending migrations — auto_migrate: 为 true 时自动执行 bootstrap + up，而非报错退出
 async fn init_proxy_and_admin(
     config: &Arc<kong_config::KongConfig>,
+    auto_migrate: bool,
 ) -> anyhow::Result<(
     kong_proxy::KongProxy,
     kong_admin::AdminState,
@@ -493,13 +506,33 @@ async fn init_proxy_and_admin(
         // PostgreSQL mode — PostgreSQL 模式
         let db = Database::connect(config).await?;
 
-        // Check schema state — 检查 schema 状态
+        // Check schema state and auto-migrate if in docker-start mode — 检查 schema 状态，docker-start 模式下自动执行 migration
         let migration_state = kong_db::migrations::schema_state(db.pool()).await?;
-        if migration_state.needs_bootstrap {
-            anyhow::bail!("Database not initialized, please run 'kong-rust db bootstrap' first — 数据库未初始化，请先运行 'kong-rust db bootstrap'");
-        }
-        if !migration_state.new_migrations.is_empty() {
-            anyhow::bail!("New migrations pending, please run 'kong-rust db up' first — 有新的 migration 待执行，请先运行 'kong-rust db up'");
+        if auto_migrate {
+            // docker-start mode: auto-run bootstrap + up — docker-start 模式：自动执行 bootstrap + up
+            if migration_state.needs_bootstrap {
+                tracing::info!("Auto-running database bootstrap... — 自动执行数据库 bootstrap...");
+                kong_db::migrations::bootstrap(db.pool()).await?;
+            }
+            // Re-check state after bootstrap — bootstrap 后重新检查状态
+            let state = kong_db::migrations::schema_state(db.pool()).await?;
+            if !state.new_migrations.is_empty() {
+                tracing::info!("Auto-running database migrations ({} pending)... — 自动执行数据库 migration（{} 个待执行）...",
+                    state.new_migrations.len(), state.new_migrations.len());
+                kong_db::migrations::up(db.pool()).await?;
+            }
+            if !state.pending.is_empty() {
+                tracing::info!("Auto-finishing pending migrations... — 自动完成 pending migration...");
+                kong_db::migrations::finish(db.pool()).await?;
+            }
+        } else {
+            // Normal start mode: fail if migrations are needed — 普通 start 模式：需要 migration 时报错
+            if migration_state.needs_bootstrap {
+                anyhow::bail!("Database not initialized, please run 'kong db bootstrap' / 'kong migrations bootstrap' first — 数据库未初始化，请先运行 'kong db bootstrap' / 'kong migrations bootstrap'");
+            }
+            if !migration_state.new_migrations.is_empty() {
+                anyhow::bail!("New migrations pending, please run 'kong db up' / 'kong migrations up' first — 有新的 migration 待执行，请先运行 'kong db up' / 'kong migrations up'");
+            }
         }
 
         // Full data load from DB — 从 DB 全量加载初始数据
