@@ -25,7 +25,7 @@ use kong_router::stream::{StreamRequestContext, StreamRouter};
 use crate::access_log::AccessLogWriter;
 use crate::balancer::LoadBalancer;
 use crate::dns::SharedDnsResolver;
-use crate::stream_tls::{is_tls_handshake, parse_sni_from_client_hello, CLIENT_HELLO_PEEK_SIZE};
+use crate::stream_tls::{is_tls_handshake, parse_sni_from_client_hello};
 use crate::tls::CertificateManager;
 
 /// Stream proxy service — implements Pingora ServerApp trait — Stream 代理服务 — 实现 Pingora ServerApp trait
@@ -111,16 +111,20 @@ impl KongStreamProxy {
             .map(|ip| format!("{}:{}", ip, source_port.unwrap_or(0)))
             .unwrap_or_else(|| "-".to_string());
 
-        // 1. Peek first byte to determine if TLS — Peek 首字节判断是否 TLS
-        let mut peek_buf = [0u8; 1];
-        let is_tls = match downstream.try_peek(&mut peek_buf).await {
-            Ok(true) => is_tls_handshake(peek_buf[0]),
+        // 1. Peek TLS Record Header (5 bytes) to determine if TLS and get record length — Peek TLS Record Header（5 字节）判断是否 TLS 并获取记录长度
+        let mut header_buf = [0u8; 5];
+        let is_tls = match downstream.try_peek(&mut header_buf).await {
+            Ok(true) => is_tls_handshake(header_buf[0]),
             _ => false,
         };
 
-        // 2. If TLS, peek ClientHello to parse SNI — 如果是 TLS，peek ClientHello 解析 SNI
+        // 2. If TLS, peek full ClientHello using exact record length — 如果是 TLS，用精确的记录长度 peek 完整 ClientHello
         let sni = if is_tls {
-            let mut hello_buf = vec![0u8; CLIENT_HELLO_PEEK_SIZE];
+            // TLS Record Header: ContentType(1) + Version(2) + Length(2) — TLS Record Header：ContentType(1) + Version(2) + Length(2)
+            let record_len = ((header_buf[3] as usize) << 8) | (header_buf[4] as usize);
+            // Total = 5 (header) + record payload, cap to reasonable max — 总长 = 5（header）+ 记录负载，限制合理上限
+            let total = (5 + record_len).min(16384);
+            let mut hello_buf = vec![0u8; total];
             match downstream.try_peek(&mut hello_buf).await {
                 Ok(true) => parse_sni_from_client_hello(&hello_buf),
                 _ => None,
