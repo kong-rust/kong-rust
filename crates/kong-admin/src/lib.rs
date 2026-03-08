@@ -15,7 +15,9 @@ use std::sync::RwLock;
 
 use axum::routing::get;
 use axum::Router;
+use axum::response::{IntoResponse, Redirect};
 use tower_http::cors::{AllowOrigin, AllowMethods, AllowHeaders, CorsLayer};
+use tower_http::services::ServeDir;
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
@@ -149,4 +151,52 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 ]))
         )
         .with_state(state)
+}
+
+/// Build the Kong Manager GUI router (static file server for SPA) — 构建 Kong Manager GUI 路由（SPA 静态文件服务）
+///
+/// - `GET /` → 301 redirect to `/__km_base__/` — 301 重定向到 `/__km_base__/`
+/// - `GET /__km_base__/kconfig.js` → dynamic runtime config — 动态运行时配置
+/// - `GET /__km_base__/*` → serve static files from `gui_dir`, SPA fallback to index.html — 从 `gui_dir` 提供静态文件，SPA 回退到 index.html
+pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
+    let kconfig_js = format!(
+        "window.K_CONFIG = {{\n  ADMIN_API_URL: \"{}\",\n  ADMIN_API_PORT: \"{}\"\n}};\n",
+        admin_api_url,
+        // 从 admin_api_url 中提取端口，默认 8001 — Extract port from admin_api_url, default 8001
+        url::Url::parse(admin_api_url)
+            .ok()
+            .and_then(|u| u.port())
+            .unwrap_or(8001),
+    );
+
+    let index_path = std::path::PathBuf::from(gui_dir).join("index.html");
+    let serve_dir = ServeDir::new(gui_dir)
+        .not_found_service(tower::service_fn(move |_req: axum::http::Request<axum::body::Body>| {
+            let path = index_path.clone();
+            async move {
+                // SPA fallback: serve index.html for unknown paths — SPA 回退：未知路径返回 index.html
+                match tokio::fs::read(&path).await {
+                    Ok(body) => Ok(axum::http::Response::builder()
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()),
+                    Err(_) => Ok(axum::http::Response::builder()
+                        .status(404)
+                        .body(axum::body::Body::from("Kong Manager GUI not found"))
+                        .unwrap()),
+                }
+            }
+        }));
+
+    Router::new()
+        .route("/", get(|| async { Redirect::permanent("/__km_base__/") }))
+        .route("/__km_base__/kconfig.js", get(move || async move {
+            axum::http::Response::builder()
+                .header("content-type", "application/javascript; charset=utf-8")
+                .header("cache-control", "no-cache")
+                .body(axum::body::Body::from(kconfig_js.clone()))
+                .unwrap()
+                .into_response()
+        }))
+        .nest_service("/__km_base__", serve_dir)
 }

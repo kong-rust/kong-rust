@@ -78,6 +78,9 @@ RUN chmod +x /docker-entrypoint.sh
 # 复制默认配置文件（如果存在）— Copy default config (if exists)
 COPY kong.conf.default /etc/kong/kong.conf.default
 
+# Kong Manager GUI 静态文件 — Kong Manager GUI static files
+COPY kong-manager/dist/ /usr/local/kong/gui/
+
 USER kong
 
 # Kong 标准端口 — Kong standard ports
@@ -85,7 +88,8 @@ USER kong
 # 8443: Proxy HTTPS
 # 8001: Admin API HTTP
 # 8444: Admin API HTTPS
-EXPOSE 8000 8443 8001 8444
+# 8002: Kong Manager GUI
+EXPOSE 8000 8443 8001 8444 8002
 
 STOPSIGNAL SIGQUIT
 

@@ -15,8 +15,17 @@ target/
 .spec-workflow/
 .claude/
 
-# Kong Manager 前端（不需要打入网关镜像）
-kong-manager/
+# Kong Manager 前端：只保留 dist/，排除源码和依赖
+kong-manager/node_modules/
+kong-manager/src/
+kong-manager/tests/
+kong-manager/.eslintrc.*
+kong-manager/.stylelintrc.*
+kong-manager/tsconfig*.json
+kong-manager/vite.config.*
+kong-manager/package-lock.json
+kong-manager/yarn.lock
+kong-manager/pnpm-lock.yaml
 
 # 日志和临时文件
 logs/

@@ -635,6 +635,38 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
             tracing::info!("缓存刷新防抖任务已启动（100ms 窗口合并）");
         }
 
+        // Start GUI server if admin_gui_listen is configured and GUI directory exists — 如果配置了 admin_gui_listen 且 GUI 目录存在，启动 GUI 服务器
+        let gui_dir = std::env::var("KONG_GUI_DIR")
+            .unwrap_or_else(|_| "/usr/local/kong/gui".to_string());
+        if !self.config.admin_gui_listen.is_empty() && Path::new(&gui_dir).join("index.html").exists() {
+            let gui_bind = if let Some(addr) = self.config.admin_gui_listen.first() {
+                format!("{}:{}", addr.ip, addr.port)
+            } else {
+                "0.0.0.0:8002".to_string()
+            };
+
+            // Derive Admin API URL for kconfig.js — 推导 Admin API URL 用于 kconfig.js
+            // 使用 admin_listen 的端口，schema 和 host 从 admin_gui_url 推导 — Use admin_listen port, derive scheme/host from admin_gui_url
+            let admin_port = self.config.admin_listen.first().map(|a| a.port).unwrap_or(8001);
+            let admin_api_url = format!("http://localhost:{}", admin_port);
+
+            let gui_app = kong_admin::build_gui_router(&gui_dir, &admin_api_url);
+            tracing::info!("Kong Manager GUI 监听于: {} (Admin API: {})", gui_bind, admin_api_url);
+
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&gui_bind).await {
+                    Ok(listener) => {
+                        if let Err(e) = axum::serve(listener, gui_app).await {
+                            tracing::error!("Kong Manager GUI 异常退出: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Kong Manager GUI 绑定失败 {}: {e}", gui_bind);
+                    }
+                }
+            });
+        }
+
         let app = kong_admin::build_admin_router(self.state.clone());
 
         let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
