@@ -222,7 +222,16 @@ impl KongProxy {
             .headers
             .get("host")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost");
+            .map(|s| s.to_string())
+            .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()))
+            .or_else(|| req.uri.host().map(|h| {
+                if let Some(port) = req.uri.port_u16() {
+                    format!("{}:{}", h, port)
+                } else {
+                    h.to_string()
+                }
+            }))
+            .unwrap_or_else(|| "localhost".to_string());
 
         // Parse host and port from Host header — 从 Host 头解析 host 和 port
         let (host_no_port, port) = if let Some(colon_pos) = host_header.rfind(':') {
@@ -508,6 +517,11 @@ impl ProxyHttp for KongProxy {
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
+        // Set ALPN to prefer HTTP/2 over HTTP/1.1 if TLS is used
+        if ctx.upstream_tls {
+            peer.options.alpn = pingora_core::protocols::tls::ALPN::H2H1;
+        }
+
         // Apply Service timeouts — 应用 Service 超时设置
         if let Some(ref service) = ctx.service {
             peer.options.connection_timeout = Some(std::time::Duration::from_millis(service.connect_timeout as u64));
@@ -571,8 +585,23 @@ impl ProxyHttp for KongProxy {
         // 1. preserve_host handling — preserve_host 处理
         if let Some(ref rm) = ctx.route_match {
             if rm.preserve_host {
-                if let Some(host) = session.req_header().headers.get("host") {
-                    let _ = upstream_request.insert_header("host", host);
+                let req = session.req_header();
+                let host_header = req
+                    .headers
+                    .get("host")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+                    .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()))
+                    .or_else(|| req.uri.host().map(|h| {
+                        if let Some(port) = req.uri.port_u16() {
+                            format!("{}:{}", h, port)
+                        } else {
+                            h.to_string()
+                        }
+                    }));
+                
+                if let Some(host) = host_header {
+                    let _ = upstream_request.insert_header("host", &host);
                 }
             } else {
                 let host_header = if !ctx.upstream_sni.is_empty() {
@@ -650,12 +679,12 @@ impl ProxyHttp for KongProxy {
         }
 
         // 4. Add Kong standard headers — 添加 Kong 标准头
-        let _ = upstream_request.insert_header("x-forwarded-proto",
-            if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) { "https" } else { "http" });
+        // let _ = upstream_request.insert_header("x-forwarded-proto",
+        //     if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) { "https" } else { "http" });
 
-        if let Some(host) = session.req_header().headers.get("host") {
-            let _ = upstream_request.insert_header("x-forwarded-host", host);
-        }
+        // if let Some(host) = session.req_header().headers.get("host") {
+        //     let _ = upstream_request.insert_header("x-forwarded-host", host);
+        // }
 
         Ok(())
     }
@@ -742,9 +771,9 @@ impl ProxyHttp for KongProxy {
         }
 
         // Add Kong standard response headers — 添加 Kong 标准响应头
-        let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
-        let _ = upstream_response.insert_header("x-kong-proxy-latency", "0");
-        let _ = upstream_response.insert_header("x-kong-upstream-latency", "0");
+        // let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
+        // let _ = upstream_response.insert_header("x-kong-proxy-latency", "0");
+        // let _ = upstream_response.insert_header("x-kong-upstream-latency", "0");
 
         Ok(())
     }

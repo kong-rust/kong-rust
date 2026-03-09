@@ -350,15 +350,25 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
             // SSL port: register with add_tls, Pingora handles TLS termination — SSL 端口：使用 add_tls 注册，Pingora 负责 TLS 终止
             if let (Some(cert), Some(key)) = (config.ssl_cert.first(), config.ssl_cert_key.first())
             {
-                match proxy_service.add_tls(&listen_addr, cert, key) {
-                    Ok(_) => tracing::info!("Proxy 监听于: {} (TLS)", listen_addr),
+                let mut tls_settings = match pingora_core::listeners::tls::TlsSettings::intermediate(cert, key) {
+                    Ok(settings) => settings,
                     Err(e) => {
-                        tracing::error!("Proxy TLS 监听失败 {}: {}", listen_addr, e);
+                        tracing::error!("Proxy TLS 配置失败 {}: {}", listen_addr, e);
                         // Fallback to TCP — 回退到 TCP
                         proxy_service.add_tcp(&listen_addr);
                         tracing::warn!("Proxy 回退为 TCP 监听: {}", listen_addr);
+                        continue;
                     }
+                };
+
+                if addr.http2 {
+                    tls_settings.enable_h2();
+                    tracing::info!("Proxy 监听于: {} (TLS+HTTP/2)", listen_addr);
+                } else {
+                    tracing::info!("Proxy 监听于: {} (TLS)", listen_addr);
                 }
+
+                proxy_service.add_tls_with_settings(&listen_addr, None, tls_settings);
             } else {
                 tracing::warn!(
                     "Proxy SSL port {} missing ssl_cert/ssl_cert_key config, falling back to TCP — Proxy SSL 端口 {} 缺少 ssl_cert/ssl_cert_key 配置，回退为 TCP",

@@ -489,3 +489,11 @@
   - request_body_filter 中检查 body chunk 间隔，超过 60s 返回错误终止请求
   - KongCtx 添加 last_body_chunk_at: Option<Instant>
   - 文件：`crates/kong-proxy/src/lib.rs`
+
+## 阶段 12：协议与 TLS 支持进阶
+
+- [x] 12.1 实现 HTTP/2 支持 (ALPN)
+  - 为客户端 (Downstream) 代理开启 HTTP/2 支持：使用 `add_tls_with_settings` 和 `enable_h2()`。
+  - 为上游 (Upstream) 代理配置 `ALPN::H2H1`，优先协商 HTTP/2。
+  - 检查并兼容配置文件中的 `http2` 标志。
+  - 文件：`crates/kong-server/src/main.rs`, `crates/kong-proxy/src/lib.rs`
