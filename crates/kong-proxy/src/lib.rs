@@ -868,13 +868,13 @@ impl ProxyHttp for KongProxy {
 
         let log_line = if let Some(e) = error {
             format!(
-                "{} - - [{}] \"{} {} HTTP/1.1\" {} - \"{}\" upstream={} error=\"{}\"\n",
-                remote_addr, now, method, uri, status, user_agent, upstream, e
+                "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={} error=\"{}\"\n",
+                remote_addr, now, method, uri, req.version, status, user_agent, upstream, e
             )
         } else {
             format!(
-                "{} - - [{}] \"{} {} HTTP/1.1\" {} - \"{}\" upstream={}\n",
-                remote_addr, now, method, uri, status, user_agent, upstream
+                "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={}\n",
+                remote_addr, now, method, uri, req.version, status, user_agent, upstream
             )
         };
 
