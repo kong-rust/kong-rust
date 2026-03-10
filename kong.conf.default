@@ -34,3 +34,17 @@ admin_error_log = logs/error.log
 
 # ---------- 插件 ----------
 plugins = bundled
+
+# ---------- 代理扩展（Nginx 能力对齐） ----------
+# 注入代理相关请求头到上游（默认全部注入，与 Kong 一致）
+# on = 全部注入（X-Real-IP, X-Forwarded-For/Proto/Host/Port/Path/Prefix）
+# off = 不注入
+# 也可指定头名列表，只注入指定的头：
+#proxy_real_ip_headers = X-Real-IP, X-Forwarded-For, X-Forwarded-Proto
+
+# 隐藏上游返回的 Server 响应头（默认开启）
+#proxy_hide_server_header = on
+
+# 自定义注入的响应头，逗号分隔，每项格式为 "Header-Name: Value"
+# 示例：注入常用安全头
+#proxy_response_headers = Strict-Transport-Security: max-age=31536000; includeSubDomains, X-Frame-Options: DENY, X-Content-Type-Options: nosniff

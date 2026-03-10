@@ -491,6 +491,7 @@ async fn init_proxy_and_admin(
             kong_proxy::tls::CertificateManager::new(),
             Vec::new(),
             dns_resolver,
+            Arc::clone(config),
         );
 
         let admin_state = kong_admin::AdminState {
@@ -593,6 +594,7 @@ async fn init_proxy_and_admin(
             cert_manager,
             ca_certificates_page.data.clone(),
             dns_resolver,
+            Arc::clone(config),
         );
         kong_proxy.update_services(services_page.data);
         kong_proxy.update_upstreams(upstreams_page.data, targets_page.data);

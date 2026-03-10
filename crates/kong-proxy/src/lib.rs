@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use kong_core::models::{CaCertificate, Route, Service, Target, Upstream};
 use kong_core::traits::RequestCtx;
+use kong_config::KongConfig;
 use kong_router::{RequestContext, RouteMatch, Router};
 use kong_plugin_system::{PluginExecutor, PluginRegistry, ResolvedPlugin};
 
@@ -66,6 +67,8 @@ pub struct KongCtx {
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
 #[derive(Clone)]
 pub struct KongProxy {
+    /// Kong configuration — Kong 配置
+    pub config: Arc<KongConfig>,
     /// Router (hot-reloadable) — 路由器（可热更新）
     pub router: Arc<RwLock<Router>>,
     /// Plugin registry — 插件注册表
@@ -96,8 +99,10 @@ impl KongProxy {
         cert_manager: CertificateManager,
         ca_certificates: Vec<CaCertificate>,
         dns_resolver: SharedDnsResolver,
+        config: Arc<KongConfig>,
     ) -> Self {
         Self {
+            config,
             router: Arc::new(RwLock::new(Router::new(routes, router_flavor))),
             plugin_registry: Arc::new(plugin_registry),
             balancers: Arc::new(RwLock::new(HashMap::new())),
@@ -310,8 +315,56 @@ impl KongProxy {
         Ok((addr, use_tls, sni))
     }
 
+    /// 构建响应头（公共逻辑：Content-Type + Content-Length + Server 头 + 自定义头注入）
+    fn build_response_header(&self, status_code: u16, body_len: usize) -> pingora_core::Result<ResponseHeader> {
+        let mut resp = ResponseHeader::build(status_code, Some(4))?;
+        resp.insert_header("content-length", body_len.to_string())?;
+        resp.insert_header("content-type", "application/json; charset=utf-8")?;
+
+        // Server 头：根据配置决定是否添加
+        if !self.config.proxy_hide_server_header {
+            resp.insert_header("server", "kong-rust/0.1.0")?;
+        }
+
+        // 注入自定义响应头
+        for header_str in &self.config.proxy_response_headers {
+            if let Some((name, value)) = header_str.split_once(':') {
+                let name = name.trim();
+                let value = value.trim();
+                if let (Ok(hn), Ok(hv)) = (
+                    http::header::HeaderName::from_bytes(name.as_bytes()),
+                    http::header::HeaderValue::from_str(value),
+                ) {
+                    resp.headers.insert(hn, hv);
+                }
+            }
+        }
+
+        Ok(resp)
+    }
+
+    /// 发送框架级错误响应（JSON 格式，受配置控制）
+    async fn send_error_response(
+        &self,
+        session: &mut Session,
+        status_code: u16,
+        message: &str,
+    ) -> pingora_core::Result<bool> {
+        let body = format!("{{\"message\":\"{}\"}}", message);
+        let body_bytes = body.as_bytes();
+
+        let resp = self.build_response_header(status_code, body_bytes.len())?;
+        session.write_response_header(Box::new(resp), false).await?;
+        session
+            .write_response_body(Some(Bytes::copy_from_slice(body_bytes)), true)
+            .await?;
+
+        Ok(true)
+    }
+
     /// Send short-circuit response (supports custom status + headers + body) — 发送短路响应（支持自定义 status + headers + body）
     async fn send_short_circuit_response(
+        &self,
         session: &mut Session,
         ctx: &mut RequestCtx,
     ) -> pingora_core::Result<bool> {
@@ -319,14 +372,10 @@ impl KongProxy {
         let body = ctx.exit_body.take();
         let headers = ctx.exit_headers.take();
 
-        // Build response headers — 构造响应头
         let body_bytes = body.as_deref().unwrap_or("").as_bytes();
-        let mut resp = ResponseHeader::build(status_code, Some(4))?;
-        resp.insert_header("content-length", body_bytes.len().to_string())?;
-        resp.insert_header("content-type", "application/json; charset=utf-8")?;
-        resp.insert_header("server", "kong-rust/0.1.0")?;
+        let mut resp = self.build_response_header(status_code, body_bytes.len())?;
 
-        // Apply custom response headers — 应用自定义响应头
+        // 应用插件设置的自定义响应头
         if let Some(hdrs) = headers {
             for (name, value) in hdrs {
                 if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
@@ -389,8 +438,7 @@ impl ProxyHttp for KongProxy {
         let route_match = match route_match {
             Some(rm) => rm,
             None => {
-                let _ = session.respond_error(404).await;
-                return Ok(true);
+                return self.send_error_response(session, 404, "no Route matched with those values").await;
             }
         };
 
@@ -407,14 +455,12 @@ impl ProxyHttp for KongProxy {
         let service = match service {
             Some(s) => s,
             None => {
-                let _ = session.respond_error(503).await;
-                return Ok(true);
+                return self.send_error_response(session, 503, "no Service found for the requested route").await;
             }
         };
 
         if !service.enabled {
-            let _ = session.respond_error(503).await;
-            return Ok(true);
+            return self.send_error_response(session, 503, "Service unavailable").await;
         }
 
         // 4. Resolve upstream address — 解析上游地址
@@ -449,28 +495,26 @@ impl ProxyHttp for KongProxy {
         // 7. Execute rewrite phase — 执行 rewrite 阶段
         if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
-            let _ = session.respond_error(500).await;
-            return Ok(true);
+            return self.send_error_response(session, 500, "An unexpected error occurred").await;
         }
 
         // 8. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
             // Save plugin chain for log phase — 保存插件链供 log 阶段使用
             ctx.resolved_plugins = resolved_plugins;
-            return Self::send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
+            return self.send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
         }
 
         // 9. Execute access phase — 执行 access 阶段
         if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
-            let _ = session.respond_error(500).await;
-            return Ok(true);
+            return self.send_error_response(session, 500, "An unexpected error occurred").await;
         }
 
         // 10. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
             ctx.resolved_plugins = resolved_plugins;
-            return Self::send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
+            return self.send_short_circuit_response(session, &mut ctx.plugin_ctx).await;
         }
 
         // Save to context — 保存到上下文
@@ -678,13 +722,83 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 4. Add Kong standard headers — 添加 Kong 标准头
-        // let _ = upstream_request.insert_header("x-forwarded-proto",
-        //     if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) { "https" } else { "http" });
+        // 4. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，默认全部注入）
+        if !self.config.proxy_real_ip_headers.is_empty() {
+            let headers_set: std::collections::HashSet<String> = self.config.proxy_real_ip_headers
+                .iter()
+                .map(|h| h.to_lowercase())
+                .collect();
 
-        // if let Some(host) = session.req_header().headers.get("host") {
-        //     let _ = upstream_request.insert_header("x-forwarded-host", host);
-        // }
+            let client_ip = session
+                .client_addr()
+                .map(|a| {
+                    let s = a.to_string();
+                    s.split(':').next().unwrap_or(&s).to_string()
+                })
+                .unwrap_or_default();
+
+            if !client_ip.is_empty() {
+                if headers_set.contains("x-real-ip") {
+                    let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                }
+                if headers_set.contains("x-forwarded-for") {
+                    let existing_xff = session.req_header().headers
+                        .get("x-forwarded-for")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    let xff = match existing_xff {
+                        Some(existing) => format!("{}, {}", existing, client_ip),
+                        None => client_ip.clone(),
+                    };
+                    let _ = upstream_request.insert_header("x-forwarded-for", &xff);
+                }
+            }
+
+            if headers_set.contains("x-forwarded-proto") {
+                let proto = if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) {
+                    "https"
+                } else {
+                    "http"
+                };
+                let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+            }
+
+            if headers_set.contains("x-forwarded-host") {
+                if let Some(host) = session.req_header().headers.get("host") {
+                    let _ = upstream_request.insert_header("x-forwarded-host", host);
+                }
+            }
+
+            if headers_set.contains("x-forwarded-port") {
+                let port = session.req_header().uri.port_u16()
+                    .unwrap_or(if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) { 443 } else { 80 });
+                let _ = upstream_request.insert_header("x-forwarded-port", &port.to_string());
+            }
+
+            if headers_set.contains("x-forwarded-path") {
+                let path = session.req_header().uri.path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/");
+                let _ = upstream_request.insert_header("x-forwarded-path", path);
+            }
+
+            if headers_set.contains("x-forwarded-prefix") {
+                let _ = upstream_request.insert_header("x-forwarded-prefix", "");
+            }
+        }
+
+        // 5. WebSocket 代理：始终透传 Upgrade/Connection 头（与 Kong 原版行为一致）
+        {
+            let is_websocket = session.req_header().headers
+                .get("upgrade")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false);
+            if is_websocket {
+                let _ = upstream_request.insert_header("upgrade", "websocket");
+                let _ = upstream_request.insert_header("connection", "upgrade");
+            }
+        }
 
         Ok(())
     }
@@ -774,6 +888,25 @@ impl ProxyHttp for KongProxy {
         // let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
         // let _ = upstream_response.insert_header("x-kong-proxy-latency", "0");
         // let _ = upstream_response.insert_header("x-kong-upstream-latency", "0");
+
+        // Server 头隐藏：根据配置移除上游返回的 Server 头
+        if self.config.proxy_hide_server_header {
+            upstream_response.remove_header("server");
+        }
+
+        // 注入自定义响应头
+        for header_str in &self.config.proxy_response_headers {
+            if let Some((name, value)) = header_str.split_once(':') {
+                let name = name.trim();
+                let value = value.trim();
+                if let (Ok(hn), Ok(hv)) = (
+                    http::header::HeaderName::from_bytes(name.as_bytes()),
+                    http::header::HeaderValue::from_str(value),
+                ) {
+                    upstream_response.headers.insert(hn, hv);
+                }
+            }
+        }
 
         Ok(())
     }

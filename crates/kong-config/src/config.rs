@@ -188,6 +188,14 @@ pub struct KongConfig {
     pub tracing_instrumentations: Vec<String>,
     pub tracing_sampling_rate: f64,
 
+    // ========== Proxy 扩展配置（Nginx 能力对齐） ==========
+    /// 注入 X-Real-IP / X-Forwarded-* 请求头到上游
+    /// 默认全部注入（与 Kong 一致），支持 on/off/指定头名列表
+    pub proxy_real_ip_headers: Vec<String>,
+    /// 隐藏上游 Server 响应头（默认隐藏）
+    pub proxy_hide_server_header: bool,
+    /// 自定义注入的响应头列表，每项格式为 "Header-Name: Header-Value"
+    pub proxy_response_headers: Vec<String>,
     // ========== Nginx dynamic directive injection — Nginx 动态指令注入 ==========
     /// Stores dynamic configuration with nginx_* prefix — 存储 nginx_* 前缀的动态配置
     pub nginx_directives: HashMap<String, String>,
@@ -372,6 +380,19 @@ impl Default for KongConfig {
             // Observability — 可观测性
             tracing_instrumentations: vec!["off".to_string()],
             tracing_sampling_rate: 0.01,
+
+            // Proxy 扩展配置
+            proxy_real_ip_headers: vec![
+                "X-Real-IP".to_string(),
+                "X-Forwarded-For".to_string(),
+                "X-Forwarded-Proto".to_string(),
+                "X-Forwarded-Host".to_string(),
+                "X-Forwarded-Port".to_string(),
+                "X-Forwarded-Path".to_string(),
+                "X-Forwarded-Prefix".to_string(),
+            ],
+            proxy_hide_server_header: true,
+            proxy_response_headers: vec![],
 
             // Nginx dynamic directives — Nginx 动态指令
             nginx_directives: HashMap::new(),
@@ -588,6 +609,31 @@ impl KongConfig {
                 self.tracing_sampling_rate = value.parse().unwrap_or(0.01)
             }
 
+            // Proxy 扩展配置
+            // Proxy 扩展配置
+            "proxy_real_ip_headers" => {
+                let v = value.trim().to_lowercase();
+                if v == "on" || v == "true" || v == "yes" || v == "1" {
+                    // 全部注入
+                    self.proxy_real_ip_headers = vec![
+                        "X-Real-IP".to_string(),
+                        "X-Forwarded-For".to_string(),
+                        "X-Forwarded-Proto".to_string(),
+                        "X-Forwarded-Host".to_string(),
+                        "X-Forwarded-Port".to_string(),
+                        "X-Forwarded-Path".to_string(),
+                        "X-Forwarded-Prefix".to_string(),
+                    ];
+                } else if v == "off" || v == "false" || v == "no" || v == "0" || v.is_empty() {
+                    self.proxy_real_ip_headers = vec![];
+                } else {
+                    // 指定头名列表，逗号分隔
+                    self.proxy_real_ip_headers = parse_array(value);
+                }
+            }
+            "proxy_hide_server_header" => self.proxy_hide_server_header = parse_bool(value),
+            "proxy_response_headers" => self.proxy_response_headers = parse_header_list(value),
+
             // nginx_* dynamic directives — nginx_* 动态指令
             _ if key.starts_with("nginx_") => {
                 self.nginx_directives.insert(key.to_string(), value.to_string());
@@ -746,6 +792,21 @@ fn none_if_empty(value: &str) -> Option<String> {
     } else {
         Some(v.to_string())
     }
+}
+
+/// 解析响应头列表，格式为 "Header: Value, Header2: Value2"
+/// 按逗号分隔，但只在 "字母: " 模式前切割（避免切断值中的逗号）
+fn parse_header_list(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "off" {
+        return vec![];
+    }
+    // 按逗号分隔后，每项必须包含冒号才视为合法头
+    trimmed
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.contains(':'))
+        .collect()
 }
 
 /// Parse size string (e.g., "128m" -> bytes) — 解析大小字符串（如 "128m" -> 字节数）
