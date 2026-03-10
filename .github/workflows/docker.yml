@@ -1,0 +1,46 @@
+name: Build & Push Docker Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  DOCKER_REGISTRY: fengyi95/kong-rust
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "tags=${DOCKER_REGISTRY}:${VERSION},${DOCKER_REGISTRY}:latest" >> "$GITHUB_OUTPUT"
+          else
+            SHA="${GITHUB_SHA::7}"
+            echo "tags=${DOCKER_REGISTRY}:${SHA},${DOCKER_REGISTRY}:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

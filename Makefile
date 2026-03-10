@@ -155,8 +155,9 @@ dev-full:
 
 # ---------- Docker ----------
 
-DOCKER_TAG ?= kong-rust:latest
-DOCKER_REGISTRY ?=
+DOCKER_REGISTRY ?= kong-rust
+DOCKER_VERSION ?= latest
+DOCKER_TAG = $(DOCKER_REGISTRY):$(DOCKER_VERSION)
 DOCKER_PLATFORM ?= linux/amd64
 
 # 构建 Docker 镜像（默认 linux/amd64，适配 x86 服务器）
@@ -165,7 +166,7 @@ docker-build:
 
 # 推送 Docker 镜像
 docker-push:
-	docker push $(DOCKER_REGISTRY)$(DOCKER_TAG)
+	docker push $(DOCKER_TAG)
 
 # db-less 模式运行容器
 docker-run:
