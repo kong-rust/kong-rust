@@ -62,6 +62,8 @@ pub struct KongCtx {
     pub response_body_buf: Option<SpillableBuffer>,
     /// Timestamp of last received body chunk (for timeout protection) — 最后收到 body chunk 的时间戳（用于超时保护）
     pub last_body_chunk_at: Option<std::time::Instant>,
+    /// proxy 注入到 upstream 请求的 real-ip header 键值对，用于 access log 输出
+    pub injected_real_ip_headers: Vec<(String, String)>,
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
@@ -415,6 +417,7 @@ impl ProxyHttp for KongProxy {
             request_body_buf: None,
             response_body_buf: None,
             last_body_chunk_at: None,
+            injected_real_ip_headers: Vec::new(),
         }
     }
 
@@ -740,6 +743,7 @@ impl ProxyHttp for KongProxy {
             if !client_ip.is_empty() {
                 if headers_set.contains("x-real-ip") {
                     let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                    ctx.injected_real_ip_headers.push(("X-Real-IP".to_string(), client_ip.clone()));
                 }
                 if headers_set.contains("x-forwarded-for") {
                     let existing_xff = session.req_header().headers
@@ -751,6 +755,7 @@ impl ProxyHttp for KongProxy {
                         None => client_ip.clone(),
                     };
                     let _ = upstream_request.insert_header("x-forwarded-for", &xff);
+                    ctx.injected_real_ip_headers.push(("X-Forwarded-For".to_string(), xff));
                 }
             }
 
@@ -761,18 +766,24 @@ impl ProxyHttp for KongProxy {
                     "http"
                 };
                 let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                ctx.injected_real_ip_headers.push(("X-Forwarded-Proto".to_string(), proto.to_string()));
             }
 
             if headers_set.contains("x-forwarded-host") {
                 if let Some(host) = session.req_header().headers.get("host") {
                     let _ = upstream_request.insert_header("x-forwarded-host", host);
+                    if let Ok(v) = host.to_str() {
+                        ctx.injected_real_ip_headers.push(("X-Forwarded-Host".to_string(), v.to_string()));
+                    }
                 }
             }
 
             if headers_set.contains("x-forwarded-port") {
                 let port = session.req_header().uri.port_u16()
                     .unwrap_or(if session.digest().map(|d| d.ssl_digest.is_some()).unwrap_or(false) { 443 } else { 80 });
-                let _ = upstream_request.insert_header("x-forwarded-port", &port.to_string());
+                let port_str = port.to_string();
+                let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                ctx.injected_real_ip_headers.push(("X-Forwarded-Port".to_string(), port_str));
             }
 
             if headers_set.contains("x-forwarded-path") {
@@ -780,10 +791,12 @@ impl ProxyHttp for KongProxy {
                     .map(|pq| pq.as_str())
                     .unwrap_or("/");
                 let _ = upstream_request.insert_header("x-forwarded-path", path);
+                ctx.injected_real_ip_headers.push(("X-Forwarded-Path".to_string(), path.to_string()));
             }
 
             if headers_set.contains("x-forwarded-prefix") {
                 let _ = upstream_request.insert_header("x-forwarded-prefix", "");
+                ctx.injected_real_ip_headers.push(("X-Forwarded-Prefix".to_string(), String::new()));
             }
         }
 
@@ -997,15 +1010,11 @@ impl ProxyHttp for KongProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
 
-        // 收集 proxy_real_ip_headers 配置的 header 值用于日志输出
-        let headers_str = if !self.config.proxy_real_ip_headers.is_empty() {
-            let header_values: Vec<String> = self.config.proxy_real_ip_headers
+        // 从 ctx 读取 proxy 注入到 upstream 的 real-ip header 值用于日志输出
+        let headers_str = if !ctx.injected_real_ip_headers.is_empty() {
+            let header_values: Vec<String> = ctx.injected_real_ip_headers
                 .iter()
-                .filter_map(|header_name| {
-                    req.headers.get(header_name)
-                        .and_then(|v| v.to_str().ok())
-                        .map(|value| format!("{}: {}", header_name, value))
-                })
+                .map(|(name, value)| format!("{}: {}", name, value))
                 .collect();
             if !header_values.is_empty() {
                 format!("headers=\"{}\"", header_values.join(", "))
@@ -1057,3 +1066,4 @@ impl ProxyHttp for KongProxy {
         }
     }
 }
+
