@@ -1,5 +1,19 @@
 # ==========================================
-# Stage 1: 构建阶段 — Build stage
+# Stage 1: Kong Manager 前端构建 — Frontend build
+# ==========================================
+FROM node:22-bookworm-slim AS gui-builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /gui
+COPY kong-manager/package.json kong-manager/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY kong-manager/ ./
+RUN pnpm build
+
+# ==========================================
+# Stage 2: Rust 构建阶段 — Rust build stage
 # ==========================================
 FROM rust:1.88-bookworm AS builder
 
@@ -52,7 +66,7 @@ RUN find target/release/.fingerprint -name "kong-*" -exec rm -rf {} + 2>/dev/nul
 RUN cargo build --release -p kong-server
 
 # ==========================================
-# Stage 2: 运行时阶段 — Runtime stage
+# Stage 3: 运行时阶段 — Runtime stage
 # ==========================================
 FROM debian:bookworm-slim
 
@@ -79,7 +93,7 @@ RUN chmod +x /docker-entrypoint.sh
 COPY kong.conf.default /etc/kong/kong.conf.default
 
 # Kong Manager GUI 静态文件 — Kong Manager GUI static files
-COPY kong-manager/dist/ /usr/local/kong/gui/
+COPY --from=gui-builder /gui/dist/ /usr/local/kong/gui/
 
 USER kong
 
@@ -98,3 +112,4 @@ HEALTHCHECK --interval=60s --timeout=10s --retries=10 \
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["kong", "docker-start"]
+
