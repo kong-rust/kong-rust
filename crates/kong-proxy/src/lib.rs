@@ -997,18 +997,51 @@ impl ProxyHttp for KongProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
 
+        // 收集 proxy_real_ip_headers 配置的 header 值用于日志输出
+        let headers_str = if !self.config.proxy_real_ip_headers.is_empty() {
+            let header_values: Vec<String> = self.config.proxy_real_ip_headers
+                .iter()
+                .filter_map(|header_name| {
+                    req.headers.get(header_name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|value| format!("{}: {}", header_name, value))
+                })
+                .collect();
+            if !header_values.is_empty() {
+                format!("headers=\"{}\"", header_values.join(", "))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         let now = chrono::Utc::now().format("%d/%b/%Y:%H:%M:%S %z");
 
         let log_line = if let Some(e) = error {
-            format!(
-                "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={} error=\"{}\"\n",
-                remote_addr, now, method, uri, req.version, status, user_agent, upstream, e
-            )
+            if headers_str.is_empty() {
+                format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={} error=\"{}\"\n",
+                    remote_addr, now, method, uri, req.version, status, user_agent, upstream, e
+                )
+            } else {
+                format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={} error=\"{}\" {}\n",
+                    remote_addr, now, method, uri, req.version, status, user_agent, upstream, e, headers_str
+                )
+            }
         } else {
-            format!(
-                "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={}\n",
-                remote_addr, now, method, uri, req.version, status, user_agent, upstream
-            )
+            if headers_str.is_empty() {
+                format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={}\n",
+                    remote_addr, now, method, uri, req.version, status, user_agent, upstream
+                )
+            } else {
+                format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} - \"{}\" upstream={} {}\n",
+                    remote_addr, now, method, uri, req.version, status, user_agent, upstream, headers_str
+                )
+            }
         };
 
         // Async write to access log file — 异步写入 access log 文件
