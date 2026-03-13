@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust 1.84
-        uses: dtolnay/rust-toolchain@1.84
+      - name: Set up Rust 1.94.0
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
