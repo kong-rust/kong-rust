@@ -123,7 +123,7 @@ Key settings:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `proxy_listen` | `0.0.0.0:8000` | HTTP proxy listener address |
-| `admin_listen` | `0.0.0.0:8001` | Admin API listener address |
+| `admin_listen` | `127.0.0.1:8001` | Admin API listener address |
 | `stream_listen` | `off` | L4 stream proxy listener (e.g., `0.0.0.0:9000`) |
 | `database` | `postgres` | Database mode (`postgres` or `off`) |
 | `pg_host` | `127.0.0.1` | PostgreSQL host |

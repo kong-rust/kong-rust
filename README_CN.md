@@ -4,7 +4,7 @@
 
 ## 为什么选择 Kong-Rust？
 
-Kong ���全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
+Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
 
 | | Kong (Lua/OpenResty) | Kong-Rust |
 |---|---|---|
@@ -123,7 +123,7 @@ Kong-Rust 使用与 Kong 相同的 `kong.conf` 配置格式。完整配置项请
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `proxy_listen` | `0.0.0.0:8000` | HTTP 代理监听地址 |
-| `admin_listen` | `0.0.0.0:8001` | Admin API 监听地址 |
+| `admin_listen` | `127.0.0.1:8001` | Admin API 监听地址 |
 | `stream_listen` | `off` | L4 Stream 代理监听（如 `0.0.0.0:9000`） |
 | `database` | `postgres` | 数据库模式（`postgres` 或 `off`） |
 | `pg_host` | `127.0.0.1` | PostgreSQL 主机 |
