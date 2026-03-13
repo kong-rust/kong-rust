@@ -104,6 +104,8 @@ curl http://localhost:8000/httpbin/get
 
 Kong-Rust 兼容官方 [Kong Manager](https://docs.konghq.com/gateway/latest/kong-manager/) 前端管理界面。
 
+`8001` 是 Admin API 端口，`8002` 是 Kong Manager GUI 端口。`/services` 这类 Admin API 端点应访问 `8001`，不是 `8002`。
+
 ```bash
 # 安装依赖
 make manager-install

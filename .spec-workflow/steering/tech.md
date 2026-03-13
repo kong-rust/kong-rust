@@ -194,8 +194,8 @@ kong-server（入口）
 - **数据库初始化**：`cargo run -- -c kong.conf.default db bootstrap`（必须在首次启动前执行）
 - **Docker**：
   - `Dockerfile`：多阶段构建（builder + runtime Debian slim），兼容 Kong 官方用户/目录布局
-  - `docker-entrypoint.sh`：支持 Docker Secrets（`KONG_*_FILE` 环境变量）
-  - 端口：8000（HTTP 代理）、8443（HTTPS 代理）、8001（Admin API）、8444（Admin SSL）
+  - `docker-entrypoint.sh`：支持 Docker Secrets（`KONG_*_FILE` 环境变量），并默认将 `KONG_ADMIN_LISTEN` 暴露为 `0.0.0.0:8001`
+  - 端口：8000（HTTP 代理）、8443（HTTPS 代理）、8001（Admin API）、8444（Admin SSL）、8002（Kong Manager GUI）
 
 ## 技术约束
 

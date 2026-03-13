@@ -159,6 +159,21 @@ pub fn build_admin_router(state: AdminState) -> Router {
 /// - `GET /__km_base__/kconfig.js` → dynamic runtime config — 动态运行时配置
 /// - `GET /__km_base__/*` → serve static files from `gui_dir`, SPA fallback to index.html — 从 `gui_dir` 提供静态文件，SPA 回退到 index.html
 pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
+    async fn serve_gui_index(index_path: std::path::PathBuf) -> axum::response::Response {
+        match tokio::fs::read(&index_path).await {
+            Ok(body) => axum::http::Response::builder()
+                .header("content-type", "text/html; charset=utf-8")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+                .into_response(),
+            Err(_) => axum::http::Response::builder()
+                .status(404)
+                .body(axum::body::Body::from("Kong Manager GUI not found"))
+                .unwrap()
+                .into_response(),
+        }
+    }
+
     let kconfig_js = format!(
         "window.K_CONFIG = {{\n  ADMIN_API_URL: \"{}\",\n  ADMIN_API_PORT: \"{}\"\n}};\n",
         admin_api_url,
@@ -171,6 +186,8 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
 
     let index_path = std::path::PathBuf::from(gui_dir).join("index.html");
     let index_fallback = index_path.clone();
+    let root_index_path = index_path.clone();
+    let spa_fallback_index_path = index_path.clone();
     let serve_dir = ServeDir::new(gui_dir)
         .not_found_service(tower::service_fn(move |_req: axum::http::Request<axum::body::Body>| {
             let path = index_fallback.clone();
@@ -192,18 +209,7 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
     Router::new()
         .route("/", get(move || async move {
             // Serve index.html directly at root, no redirect — 根路径直接返回 index.html，不重定向
-            match tokio::fs::read(&index_path).await {
-                Ok(body) => axum::http::Response::builder()
-                    .header("content-type", "text/html; charset=utf-8")
-                    .body(axum::body::Body::from(body))
-                    .unwrap()
-                    .into_response(),
-                Err(_) => axum::http::Response::builder()
-                    .status(404)
-                    .body(axum::body::Body::from("Kong Manager GUI not found"))
-                    .unwrap()
-                    .into_response(),
-            }
+            serve_gui_index(root_index_path.clone()).await
         }))
         .route("/__km_base__/kconfig.js", get(move || async move {
             axum::http::Response::builder()
@@ -214,4 +220,8 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
                 .into_response()
         }))
         .nest_service("/__km_base__", serve_dir)
+        .route("/{*path}", get(move || async move {
+            // SPA fallback for client-side routes like /services — 处理 /services 这类前端路由刷新
+            serve_gui_index(spa_fallback_index_path.clone()).await
+        }))
 }

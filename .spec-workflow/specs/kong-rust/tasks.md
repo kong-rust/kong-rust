@@ -193,6 +193,12 @@
   - _Requirements: R3_
   - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust Web 工程师 | Task: 实现所有特殊 Admin API 端点。参考 /Users/dawxy/proj/kong/kong/api/routes/ 了解各端点的响应格式。1) info.rs：GET / 返回节点信息（version、hostname、plugins.available_on_server 等），GET /status 返回 `{ database: { reachable: true }, memory: {...}, server: {...} }`。2) schemas.rs：GET /schemas/{entity} 返回实体 schema，GET /schemas/plugins/{name} 返回插件配置 schema，POST /schemas/plugins/validate 验证插件配置。3) tags.rs：GET /tags/{tag} 返回带指定标签的所有实体。4) cache.rs：GET /cache/{key} 获取缓存，DELETE /cache/{key} 删除缓存，DELETE /cache 清空所有缓存。5) debug.rs：GET/PUT /debug/node/log-level 获取/设置日志级别。6) GET /endpoints 列出所有可用端点。7) GET/POST /config 声明式配置导入导出。8) GET /plugins/enabled 列出启用的插件。9) GET /timers 计时器统计。10) GET /clustering/status 集群状态。 | Restrictions: 每个端点的响应格式必须与 Kong 完全一致。 | Success: 所有特殊端点正常工作。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
 
+- [x] 6.4 修复 Kong Manager SPA 刷新 404（kong-admin）
+  - 修改 `crates/kong-admin/src/lib.rs` 的 GUI Router
+  - 保留 `/__km_base__/*` 静态资源服务，并为 `/services`、`/routes` 等前端路由添加 SPA fallback 到 `index.html`
+  - 解决首次进入可用、浏览器刷新后服务端返回 404 的问题
+  - _Requirements: R3_
+
 ## 阶段 7：TLS 和证书管理
 
 - [x] 7.1 实现 TLS 证书管理和 SNI 匹配
@@ -452,6 +458,12 @@
   - 新增 docker-build、docker-push、docker-run、docker-stop Make 目标
   - 支持 DOCKER_TAG 和 DOCKER_REGISTRY 变量
   - 文件：`Makefile`
+
+- [x] 10.6 明确 Docker 端口语义并加固容器默认 Admin API 暴露
+  - 保持 Docker 默认配置文件查找行为与 Kong 一致，不显式指定 `/etc/kong/kong.conf.default`
+  - 修改 `docker-entrypoint.sh` — 默认设置 `KONG_ADMIN_LISTEN=0.0.0.0:8001`
+  - 明确 `8001` 为 Admin API、`8002` 为 Kong Manager GUI，`/services` 应访问 `8001`
+  - _Requirements: R3, R6_
 
 ## 阶段 11：HTTP 代理性能优化
 

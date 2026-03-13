@@ -104,6 +104,8 @@ curl http://localhost:8000/httpbin/get
 
 Kong-Rust is compatible with the official [Kong Manager](https://docs.konghq.com/gateway/latest/kong-manager/) frontend.
 
+`8001` is the Admin API port. `8002` is the Kong Manager GUI port. Admin endpoints such as `/services` are served on `8001`, not `8002`.
+
 ```bash
 # Install dependencies
 make manager-install

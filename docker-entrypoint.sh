@@ -31,6 +31,8 @@ file_env 'KONG_PG_HOST'
 # 容器日志默认值：错误日志仅 stderr，访问日志到 stdout
 export KONG_PROXY_ERROR_LOG="${KONG_PROXY_ERROR_LOG:-off}"
 export KONG_PROXY_ACCESS_LOG="${KONG_PROXY_ACCESS_LOG:-/dev/stdout}"
+# 容器默认暴露 Admin API；如需收紧监听范围可显式覆盖 KONG_ADMIN_LISTEN
+export KONG_ADMIN_LISTEN="${KONG_ADMIN_LISTEN:-0.0.0.0:8001}"
 
 # 确保 /usr/local/kong 目录可写（前缀目录）
 if [ ! -w /usr/local/kong ]; then
