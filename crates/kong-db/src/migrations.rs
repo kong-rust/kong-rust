@@ -72,10 +72,7 @@ pub async fn schema_state(pool: &PgPool) -> Result<MigrationState> {
             needs_bootstrap: true,
             executed: vec![],
             pending: vec![],
-            new_migrations: CORE_MIGRATIONS
-                .iter()
-                .map(|m| m.name.to_string())
-                .collect(),
+            new_migrations: CORE_MIGRATIONS.iter().map(|m| m.name.to_string()).collect(),
         });
     }
 
@@ -171,7 +168,10 @@ pub async fn finish(pool: &PgPool) -> Result<()> {
     }
 
     // Reserved: execute teardown here if there are pending migrations — 预留：如果有 pending migration，在此执行 teardown
-    tracing::info!("Finish 完成，处理了 {} 个 pending migration", state.pending.len());
+    tracing::info!(
+        "Finish 完成，处理了 {} 个 pending migration",
+        state.pending.len()
+    );
     Ok(())
 }
 
@@ -194,9 +194,7 @@ pub async fn reset(pool: &PgPool) -> Result<()> {
         sqlx::query(&sql)
             .execute(pool)
             .await
-            .map_err(|e| {
-                KongError::DatabaseError(format!("删除表 {} 失败: {}", table, e))
-            })?;
+            .map_err(|e| KongError::DatabaseError(format!("删除表 {} 失败: {}", table, e)))?;
         tracing::info!("已删除表: {}", table);
     }
 
@@ -265,10 +263,7 @@ async fn execute_migration(pool: &PgPool, migration: &Migration) -> Result<()> {
             .execute(&mut *tx)
             .await
             .map_err(|e| {
-                KongError::DatabaseError(format!(
-                    "执行 migration {} 失败: {}",
-                    migration.name, e
-                ))
+                KongError::DatabaseError(format!("执行 migration {} 失败: {}", migration.name, e))
             })?;
     }
 

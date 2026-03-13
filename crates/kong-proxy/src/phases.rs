@@ -20,26 +20,17 @@ pub struct PhaseRunner;
 
 impl PhaseRunner {
     /// Rewrite phase (called in request_filter, after route matching) — rewrite 阶段（request_filter 中调用，路由匹配后）
-    pub async fn run_rewrite(
-        plugins: &[ResolvedPlugin],
-        ctx: &mut RequestCtx,
-    ) -> Result<()> {
+    pub async fn run_rewrite(plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) -> Result<()> {
         PluginExecutor::execute_phase(plugins, Phase::Rewrite, ctx).await
     }
 
     /// Access phase (called in request_filter, after rewrite) — access 阶段（request_filter 中调用，rewrite 之后）
-    pub async fn run_access(
-        plugins: &[ResolvedPlugin],
-        ctx: &mut RequestCtx,
-    ) -> Result<()> {
+    pub async fn run_access(plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) -> Result<()> {
         PluginExecutor::execute_phase(plugins, Phase::Access, ctx).await
     }
 
     /// header_filter phase (called in upstream_response_filter) — header_filter 阶段（upstream_response_filter 中调用）
-    pub async fn run_header_filter(
-        plugins: &[ResolvedPlugin],
-        ctx: &mut RequestCtx,
-    ) -> Result<()> {
+    pub async fn run_header_filter(plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) -> Result<()> {
         PluginExecutor::execute_phase(plugins, Phase::HeaderFilter, ctx).await
     }
 
@@ -54,10 +45,7 @@ impl PhaseRunner {
     }
 
     /// Log phase (called in logging, always executes, even after short-circuit) — log 阶段（logging 中调用，总是执行，即使之前短路）
-    pub async fn run_log(
-        plugins: &[ResolvedPlugin],
-        ctx: &mut RequestCtx,
-    ) -> Result<()> {
+    pub async fn run_log(plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) -> Result<()> {
         PluginExecutor::execute_phase(plugins, Phase::Log, ctx).await
     }
 }

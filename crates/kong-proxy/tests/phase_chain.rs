@@ -8,8 +8,8 @@
 
 mod helpers;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use kong_core::traits::RequestCtx;
 use kong_proxy::phases::PhaseRunner;
@@ -136,10 +136,8 @@ async fn test_plugins_execute_in_priority_order() {
 #[tokio::test]
 async fn test_ctx_shared_passes_between_phases() {
     let mut rewrite_plugin = TestPlugin::new("shared-writer", 1000);
-    rewrite_plugin.set_shared_in_rewrite = Some((
-        "auth_passed".to_string(),
-        serde_json::Value::Bool(true),
-    ));
+    rewrite_plugin.set_shared_in_rewrite =
+        Some(("auth_passed".to_string(), serde_json::Value::Bool(true)));
 
     let access_plugin = TestPlugin::new("shared-reader", 900);
     let access_arc = Arc::new(access_plugin.clone());
@@ -153,7 +151,10 @@ async fn test_ctx_shared_passes_between_phases() {
 
     // Rewrite phase writes to shared — rewrite 阶段写入 shared
     let _ = PhaseRunner::run_rewrite(&resolved, &mut ctx).await;
-    assert_eq!(ctx.shared.get("auth_passed").unwrap(), &serde_json::Value::Bool(true));
+    assert_eq!(
+        ctx.shared.get("auth_passed").unwrap(),
+        &serde_json::Value::Bool(true)
+    );
 
     // Access phase can read data written by rewrite — access 阶段可以读到 rewrite 写入的数据
     let _ = PhaseRunner::run_access(&resolved, &mut ctx).await;
@@ -199,10 +200,16 @@ async fn test_empty_plugin_chain() {
     // Empty plugin chain should not error — 空插件链不应出错
     assert!(PhaseRunner::run_rewrite(&resolved, &mut ctx).await.is_ok());
     assert!(PhaseRunner::run_access(&resolved, &mut ctx).await.is_ok());
-    assert!(PhaseRunner::run_header_filter(&resolved, &mut ctx).await.is_ok());
+    assert!(PhaseRunner::run_header_filter(&resolved, &mut ctx)
+        .await
+        .is_ok());
 
     let mut body = bytes::Bytes::from("test");
-    assert!(PhaseRunner::run_body_filter(&resolved, &mut ctx, &mut body, true).await.is_ok());
+    assert!(
+        PhaseRunner::run_body_filter(&resolved, &mut ctx, &mut body, true)
+            .await
+            .is_ok()
+    );
 
     assert!(PhaseRunner::run_log(&resolved, &mut ctx).await.is_ok());
 }

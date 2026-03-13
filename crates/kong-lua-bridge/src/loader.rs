@@ -10,8 +10,33 @@ use std::path::{Path, PathBuf};
 
 use kong_core::error::{KongError, Result};
 use kong_core::traits::{Phase, PluginHandler};
+use mlua::prelude::*;
+use serde_json::{Map, Number, Value};
 
-use crate::LuaPluginHandler;
+use crate::{runtime, LuaPluginHandler};
+
+/// Resolve candidate plugin directories for the current runtime. — 解析当前运行时可用的插件目录候选列表。
+pub fn resolve_plugin_dirs(kong_prefix: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from(kong_prefix).join("plugins"),
+        PathBuf::from(kong_prefix).join("kong/plugins"),
+        PathBuf::from("/usr/local/kong/plugins"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../kong-lua-bridge/kong/plugins"),
+    ];
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("crates/kong-lua-bridge/kong/plugins"));
+    }
+
+    let mut resolved = Vec::new();
+    for candidate in candidates {
+        if candidate.exists() && !resolved.contains(&candidate) {
+            resolved.push(candidate);
+        }
+    }
+
+    resolved
+}
 
 /// Scan and load Kong Lua plugins from the specified directories — 扫描并加载指定目录下的 Kong Lua 插件
 pub fn load_lua_plugins(
@@ -43,11 +68,129 @@ pub fn load_lua_plugins(
     Ok(handlers)
 }
 
+/// Load a plugin schema.lua and convert it into JSON. — 加载插件 schema.lua 并将其转换为 JSON。
+pub fn load_plugin_schema(plugin_dirs: &[PathBuf], plugin_name: &str) -> Result<Value> {
+    let plugin_path =
+        find_plugin_path(plugin_dirs, plugin_name).ok_or_else(|| KongError::NotFound {
+            entity_type: "plugin schema".to_string(),
+            id: plugin_name.to_string(),
+        })?;
+
+    let schema_file = plugin_path.join("schema.lua");
+    let schema_code = std::fs::read_to_string(&schema_file).map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to read {}: {} — 读取 {} 失败: {}",
+            schema_file.display(),
+            e,
+            schema_file.display(),
+            e
+        ))
+    })?;
+
+    let lua = unsafe { Lua::unsafe_new() };
+    runtime::configure_package_path(&lua, &plugin_path)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::set_phase(&lua, "init").map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::install(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+    crate::pdk::inject_ngx_compat(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+
+    let schema_value: LuaValue = lua.load(&schema_code).eval().map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to load schema.lua: {} — 加载 schema.lua 失败: {}",
+            e, e
+        ))
+    })?;
+
+    lua_value_to_json(schema_value).map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to convert plugin schema to JSON: {} — 将插件 schema 转为 JSON 失败: {}",
+            e, e
+        ))
+    })
+}
+
+fn find_plugin_path(plugin_dirs: &[PathBuf], plugin_name: &str) -> Option<PathBuf> {
+    for dir in plugin_dirs {
+        let plugin_path = dir.join(plugin_name);
+        if plugin_path.join("schema.lua").exists() {
+            return Some(plugin_path);
+        }
+    }
+    None
+}
+
+fn lua_value_to_json(value: LuaValue) -> LuaResult<Value> {
+    match value {
+        LuaValue::Nil => Ok(Value::Null),
+        LuaValue::Boolean(value) => Ok(Value::Bool(value)),
+        LuaValue::Integer(value) => Ok(Value::Number(Number::from(value))),
+        LuaValue::Number(value) => Ok(Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)),
+        LuaValue::String(value) => Ok(Value::String(value.to_string_lossy().to_string())),
+        LuaValue::Table(table) => table_to_json(table),
+        LuaValue::Function(_) => Ok(Value::String("[function]".to_string())),
+        LuaValue::Thread(_) => Ok(Value::String("[thread]".to_string())),
+        LuaValue::UserData(_)
+        | LuaValue::LightUserData(_)
+        | LuaValue::Error(_)
+        | LuaValue::Other(_) => Ok(Value::String("[userdata]".to_string())),
+    }
+}
+
+fn table_to_json(table: LuaTable) -> LuaResult<Value> {
+    let len = table.raw_len();
+    let mut is_array = len > 0;
+
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, _) = pair?;
+        match key {
+            LuaValue::Integer(index) if index >= 1 && (index as usize) <= len => {}
+            LuaValue::Number(index)
+                if index.fract() == 0.0 && index >= 1.0 && (index as usize) <= len => {}
+            _ => {
+                is_array = false;
+                break;
+            }
+        }
+    }
+
+    if is_array {
+        let mut items = Vec::with_capacity(len);
+        for index in 1..=len {
+            items.push(lua_value_to_json(table.raw_get(index)?)?);
+        }
+        return Ok(Value::Array(items));
+    }
+
+    let mut object = Map::new();
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        let key = match key {
+            LuaValue::String(value) => value.to_string_lossy().to_string(),
+            LuaValue::Integer(value) => value.to_string(),
+            LuaValue::Number(value) => value.to_string(),
+            LuaValue::Boolean(value) => value.to_string(),
+            _ => continue,
+        };
+        object.insert(key, lua_value_to_json(value)?);
+    }
+
+    Ok(Value::Object(object))
+}
+
 /// Load a single Lua plugin — 加载单个 Lua 插件
 fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler> {
     let handler_file = plugin_path.join("handler.lua");
-    let handler_code = std::fs::read_to_string(&handler_file)
-        .map_err(|e| KongError::LuaError(format!("Failed to read {}: {} — 读取 {} 失败: {}", handler_file.display(), e, handler_file.display(), e)))?;
+    let handler_code = std::fs::read_to_string(&handler_file).map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to read {}: {} — 读取 {} 失败: {}",
+            handler_file.display(),
+            e,
+            handler_file.display(),
+            e
+        ))
+    })?;
 
     // Extract priority and version from handler.lua — 从 handler.lua 中提取优先级和版本
     let priority = extract_priority(&handler_code).unwrap_or(1000);

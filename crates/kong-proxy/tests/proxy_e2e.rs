@@ -26,21 +26,13 @@ fn make_route(
     Route {
         id,
         name: Some(name.to_string()),
-        paths: if paths.is_empty() {
-            None
-        } else {
-            Some(paths)
-        },
+        paths: if paths.is_empty() { None } else { Some(paths) },
         methods: if methods.is_empty() {
             None
         } else {
             Some(methods)
         },
-        hosts: if hosts.is_empty() {
-            None
-        } else {
-            Some(hosts)
-        },
+        hosts: if hosts.is_empty() { None } else { Some(hosts) },
         service: Some(ForeignKey::new(service_id)),
         protocols: vec![Protocol::Http, Protocol::Https],
         strip_path: true,
@@ -89,10 +81,7 @@ fn test_route_matching_by_path() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("api-route")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("api-route"));
 
     // /web path should match web-route — /web 路径应匹配 web-route
     let ctx = RequestContext {
@@ -105,10 +94,7 @@ fn test_route_matching_by_path() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("web-route")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("web-route"));
 }
 
 #[test]
@@ -145,10 +131,7 @@ fn test_route_matching_by_host() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("api-host")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("api-host"));
 }
 
 #[test]
@@ -186,10 +169,7 @@ fn test_route_matching_by_method() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("get-only")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("get-only"));
 
     // POST 请求
     let ctx = RequestContext {
@@ -202,10 +182,7 @@ fn test_route_matching_by_method() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("post-only")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("post-only"));
 }
 
 #[test]
@@ -526,10 +503,7 @@ fn test_router_hot_update() {
     };
     let result = router.find_route(&ctx);
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap().route_name.as_deref(),
-        Some("route-a")
-    );
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("route-a"));
 }
 
 // ========== Plugin system integration tests — 插件系统集成测试 ==========
@@ -561,12 +535,8 @@ async fn test_plugin_phase_execution_no_plugins() {
     let mut ctx = RequestCtx::new();
 
     // Executing an empty plugin chain should not error — 空插件链执行不应出错
-    let result = PluginExecutor::execute_phase(
-        &resolved,
-        kong_core::traits::Phase::Access,
-        &mut ctx,
-    )
-    .await;
+    let result =
+        PluginExecutor::execute_phase(&resolved, kong_core::traits::Phase::Access, &mut ctx).await;
     assert!(result.is_ok());
     assert!(!ctx.is_short_circuited());
 }

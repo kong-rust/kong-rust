@@ -79,18 +79,25 @@ impl ExpressionsRouter {
             .iter()
             .filter(|route| {
                 // Only include routes with HTTP-compatible protocols — 仅包含 HTTP 兼容协议的路由
-                route.protocols.iter().any(|p| matches!(p,
-                    Protocol::Http | Protocol::Https |
-                    Protocol::Grpc | Protocol::Grpcs |
-                    Protocol::Ws | Protocol::Wss
-                ))
+                route.protocols.iter().any(|p| {
+                    matches!(
+                        p,
+                        Protocol::Http
+                            | Protocol::Https
+                            | Protocol::Grpc
+                            | Protocol::Grpcs
+                            | Protocol::Ws
+                            | Protocol::Wss
+                    )
+                })
             })
             .filter_map(|route| {
                 let expression_str = route.expression.as_deref()?;
                 let expression = parse_expression(expression_str).ok()?;
 
                 let service_id = route.service.as_ref().map(|fk| fk.id);
-                let protocols: Vec<String> = route.protocols.iter().map(|p| p.to_string()).collect();
+                let protocols: Vec<String> =
+                    route.protocols.iter().map(|p| p.to_string()).collect();
 
                 Some(ExpressionRoute {
                     route_id: route.id,
@@ -111,10 +118,7 @@ impl ExpressionsRouter {
         // Sort by priority descending — 按 priority 降序排列
         expr_routes.sort_by(|a, b| b.priority.cmp(&a.priority));
 
-        tracing::info!(
-            "表达式路由器初始化完成: {} 条路由",
-            expr_routes.len()
-        );
+        tracing::info!("表达式路由器初始化完成: {} 条路由", expr_routes.len());
 
         Self {
             routes: expr_routes,
@@ -276,8 +280,7 @@ fn find_operator(input: &str, op: &str) -> Option<usize> {
                 if input[i..].starts_with(op) {
                     // Ensure spaces before and after — 确保前后有空格
                     let before_ok = i == 0 || bytes[i - 1] == b' ';
-                    let after_ok = i + op.len() >= bytes.len()
-                        || bytes[i + op.len()] == b' ';
+                    let after_ok = i + op.len() >= bytes.len() || bytes[i + op.len()] == b' ';
                     if before_ok && after_ok {
                         return Some(i);
                     }
@@ -311,8 +314,8 @@ fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
                 "==" => Ok(CompiledExpression::Eq(field, value)),
                 "!=" => Ok(CompiledExpression::Ne(field, value)),
                 "~" => {
-                    let regex = Regex::new(&value)
-                        .map_err(|e| format!("无效的正则表达式: {}", e))?;
+                    let regex =
+                        Regex::new(&value).map_err(|e| format!("无效的正则表达式: {}", e))?;
                     Ok(CompiledExpression::Regex(field, regex))
                 }
                 _ => unreachable!(),
@@ -350,9 +353,7 @@ fn parse_comparison(input: &str) -> Result<CompiledExpression, String> {
 /// Strip surrounding quotes from a string — 去除字符串两端的引号
 fn strip_quotes(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -404,8 +405,7 @@ mod tests {
 
     #[test]
     fn test_parse_or() {
-        let expr =
-            parse_expression("http.method == \"GET\" || http.method == \"POST\"").unwrap();
+        let expr = parse_expression("http.method == \"GET\" || http.method == \"POST\"").unwrap();
 
         assert!(evaluate(&expr, &make_ctx("GET", "localhost", "/")));
         assert!(evaluate(&expr, &make_ctx("POST", "localhost", "/")));
@@ -414,8 +414,7 @@ mod tests {
 
     #[test]
     fn test_parse_in() {
-        let expr =
-            parse_expression("http.method in \"GET\", \"POST\", \"PUT\"").unwrap();
+        let expr = parse_expression("http.method in \"GET\", \"POST\", \"PUT\"").unwrap();
 
         assert!(evaluate(&expr, &make_ctx("GET", "localhost", "/")));
         assert!(evaluate(&expr, &make_ctx("PUT", "localhost", "/")));

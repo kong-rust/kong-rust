@@ -8,7 +8,7 @@
 
 ### 语言
 
-- **语言**：Rust（Edition 2021，最低版本 1.84）
+- **语言**：Rust（Edition 2021，最低版本 1.94.0）
 - **构建工具**：Cargo（workspace 模式）
 - **包管理**：crates.io
 

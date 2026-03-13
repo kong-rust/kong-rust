@@ -95,8 +95,7 @@ impl KongCache {
 
     /// Set cache value (positive cache) — 设置缓存值（正缓存）
     pub fn set(&self, key: &str, value: Value) {
-        self.cache
-            .insert(key.to_string(), CacheEntry::Hit(value));
+        self.cache.insert(key.to_string(), CacheEntry::Hit(value));
     }
 
     /// Set negative cache (mark entity as non-existent) — 设置负缓存（标记实体不存在）
@@ -153,9 +152,8 @@ impl KongCache {
     /// Get a cached entity — 获取缓存的实体
     pub fn get_entity<T: Entity>(&self, id: &uuid::Uuid) -> Option<Option<T>> {
         let key = Self::entity_cache_key::<T>(id);
-        self.get(&key).map(|opt| {
-            opt.and_then(|v| serde_json::from_value(v).ok())
-        })
+        self.get(&key)
+            .map(|opt| opt.and_then(|v| serde_json::from_value(v).ok()))
     }
 
     /// Cache an entity — 缓存实体

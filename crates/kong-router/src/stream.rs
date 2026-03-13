@@ -146,10 +146,7 @@ impl StreamRouter {
                 .then(a.created_at.cmp(&b.created_at))
         });
 
-        tracing::info!(
-            "Stream 路由器初始化完成: {} 条路由",
-            processed.len()
-        );
+        tracing::info!("Stream 路由器初始化完成: {} 条路由", processed.len());
 
         Self { routes: processed }
     }
@@ -229,12 +226,10 @@ impl StreamRouter {
 
 /// Check if a route is a Stream route — 判断路由是否为 Stream 路由
 fn is_stream_route(route: &Route) -> bool {
-    route.protocols.iter().any(|p| {
-        matches!(
-            p,
-            Protocol::Tcp | Protocol::Tls | Protocol::TlsPassthrough
-        )
-    })
+    route
+        .protocols
+        .iter()
+        .any(|p| matches!(p, Protocol::Tcp | Protocol::Tls | Protocol::TlsPassthrough))
 }
 
 /// Process a single Stream route — 处理单个 Stream 路由
@@ -258,7 +253,11 @@ fn process_stream_route(route: &Route) -> Option<ProcessedStreamRoute> {
     let sources: Vec<CidrPortMatcher> = route
         .sources
         .as_ref()
-        .map(|s| s.iter().map(|cp| CidrPortMatcher::from_cidr_port(cp)).collect())
+        .map(|s| {
+            s.iter()
+                .map(|cp| CidrPortMatcher::from_cidr_port(cp))
+                .collect()
+        })
         .unwrap_or_default();
 
     if !sources.is_empty() {
@@ -270,7 +269,11 @@ fn process_stream_route(route: &Route) -> Option<ProcessedStreamRoute> {
     let destinations: Vec<CidrPortMatcher> = route
         .destinations
         .as_ref()
-        .map(|d| d.iter().map(|cp| CidrPortMatcher::from_cidr_port(cp)).collect())
+        .map(|d| {
+            d.iter()
+                .map(|cp| CidrPortMatcher::from_cidr_port(cp))
+                .collect()
+        })
         .unwrap_or_default();
 
     if !destinations.is_empty() {
@@ -495,7 +498,10 @@ mod tests {
             vec![Protocol::Tcp],
             None,
             None,
-            Some(vec![CidrPort { ip: None, port: Some(9000) }]),
+            Some(vec![CidrPort {
+                ip: None,
+                port: Some(9000),
+            }]),
         );
         let r2 = make_stream_route(
             "src-and-dest",
@@ -505,7 +511,10 @@ mod tests {
                 ip: Some("10.0.0.0/8".to_string()),
                 port: None,
             }]),
-            Some(vec![CidrPort { ip: None, port: Some(9000) }]),
+            Some(vec![CidrPort {
+                ip: None,
+                port: Some(9000),
+            }]),
         );
         let router = StreamRouter::new(&[r1, r2]);
 

@@ -68,13 +68,9 @@ impl Router {
     /// Build a router from route list and router flavor — 从路由列表和路由风格构建路由器
     pub fn new(routes: &[Route], router_flavor: &str) -> Self {
         match router_flavor {
-            "expressions" => {
-                Router::Expressions(expressions::ExpressionsRouter::new(routes))
-            }
+            "expressions" => Router::Expressions(expressions::ExpressionsRouter::new(routes)),
             // Both traditional / traditional_compatible use the traditional router — traditional / traditional_compatible 都使用传统路由器
-            _ => {
-                Router::Traditional(traditional::TraditionalRouter::new(routes))
-            }
+            _ => Router::Traditional(traditional::TraditionalRouter::new(routes)),
         }
     }
 

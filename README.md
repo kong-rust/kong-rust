@@ -46,7 +46,7 @@ kong-server (binary entry point)
 
 ### Prerequisites
 
-- Rust 1.84+ (with Cargo)
+- Rust 1.94.0+ (with Cargo)
 - PostgreSQL 15+ (for database mode), or none (for db-less mode)
 - Docker (optional, for managed PostgreSQL)
 

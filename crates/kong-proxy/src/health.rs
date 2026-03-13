@@ -143,11 +143,7 @@ impl HealthChecker {
 
             if config.healthy_successes > 0 && health.successes >= config.healthy_successes {
                 if health.status != HealthStatus::Healthy {
-                    tracing::info!(
-                        "目标 {} ({}) 恢复健康",
-                        target_addr,
-                        upstream_name
-                    );
+                    tracing::info!("目标 {} ({}) 恢复健康", target_addr, upstream_name);
                 }
                 health.status = HealthStatus::Healthy;
             }
@@ -155,12 +151,7 @@ impl HealthChecker {
     }
 
     /// Report passive health check event — HTTP response — 报告被动健康检查事件 — HTTP 响应
-    pub fn report_http_status(
-        &self,
-        upstream_name: &str,
-        target_addr: &str,
-        status_code: u16,
-    ) {
+    pub fn report_http_status(&self, upstream_name: &str, target_addr: &str, status_code: u16) {
         self.update_health(upstream_name, target_addr, |health, config| {
             if config
                 .passive_unhealthy_statuses
@@ -237,10 +228,7 @@ impl HealthChecker {
     }
 
     /// Get health status of all targets under an upstream — 获取 upstream 下所有目标的健康状态
-    pub fn get_upstream_health(
-        &self,
-        upstream_name: &str,
-    ) -> HashMap<String, HealthStatus> {
+    pub fn get_upstream_health(&self, upstream_name: &str) -> HashMap<String, HealthStatus> {
         if let Ok(targets) = self.targets.read() {
             if let Some(target_map) = targets.get(upstream_name) {
                 return target_map
@@ -320,12 +308,7 @@ impl HealthChecker {
 
         for (upstream_name, addr, path) in check_tasks {
             let url = format!("http://{}{}", addr, path);
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                do_http_check(&url),
-            )
-            .await
-            {
+            match tokio::time::timeout(Duration::from_secs(5), do_http_check(&url)).await {
                 Ok(Ok(status)) => {
                     self.report_http_status(&upstream_name, &addr, status);
                 }
@@ -351,9 +334,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let url_without_scheme = url
-        .strip_prefix("http://")
-        .unwrap_or(url);
+    let url_without_scheme = url.strip_prefix("http://").unwrap_or(url);
 
     // Parse address and path — 解析地址和路径
     let (addr, path) = match url_without_scheme.find('/') {
@@ -361,9 +342,7 @@ async fn do_http_check(url: &str) -> std::result::Result<u16, String> {
         None => (url_without_scheme, "/"),
     };
 
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
 
     // Send a simple HTTP/1.1 GET request — 发送简单的 HTTP/1.1 GET 请求
     let host = addr.split(':').next().unwrap_or(addr);
@@ -412,11 +391,7 @@ mod tests {
             ..Default::default()
         };
 
-        hc.register_upstream(
-            "test-upstream",
-            &["10.0.0.1:80".to_string()],
-            config,
-        );
+        hc.register_upstream("test-upstream", &["10.0.0.1:80".to_string()], config);
 
         // Initial state: healthy — 初始状态: 健康
         assert!(hc.is_healthy("test-upstream", "10.0.0.1:80"));

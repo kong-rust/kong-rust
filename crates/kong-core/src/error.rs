@@ -9,10 +9,7 @@ pub enum KongError {
 
     /// Entity not found — 实体未找到
     #[error("{entity_type} 未找到: {id}")]
-    NotFound {
-        entity_type: String,
-        id: String,
-    },
+    NotFound { entity_type: String, id: String },
 
     /// Schema validation error — Schema 验证错误
     #[error("schema 验证失败: {0}")]

@@ -228,7 +228,9 @@ fn extract_column_value(row: &PgRow, col: &ColumnDef) -> Result<Value> {
             let val: Option<Uuid> = row
                 .try_get(db_col)
                 .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
-            Ok(val.map(|v| Value::String(v.to_string())).unwrap_or(Value::Null))
+            Ok(val
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null))
         }
         ColumnType::Text => {
             let val: Option<String> = row
@@ -314,16 +316,20 @@ fn extract_column_value(row: &PgRow, col: &ColumnDef) -> Result<Value> {
             let val: Option<Vec<Value>> = row
                 .try_get(db_col)
                 .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
-            Ok(val
-                .map(|v| Value::Array(v))
-                .unwrap_or(Value::Null))
+            Ok(val.map(|v| Value::Array(v)).unwrap_or(Value::Null))
         }
         ColumnType::UuidArray => {
             let val: Option<Vec<Uuid>> = row
                 .try_get(db_col)
                 .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
             Ok(val
-                .map(|v| Value::Array(v.into_iter().map(|u| Value::String(u.to_string())).collect()))
+                .map(|v| {
+                    Value::Array(
+                        v.into_iter()
+                            .map(|u| Value::String(u.to_string()))
+                            .collect(),
+                    )
+                })
                 .unwrap_or(Value::Null))
         }
         ColumnType::ForeignKey => {
@@ -418,14 +424,11 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
             }
             // Also supports passing UUID string directly — 也支持直接传 UUID 字符串
             if let Some(s) = value.as_str() {
-                let uuid = Uuid::parse_str(s).map_err(|e| {
-                    KongError::ValidationError(format!("无效的外键 UUID: {}", e))
-                })?;
+                let uuid = Uuid::parse_str(s)
+                    .map_err(|e| KongError::ValidationError(format!("无效的外键 UUID: {}", e)))?;
                 return Ok(SqlParam::Uuid(Some(uuid)));
             }
-            Err(KongError::ValidationError(
-                "外键字段格式无效".to_string(),
-            ))
+            Err(KongError::ValidationError("外键字段格式无效".to_string()))
         }
         ColumnType::Text => {
             let s = value
@@ -493,11 +496,9 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
             let strings: std::result::Result<Vec<String>, _> = arr
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| {
-                            KongError::ValidationError("数组元素必须是字符串".to_string())
-                        })
+                    v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        KongError::ValidationError("数组元素必须是字符串".to_string())
+                    })
                 })
                 .collect();
             Ok(SqlParam::TextArray(Some(strings?)))
@@ -726,9 +727,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             .ok_or_else(|| KongError::ValidationError("更新数据必须是 JSON 对象".to_string()))?;
 
         if obj.is_empty() {
-            return Err(KongError::ValidationError(
-                "更新数据不能为空".to_string(),
-            ));
+            return Err(KongError::ValidationError("更新数据不能为空".to_string()));
         }
 
         let table = &self.schema.table_name;
@@ -748,10 +747,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
                 let param = json_to_sql_param(value, &col.col_type)?;
                 let placeholder = match &param {
                     SqlParam::TimestampEpoch(_) | SqlParam::TimestampEpochMs(_) => {
-                        format!(
-                            "TO_TIMESTAMP(${}) AT TIME ZONE 'UTC'",
-                            param_idx
-                        )
+                        format!("TO_TIMESTAMP(${}) AT TIME ZONE 'UTC'", param_idx)
                     }
                     _ => format!("${}", param_idx),
                 };
@@ -762,18 +758,14 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         }
 
         // Auto-update updated_at — 自动更新 updated_at
-        if self.schema.find_column("updated_at").is_some()
-            && !obj.contains_key("updated_at")
-        {
+        if self.schema.find_column("updated_at").is_some() && !obj.contains_key("updated_at") {
             set_parts.push(format!(
                 "\"updated_at\" = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
             ));
         }
 
         if set_parts.is_empty() {
-            return Err(KongError::ValidationError(
-                "没有可更新的字段".to_string(),
-            ));
+            return Err(KongError::ValidationError("没有可更新的字段".to_string()));
         }
 
         // WHERE clause — WHERE 子句
@@ -855,9 +847,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         // Determine conflict constraint — 确定冲突约束
         let conflict_column = match pk {
             PrimaryKey::Id(_) => "id".to_string(),
-            PrimaryKey::EndpointKey(_) => {
-                T::endpoint_key().unwrap_or("id").to_string()
-            }
+            PrimaryKey::EndpointKey(_) => T::endpoint_key().unwrap_or("id").to_string(),
         };
 
         let sql = format!(
@@ -988,12 +978,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| {
-                format!(
-                    "/{entity}?offset={o}",
-                    entity = T::table_name()
-                )
-            }),
+            next: offset.map(|o| format!("/{entity}?offset={o}", entity = T::table_name())),
         })
     }
 }
@@ -1043,9 +1028,7 @@ fn bind_param<'q>(
             // Bind as f64 for TO_TIMESTAMP() — 绑定 f64 用于 TO_TIMESTAMP()
             query.bind(v.map(|n| n as f64))
         }
-        SqlParam::TimestampEpochMs(v) => {
-            query.bind(v)
-        }
+        SqlParam::TimestampEpochMs(v) => query.bind(v),
     }
 }
 
@@ -1058,15 +1041,9 @@ fn map_sqlx_error(err: sqlx::Error, entity_type: &str) -> KongError {
 
             match code.as_ref() {
                 // 23505: unique_violation
-                "23505" => KongError::UniqueViolation(format!(
-                    "{}: {}",
-                    entity_type, message
-                )),
+                "23505" => KongError::UniqueViolation(format!("{}: {}", entity_type, message)),
                 // 23503: foreign_key_violation
-                "23503" => KongError::ForeignKeyViolation(format!(
-                    "{}: {}",
-                    entity_type, message
-                )),
+                "23503" => KongError::ForeignKeyViolation(format!("{}: {}", entity_type, message)),
                 // 23502: not_null_violation
                 "23502" => KongError::ValidationError(format!(
                     "{}: 必填字段为空 - {}",

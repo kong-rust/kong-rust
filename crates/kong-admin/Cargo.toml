@@ -8,6 +8,7 @@ kong-core = { workspace = true }
 kong-config = { workspace = true }
 kong-db = { workspace = true }
 kong-proxy = { workspace = true }
+kong-lua-bridge = { workspace = true }
 kong-router = { workspace = true }
 kong-plugin-system = { workspace = true }
 serde = { workspace = true }

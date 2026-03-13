@@ -87,20 +87,25 @@ kong-rust/
 │   ├── kong-lua-bridge/          # Lua 兼容层（mlua + LuaJIT）
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs            # LuaBridge 入口
+│   │   │   ├── lib.rs            # LuaBridge 入口 + LuaPluginHandler
+│   │   │   ├── loader.rs         # Lua 插件加载器（handler.lua / schema.lua）
+│   │   │   ├── metrics.rs        # Prometheus exporter 收集器（status /metrics）
+│   │   │   ├── runtime.rs        # Lua 运行时安装（package.path / phase / compat bootstrap）
 │   │   │   ├── vm.rs             # LuaJIT VM 池管理（per-worker）
-│   │   │   ├── loader.rs         # Lua 插件加载器 + ngx.* 兼容层
 │   │   │   └── pdk/
-│   │   │       └── mod.rs        # PDK 接口实现（kong.request/response/service/...）
+│   │   │       ├── mod.rs        # PDK 入口
+│   │   │       ├── kong.rs       # kong.* 命名空间兼容
+│   │   │       └── ngx.rs        # ngx.* 兼容层（含进程级 ngx.shared）
 │   │   └── tests/
-│   │       └── lua_plugin_compat.rs # Lua 插件兼容性测试
+│   │       ├── lua_plugin_compat.rs # Lua 插件兼容性测试
+│   │       └── prometheus_plugin_compat.rs # 官方 prometheus 插件兼容性测试
 │   │
 │   ├── kong-admin/               # Admin API（axum）
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs            # Admin API 应用（路由注册、中间件、AppState）
+│   │   │   ├── lib.rs            # Admin API / Status API 路由注册、中间件、AppState
 │   │   │   └── handlers/
-│   │   │       └── mod.rs        # CRUD handlers + 特殊端点
+│   │   │       └── mod.rs        # CRUD handlers + /status + /metrics + 特殊端点
 │   │   └── tests/
 │   │       └── admin_api_compat.rs # Admin API 兼容性测试
 │   │
@@ -255,8 +260,8 @@ kong-config, kong-router, kong-plugin-system
     ↑
 kong-db（依赖 kong-core + kong-config）
     ↑
-kong-lua-bridge（依赖 kong-core + kong-db）
-kong-admin（依赖 kong-core + kong-config + kong-db + kong-plugin-system）
+kong-lua-bridge（依赖 kong-core + kong-config + kong-db）
+kong-admin（依赖 kong-core + kong-config + kong-db + kong-plugin-system + kong-proxy + kong-lua-bridge + kong-router）
 kong-proxy（依赖除 kong-admin 外的所有 crate）
 kong-cluster（依赖 kong-core + kong-config + kong-db）
     ↑
@@ -266,8 +271,8 @@ kong-server（顶层入口，依赖所有 crate）
 **边界规则：**
 - `kong-core` 只包含数据结构和 trait，不包含业务逻辑
 - `kong-db` 不依赖 `kong-router` 或 `kong-proxy`（数据层不感知代理逻辑）
-- `kong-admin` 不依赖 `kong-proxy`（Admin API 和代理引擎独立）
 - `kong-lua-bridge` 不依赖 `kong-proxy`（Lua 桥接通过 trait 抽象解耦）
+- `kong-admin` 可以依赖 `kong-proxy` 的共享状态，但不能承载核心转发逻辑（Admin/Status 面与代理面分层）
 
 ## 代码规模指导
 

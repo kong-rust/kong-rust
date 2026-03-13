@@ -220,7 +220,8 @@ impl Default for KongConfig {
             admin_listen: parse_listen_addresses(
                 "127.0.0.1:8001 reuseport backlog=16384, 127.0.0.1:8444 http2 ssl reuseport backlog=16384",
             ).unwrap_or_default(),
-            status_listen: parse_listen_addresses("off").unwrap_or_default(),
+            status_listen: parse_listen_addresses("127.0.0.1:8007 reuseport backlog=16384")
+                .unwrap_or_default(),
             stream_listen: parse_listen_addresses("off").unwrap_or_default(),
             admin_gui_listen: parse_listen_addresses(
                 "0.0.0.0:8002, 0.0.0.0:8445 ssl",
@@ -423,12 +424,8 @@ impl KongConfig {
             "anonymous_reports" => self.anonymous_reports = parse_bool(value),
 
             // Listeners — 监听器
-            "proxy_listen" => {
-                self.proxy_listen = parse_listen_addresses(value).unwrap_or_default()
-            }
-            "admin_listen" => {
-                self.admin_listen = parse_listen_addresses(value).unwrap_or_default()
-            }
+            "proxy_listen" => self.proxy_listen = parse_listen_addresses(value).unwrap_or_default(),
+            "admin_listen" => self.admin_listen = parse_listen_addresses(value).unwrap_or_default(),
             "status_listen" => {
                 self.status_listen = parse_listen_addresses(value).unwrap_or_default()
             }
@@ -464,9 +461,7 @@ impl KongConfig {
             "pg_max_concurrent_queries" => {
                 self.pg_max_concurrent_queries = value.parse().unwrap_or(0)
             }
-            "pg_semaphore_timeout" => {
-                self.pg_semaphore_timeout = value.parse().unwrap_or(60000)
-            }
+            "pg_semaphore_timeout" => self.pg_semaphore_timeout = value.parse().unwrap_or(60000),
             "pg_keepalive_timeout" => self.pg_keepalive_timeout = value.parse().ok(),
             "pg_pool_size" => self.pg_pool_size = value.parse().ok(),
             "pg_backlog" => self.pg_backlog = value.parse().ok(),
@@ -499,9 +494,7 @@ impl KongConfig {
             "db_cache_ttl" => self.db_cache_ttl = value.parse().unwrap_or(0),
             "db_cache_neg_ttl" => self.db_cache_neg_ttl = value.parse().ok(),
             "db_resurrect_ttl" => self.db_resurrect_ttl = value.parse().unwrap_or(30),
-            "db_cache_warmup_entities" => {
-                self.db_cache_warmup_entities = parse_array(value)
-            }
+            "db_cache_warmup_entities" => self.db_cache_warmup_entities = parse_array(value),
             "db_update_frequency" => self.db_update_frequency = value.parse().unwrap_or(5),
             "db_update_propagation" => self.db_update_propagation = value.parse().unwrap_or(0),
 
@@ -537,9 +530,7 @@ impl KongConfig {
             "client_ssl_cert" => self.client_ssl_cert = none_if_empty(value),
             "client_ssl_cert_key" => self.client_ssl_cert_key = none_if_empty(value),
 
-            "lua_ssl_trusted_certificate" => {
-                self.lua_ssl_trusted_certificate = parse_array(value)
-            }
+            "lua_ssl_trusted_certificate" => self.lua_ssl_trusted_certificate = parse_array(value),
             "lua_ssl_verify_depth" => self.lua_ssl_verify_depth = value.parse().unwrap_or(1),
             "lua_ssl_protocols" => self.lua_ssl_protocols = value.to_string(),
 
@@ -605,9 +596,7 @@ impl KongConfig {
 
             // Observability — 可观测性
             "tracing_instrumentations" => self.tracing_instrumentations = parse_array(value),
-            "tracing_sampling_rate" => {
-                self.tracing_sampling_rate = value.parse().unwrap_or(0.01)
-            }
+            "tracing_sampling_rate" => self.tracing_sampling_rate = value.parse().unwrap_or(0.01),
 
             // Proxy 扩展配置
             // Proxy 扩展配置
@@ -636,7 +625,8 @@ impl KongConfig {
 
             // nginx_* dynamic directives — nginx_* 动态指令
             _ if key.starts_with("nginx_") => {
-                self.nginx_directives.insert(key.to_string(), value.to_string());
+                self.nginx_directives
+                    .insert(key.to_string(), value.to_string());
             }
 
             // Store other unknown config in raw — 其他未知配置存入 raw

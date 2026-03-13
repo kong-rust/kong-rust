@@ -91,6 +91,7 @@ RUN chmod +x /docker-entrypoint.sh
 
 # 复制默认配置文件（如果存在）— Copy default config (if exists)
 COPY kong.conf.default /etc/kong/kong.conf.default
+COPY --from=builder /build/crates/kong-lua-bridge/kong/plugins/ /usr/local/kong/plugins/
 
 # Kong Manager GUI 静态文件 — Kong Manager GUI static files
 COPY --from=gui-builder /gui/dist/ /usr/local/kong/gui/
@@ -112,4 +113,3 @@ HEALTHCHECK --interval=60s --timeout=10s --retries=10 \
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["kong", "docker-start"]
-

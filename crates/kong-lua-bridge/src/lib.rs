@@ -6,15 +6,17 @@
 //! - Load and execute Lua plugins — 加载和执行 Lua 插件
 //! - Provide ngx.* compatibility layer — 提供 ngx.* 兼容层
 
-pub mod pdk;
-pub mod vm;
 pub mod loader;
+pub mod metrics;
+pub mod pdk;
+pub mod runtime;
+pub mod vm;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use kong_core::error::{KongError, Result};
 use kong_core::traits::{Phase, PluginConfig, PluginHandler, RequestCtx};
 use mlua::prelude::*;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Lua plugin handler — wraps the lifecycle of a Lua plugin — Lua 插件 handler — 封装一个 Lua 插件的生命周期
 pub struct LuaPluginHandler {
@@ -62,6 +64,13 @@ impl PluginHandler for LuaPluginHandler {
         &self.name
     }
 
+    fn has_body_filter(&self) -> bool {
+        self.phases
+            .get(&Phase::BodyFilter)
+            .copied()
+            .unwrap_or(false)
+    }
+
     async fn access(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
         if !self.phases.get(&Phase::Access).copied().unwrap_or(false) {
             return Ok(());
@@ -79,7 +88,12 @@ impl PluginHandler for LuaPluginHandler {
     }
 
     async fn header_filter(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
-        if !self.phases.get(&Phase::HeaderFilter).copied().unwrap_or(false) {
+        if !self
+            .phases
+            .get(&Phase::HeaderFilter)
+            .copied()
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         execute_lua_phase(&self.name, &self.plugin_path, "header_filter", config, ctx)
@@ -90,6 +104,26 @@ impl PluginHandler for LuaPluginHandler {
             return Ok(());
         }
         execute_lua_phase(&self.name, &self.plugin_path, "log", config, ctx)
+    }
+
+    async fn init_worker(&self, config: &PluginConfig) -> Result<()> {
+        if !self
+            .phases
+            .get(&Phase::InitWorker)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        let mut ctx = RequestCtx::default();
+        execute_lua_phase(
+            &self.name,
+            &self.plugin_path,
+            "init_worker",
+            config,
+            &mut ctx,
+        )
     }
 }
 
@@ -103,28 +137,16 @@ fn execute_lua_phase(
 ) -> Result<()> {
     let lua = unsafe { Lua::unsafe_new() };
 
-    // Set package.path to include the plugin directory — 设置 package.path 包含插件目录
-    let plugin_dir = plugin_path.parent().unwrap_or(plugin_path.as_path());
-    let package_path = format!(
-        "{}/?.lua;{}/?.lua",
-        plugin_dir.display(),
-        plugin_path.display()
-    );
-
-    lua.load(format!(
-        "package.path = '{}' .. ';' .. package.path",
-        package_path
-    ))
-    .exec()
-    .map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::configure_package_path(&lua, plugin_path)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::set_phase(&lua, "init").map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::install(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
 
     // Inject PDK (kong global table) — 注入 PDK（kong 全局表）
-    pdk::inject_kong_pdk(&lua, ctx)
-        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::inject_kong_pdk(&lua, ctx).map_err(|e| KongError::LuaError(e.to_string()))?;
 
     // Inject ngx compatibility layer — 注入 ngx 兼容层
-    pdk::inject_ngx_compat(&lua)
-        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::inject_ngx_compat(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
 
     // Load plugin handler.lua — 加载插件 handler.lua
     let handler_path = plugin_path.join("handler.lua");
@@ -139,35 +161,64 @@ fn execute_lua_phase(
     }
 
     // Execute handler — 执行 handler
-    let handler_code = std::fs::read_to_string(&handler_path)
-        .map_err(|e| KongError::LuaError(format!("Failed to read handler.lua: {} — 读取 handler.lua 失败: {}", e, e)))?;
+    let handler_code = std::fs::read_to_string(&handler_path).map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to read handler.lua: {} — 读取 handler.lua 失败: {}",
+            e, e
+        ))
+    })?;
 
-    let handler_table: LuaTable = lua
-        .load(&handler_code)
-        .eval()
-        .map_err(|e| KongError::LuaError(format!("Failed to load handler.lua: {} — 加载 handler.lua 失败: {}", e, e)))?;
+    let handler_table: LuaTable = lua.load(&handler_code).eval().map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to load handler.lua: {} — 加载 handler.lua 失败: {}",
+            e, e
+        ))
+    })?;
+
+    // The current bridge creates a fresh VM per phase call. — 当前桥接会为每次阶段调用创建新的 VM。
+    // Bootstrap lifecycle hooks that some Kong plugins expect before the main phase. — 先补跑部分 Kong 插件依赖的生命周期钩子。
+    let config_value = lua
+        .to_value(&config.config)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+
+    if phase != "init_worker" {
+        let configure_fn: Option<LuaFunction> = handler_table.get("configure").ok();
+        if let Some(configure_fn) = configure_fn {
+            let configs = lua
+                .create_table()
+                .map_err(|e| KongError::LuaError(e.to_string()))?;
+            configs
+                .set(1, config_value.clone())
+                .map_err(|e| KongError::LuaError(e.to_string()))?;
+            let _ = configure_fn.call::<()>((handler_table.clone(), configs));
+        }
+
+        let init_worker_fn: Option<LuaFunction> = handler_table.get("init_worker").ok();
+        if let Some(init_worker_fn) = init_worker_fn {
+            runtime::set_phase(&lua, "init_worker")
+                .map_err(|e| KongError::LuaError(e.to_string()))?;
+            let _ = init_worker_fn.call::<()>((handler_table.clone(), config_value.clone()));
+            runtime::set_phase(&lua, phase).map_err(|e| KongError::LuaError(e.to_string()))?;
+        }
+    }
+
+    runtime::set_phase(&lua, phase).map_err(|e| KongError::LuaError(e.to_string()))?;
 
     // Call handler:phase(config) — 调用 handler:phase(config)
-    let phase_fn: Option<LuaFunction> = handler_table
-        .get(phase)
-        .ok();
+    let phase_fn: Option<LuaFunction> = handler_table.get(phase).ok();
 
     if let Some(func) = phase_fn {
-        let config_value = lua
-            .to_value(&config.config)
-            .map_err(|e| KongError::LuaError(e.to_string()))?;
-
         func.call::<()>((handler_table, config_value))
-            .map_err(|e| KongError::LuaError(format!(
-                "Plugin {} failed in {} phase: {} — 插件 {} {} 阶段执行失败: {}",
-                plugin_name, phase, e,
-                plugin_name, phase, e
-            )))?;
+            .map_err(|e| {
+                KongError::LuaError(format!(
+                    "Plugin {} failed in {} phase: {} — 插件 {} {} 阶段执行失败: {}",
+                    plugin_name, phase, e, plugin_name, phase, e
+                ))
+            })?;
     }
 
     // Sync changes from Lua side back to RequestCtx — 从 Lua 侧同步回 RequestCtx 的变更
-    pdk::sync_ctx_from_lua(&lua, ctx)
-        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::sync_ctx_from_lua(&lua, ctx).map_err(|e| KongError::LuaError(e.to_string()))?;
 
     Ok(())
 }

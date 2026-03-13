@@ -46,9 +46,9 @@ impl DblessStore {
 
         // Check format_version — 检查 format_version
         if let Some(version) = obj.get("_format_version") {
-            let version_str = version
-                .as_str()
-                .ok_or_else(|| KongError::ConfigError("_format_version 必须是字符串".to_string()))?;
+            let version_str = version.as_str().ok_or_else(|| {
+                KongError::ConfigError("_format_version 必须是字符串".to_string())
+            })?;
             if !SUPPORTED_FORMAT_VERSIONS.contains(&version_str) {
                 return Err(KongError::ConfigError(format!(
                     "不支持的 format_version: {}，支持: {:?}",
@@ -91,9 +91,9 @@ impl DblessStore {
 
         for (table_name, endpoint_key) in entity_types {
             if let Some(entities) = obj.get(table_name) {
-                let arr = entities.as_array().ok_or_else(|| {
-                    KongError::ConfigError(format!("{} 必须是数组", table_name))
-                })?;
+                let arr = entities
+                    .as_array()
+                    .ok_or_else(|| KongError::ConfigError(format!("{} 必须是数组", table_name)))?;
 
                 let table = data.entry(table_name.to_string()).or_default();
                 let ek_map = endpoint_keys.entry(table_name.to_string()).or_default();
@@ -107,25 +107,18 @@ impl DblessStore {
 
                     // Build endpoint key index — 建立端点键索引
                     if !endpoint_key.is_empty() {
-                        if let Some(key_val) = entity_json.get(endpoint_key).and_then(|v| v.as_str())
+                        if let Some(key_val) =
+                            entity_json.get(endpoint_key).and_then(|v| v.as_str())
                         {
                             ek_map.insert(key_val.to_string(), id);
                         }
                     }
 
                     // Build foreign key index — 建立外键索引
-                    build_fk_index(
-                        &mut foreign_keys,
-                        table_name,
-                        entity_json,
-                    );
+                    build_fk_index(&mut foreign_keys, table_name, entity_json);
                 }
 
-                tracing::info!(
-                    "加载 {} 条 {} 实体",
-                    table.len(),
-                    table_name
-                );
+                tracing::info!("加载 {} 条 {} 实体", table.len(), table_name);
             }
         }
 
@@ -177,10 +170,7 @@ impl DblessStore {
             .read()
             .map_err(|e| KongError::InternalError(format!("锁获取失败: {}", e)))?;
 
-        if let Some(id) = endpoint_keys
-            .get(table_name)
-            .and_then(|m| m.get(key_value))
-        {
+        if let Some(id) = endpoint_keys.get(table_name).and_then(|m| m.get(key_value)) {
             self.get_entity(table_name, id)
         } else {
             Ok(None)
@@ -365,10 +355,7 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
     async fn page(&self, params: &PageParams) -> Result<Page<T>> {
         let table_name = T::table_name();
 
-        let offset_uuid = params
-            .offset
-            .as_ref()
-            .and_then(|s| decode_offset(s).ok());
+        let offset_uuid = params.offset.as_ref().and_then(|s| decode_offset(s).ok());
 
         let (entities_json, next_offset) =
             self.store
@@ -416,10 +403,7 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
     ) -> Result<Page<T>> {
         let table_name = T::table_name();
 
-        let offset_uuid = params
-            .offset
-            .as_ref()
-            .and_then(|s| decode_offset(s).ok());
+        let offset_uuid = params.offset.as_ref().and_then(|s| decode_offset(s).ok());
 
         let (entities_json, next_offset) = self.store.list_by_foreign_key(
             table_name,
@@ -454,8 +438,7 @@ fn extract_uuid(json: &Value, field: &str) -> Result<Uuid> {
         .get(field)
         .and_then(|v| v.as_str())
         .ok_or_else(|| KongError::ConfigError(format!("实体缺少 {} 字段", field)))?;
-    Uuid::parse_str(s)
-        .map_err(|e| KongError::ConfigError(format!("无效的 UUID {}: {}", field, e)))
+    Uuid::parse_str(s).map_err(|e| KongError::ConfigError(format!("无效的 UUID {}: {}", field, e)))
 }
 
 /// Build foreign key index — 构建外键索引
@@ -482,9 +465,7 @@ fn build_fk_index(
         None => return,
     };
 
-    let table_fks = foreign_keys
-        .entry(table_name.to_string())
-        .or_default();
+    let table_fks = foreign_keys.entry(table_name.to_string()).or_default();
 
     for fk_field in fk_fields {
         if let Some(fk_obj) = entity_json.get(fk_field) {
@@ -493,9 +474,7 @@ fn build_fk_index(
                     .and_then(|v| v.as_str())
                     .and_then(|s| Uuid::parse_str(s).ok())
             } else {
-                fk_obj
-                    .as_str()
-                    .and_then(|s| Uuid::parse_str(s).ok())
+                fk_obj.as_str().and_then(|s| Uuid::parse_str(s).ok())
             };
 
             if let Some(fk_id) = fk_id {
@@ -590,8 +569,7 @@ mod tests {
     #[test]
     fn test_dbless_write_operations_fail() {
         let store = std::sync::Arc::new(DblessStore::new());
-        let dao: DblessDao<kong_core::models::Service> =
-            DblessDao::new(store);
+        let dao: DblessDao<kong_core::models::Service> = DblessDao::new(store);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(dao.insert(&kong_core::models::Service::default()));

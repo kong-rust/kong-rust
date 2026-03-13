@@ -4,7 +4,7 @@
 
 Kong-Rust 是使用 Rust + Cloudflare Pingora 完全重写 Kong API 网关的项目，目标是 100% 兼容 Kong，零成本替换。
 
-- **语言**：Rust 2021 Edition（最低 1.84）
+- **语言**：Rust 2021 Edition（最低 1.94.0）
 - **代理引擎**：Pingora（Cloudflare HTTP 代理）
 - **Admin API**：axum 0.8
 - **数据库**：sqlx 0.8（PostgreSQL，直接 SQL，无 ORM）
