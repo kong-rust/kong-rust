@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use kong_core::traits::PluginHandler;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -76,8 +77,7 @@ fn kong_log_level_to_filter(level: &str) -> &'static str {
 /// Initialize the logging system based on config, supports file + stderr dual output — 根据配置初始化日志系统，支持文件 + stderr 双写
 fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     let level = kong_log_level_to_filter(&config.log_level);
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     let error_log_path = &config.proxy_error_log;
 
@@ -91,9 +91,13 @@ fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
         // File + stderr dual output — 文件 + stderr 双写
         let log_path = Path::new(error_log_path);
         let log_dir = log_path.parent().unwrap_or(Path::new("."));
-        let log_file = log_path
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Invalid log path: {} — 无效的日志路径: {}", error_log_path, error_log_path))?;
+        let log_file = log_path.file_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid log path: {} — 无效的日志路径: {}",
+                error_log_path,
+                error_log_path
+            )
+        })?;
 
         // Auto-create log directory — 自动创建日志目录
         std::fs::create_dir_all(log_dir)?;
@@ -104,8 +108,7 @@ fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
             .with_ansi(false)
             .with_writer(file_appender);
 
-        let stderr_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr);
+        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
         tracing_subscriber::registry()
             .with(env_filter)
@@ -159,7 +162,10 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Config => {
             println!("数据库: {}", config.database);
-            println!("PostgreSQL: {}:{}/{}", config.pg_host, config.pg_port, config.pg_database);
+            println!(
+                "PostgreSQL: {}:{}/{}",
+                config.pg_host, config.pg_port, config.pg_database
+            );
             println!("路由风格: {}", config.router_flavor);
             println!("Admin 监听: {}", format_listen_addrs(&config.admin_listen));
             println!("Proxy 监听: {}", format_listen_addrs(&config.proxy_listen));
@@ -182,6 +188,37 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Load and register available Lua plugins for the current runtime. — 为当前运行时加载并注册可用的 Lua 插件。
+fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system::PluginRegistry {
+    let mut registry = kong_plugin_system::PluginRegistry::new();
+    let plugin_names = config.loaded_plugins();
+    let plugin_dirs = kong_lua_bridge::loader::resolve_plugin_dirs(&config.prefix);
+
+    tracing::info!(
+        "Resolving plugins from directories: {:?} — 从以下目录解析插件: {:?}",
+        plugin_dirs,
+        plugin_dirs
+    );
+
+    match kong_lua_bridge::loader::load_lua_plugins(&plugin_dirs, &plugin_names) {
+        Ok(handlers) => {
+            for handler in handlers {
+                let name = handler.name().to_string();
+                registry.register(&name, Arc::new(handler));
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load Lua plugins: {} — 加载 Lua 插件失败: {}",
+                err,
+                err
+            );
+        }
+    }
+
+    registry
 }
 
 /// Handle db subcommands — 处理 db 子命令
@@ -273,15 +310,27 @@ async fn handle_db_command(
 fn health_check(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     let addr = if let Some(a) = config.admin_listen.first() {
         // 将 0.0.0.0 替换为 127.0.0.1，因为不能连接 0.0.0.0 — Replace 0.0.0.0 with 127.0.0.1 since we can't connect to 0.0.0.0
-        let ip = if a.ip == "0.0.0.0" { "127.0.0.1" } else { &a.ip };
+        let ip = if a.ip == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &a.ip
+        };
         format!("{}:{}", ip, a.port)
     } else {
         "127.0.0.1:8001".to_string()
     };
 
     let timeout = std::time::Duration::from_secs(5);
-    let mut stream = std::net::TcpStream::connect_timeout(&addr.parse()?, timeout)
-        .map_err(|e| anyhow::anyhow!("Failed to connect to Admin API at {}: {} — 无法连接 Admin API {}: {}", addr, e, addr, e))?;
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addr.parse()?, timeout).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to connect to Admin API at {}: {} — 无法连接 Admin API {}: {}",
+                addr,
+                e,
+                addr,
+                e
+            )
+        })?;
 
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -293,7 +342,10 @@ fn health_check(config: &kong_config::KongConfig) -> anyhow::Result<()> {
     stream.read_to_string(&mut response)?;
 
     if response.contains("200") {
-        println!("kong is healthy at {} — kong-rust 健康检查通过 {}", addr, addr);
+        println!(
+            "kong is healthy at {} — kong-rust 健康检查通过 {}",
+            addr, addr
+        );
         Ok(())
     } else {
         anyhow::bail!("kong is NOT healthy: unexpected response from {} — kong-rust 健康检查失败: {} 返回异常响应", addr, addr);
@@ -333,9 +385,8 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
         rt.block_on(init_proxy_and_admin(&config, auto_migrate))?;
 
     // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
-    let access_log_writer = rt.block_on(async {
-        kong_proxy::access_log::AccessLogWriter::new(&config.proxy_access_log)
-    });
+    let access_log_writer = rt
+        .block_on(async { kong_proxy::access_log::AccessLogWriter::new(&config.proxy_access_log) });
     kong_proxy.access_log_writer = access_log_writer.clone();
 
     // Phase 2: Create Pingora Server — 阶段 2：创建 Pingora Server
@@ -350,16 +401,17 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
             // SSL port: register with add_tls, Pingora handles TLS termination — SSL 端口：使用 add_tls 注册，Pingora 负责 TLS 终止
             if let (Some(cert), Some(key)) = (config.ssl_cert.first(), config.ssl_cert_key.first())
             {
-                let mut tls_settings = match pingora_core::listeners::tls::TlsSettings::intermediate(cert, key) {
-                    Ok(settings) => settings,
-                    Err(e) => {
-                        tracing::error!("Proxy TLS 配置失败 {}: {}", listen_addr, e);
-                        // Fallback to TCP — 回退到 TCP
-                        proxy_service.add_tcp(&listen_addr);
-                        tracing::warn!("Proxy 回退为 TCP 监听: {}", listen_addr);
-                        continue;
-                    }
-                };
+                let mut tls_settings =
+                    match pingora_core::listeners::tls::TlsSettings::intermediate(cert, key) {
+                        Ok(settings) => settings,
+                        Err(e) => {
+                            tracing::error!("Proxy TLS 配置失败 {}: {}", listen_addr, e);
+                            // Fallback to TCP — 回退到 TCP
+                            proxy_service.add_tcp(&listen_addr);
+                            tracing::warn!("Proxy 回退为 TCP 监听: {}", listen_addr);
+                            continue;
+                        }
+                    };
 
                 if addr.http2 {
                     tls_settings.enable_h2();
@@ -390,11 +442,19 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
         // Get route data from AdminState to initialize Stream routing — 从 AdminState 获取路由数据初始化 Stream 路由
         let routes = rt.block_on(async {
             use kong_core::traits::PageParams;
-            let params = PageParams { size: 10000, offset: None, tags: None };
+            let params = PageParams {
+                size: 10000,
+                offset: None,
+                tags: None,
+            };
             match admin_state.routes.page(&params).await {
                 Ok(page) => page.data,
                 Err(e) => {
-                    tracing::error!("Failed to load Stream routes: {} — 加载 Stream 路由失败: {}", e, e);
+                    tracing::error!(
+                        "Failed to load Stream routes: {} — 加载 Stream 路由失败: {}",
+                        e,
+                        e
+                    );
                     Vec::new()
                 }
             }
@@ -468,7 +528,7 @@ async fn init_proxy_and_admin(
     use kong_core::traits::{Dao, PageParams};
     use kong_db::*;
 
-    let plugin_registry = kong_plugin_system::PluginRegistry::new();
+    let plugin_registry = build_plugin_registry(config);
     let node_id = uuid::Uuid::new_v4();
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -533,7 +593,9 @@ async fn init_proxy_and_admin(
                 kong_db::migrations::up(db.pool()).await?;
             }
             if !state.pending.is_empty() {
-                tracing::info!("Auto-finishing pending migrations... — 自动完成 pending migration...");
+                tracing::info!(
+                    "Auto-finishing pending migrations... — 自动完成 pending migration..."
+                );
                 kong_db::migrations::finish(db.pool()).await?;
             }
         } else {
@@ -609,7 +671,10 @@ async fn init_proxy_and_admin(
             targets: Arc::new(PgDao::<Target>::new(db.clone(), target_schema())),
             certificates: Arc::new(PgDao::<Certificate>::new(db.clone(), certificate_schema())),
             snis: Arc::new(PgDao::<Sni>::new(db.clone(), sni_schema())),
-            ca_certificates: Arc::new(PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema())),
+            ca_certificates: Arc::new(PgDao::<CaCertificate>::new(
+                db.clone(),
+                ca_certificate_schema(),
+            )),
             vaults: Arc::new(PgDao::<Vault>::new(db.clone(), vault_schema())),
             node_id,
             config: Arc::clone(config),
@@ -648,9 +713,11 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
         }
 
         // Start GUI server if admin_gui_listen is configured and GUI directory exists — 如果配置了 admin_gui_listen 且 GUI 目录存在，启动 GUI 服务器
-        let gui_dir = std::env::var("KONG_GUI_DIR")
-            .unwrap_or_else(|_| "/usr/local/kong/gui".to_string());
-        if !self.config.admin_gui_listen.is_empty() && Path::new(&gui_dir).join("index.html").exists() {
+        let gui_dir =
+            std::env::var("KONG_GUI_DIR").unwrap_or_else(|_| "/usr/local/kong/gui".to_string());
+        if !self.config.admin_gui_listen.is_empty()
+            && Path::new(&gui_dir).join("index.html").exists()
+        {
             let gui_bind = if let Some(addr) = self.config.admin_gui_listen.first() {
                 format!("{}:{}", addr.ip, addr.port)
             } else {
@@ -659,11 +726,20 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
 
             // Derive Admin API URL for kconfig.js — 推导 Admin API URL 用于 kconfig.js
             // 使用 admin_listen 的端口，schema 和 host 从 admin_gui_url 推导 — Use admin_listen port, derive scheme/host from admin_gui_url
-            let admin_port = self.config.admin_listen.first().map(|a| a.port).unwrap_or(8001);
+            let admin_port = self
+                .config
+                .admin_listen
+                .first()
+                .map(|a| a.port)
+                .unwrap_or(8001);
             let admin_api_url = format!("http://localhost:{}", admin_port);
 
             let gui_app = kong_admin::build_gui_router(&gui_dir, &admin_api_url);
-            tracing::info!("Kong Manager GUI 监听于: {} (Admin API: {})", gui_bind, admin_api_url);
+            tracing::info!(
+                "Kong Manager GUI 监听于: {} (Admin API: {})",
+                gui_bind,
+                admin_api_url
+            );
 
             tokio::spawn(async move {
                 match tokio::net::TcpListener::bind(&gui_bind).await {

@@ -35,7 +35,6 @@ pub struct RequestCtx {
     pub authenticated_consumer: Option<serde_json::Value>,
 
     // ====== Request snapshot fields (used by PDK) — 请求快照字段（PDK 使用） ======
-
     /// Request method — 请求方法
     pub request_method: String,
     /// Request path — 请求路径
@@ -56,6 +55,11 @@ pub struct RequestCtx {
     pub response_status: Option<u16>,
     /// Upstream response headers — 上游响应头
     pub response_headers: std::collections::HashMap<String, String>,
+    /// Optional payload returned by kong.log.serialize() for Lua plugins that
+    /// depend on the Kong logging schema.
+    pub log_serialize: Option<serde_json::Value>,
+    /// Response source reported by kong.response.get_source()
+    pub response_source: Option<String>,
 }
 
 impl RequestCtx {
@@ -86,6 +90,8 @@ impl RequestCtx {
             request_query_string: String::new(),
             response_status: None,
             response_headers: std::collections::HashMap::new(),
+            log_serialize: None,
+            response_source: None,
         }
     }
 

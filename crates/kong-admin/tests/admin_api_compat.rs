@@ -19,7 +19,7 @@ use kong_db::{DblessDao, DblessStore};
 fn create_test_app() -> axum::Router {
     let store = Arc::new(DblessStore::new());
 
-    let config = kong_config::KongConfig::default();
+    let config = Arc::new(kong_config::KongConfig::default());
 
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
@@ -30,6 +30,7 @@ fn create_test_app() -> axum::Router {
         kong_proxy::tls::CertificateManager::new(),
         vec![],
         dns_resolver,
+        Arc::clone(&config),
     );
 
     let state = AdminState {
@@ -44,7 +45,7 @@ fn create_test_app() -> axum::Router {
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config: Arc::new(config),
+        config,
         proxy,
         refresh_tx,
         stream_router: None,
@@ -142,7 +143,7 @@ fn create_test_app_with_data() -> axum::Router {
 
     store.load_from_json(&test_data).unwrap();
 
-    let config = kong_config::KongConfig::default();
+    let config = Arc::new(kong_config::KongConfig::default());
 
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
@@ -153,6 +154,7 @@ fn create_test_app_with_data() -> axum::Router {
         kong_proxy::tls::CertificateManager::new(),
         vec![],
         dns_resolver,
+        Arc::clone(&config),
     );
 
     let state = AdminState {
@@ -167,7 +169,7 @@ fn create_test_app_with_data() -> axum::Router {
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config: Arc::new(config),
+        config,
         proxy,
         refresh_tx,
         stream_router: None,
@@ -204,6 +206,30 @@ async fn test_root_info() {
     let config = json.get("configuration").unwrap();
     assert!(config.get("database").is_some());
     assert!(config.get("router_flavor").is_some());
+}
+
+#[tokio::test]
+async fn test_plugin_schema_prometheus() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/schemas/plugins/prometheus")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["name"], "prometheus");
+    assert_eq!(value["fields"][0]["protocols"]["type"], "set");
 }
 
 #[tokio::test]

@@ -35,21 +35,21 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
     // 1. Try to load config file — 尝试加载配置文件
     let file_conf = if let Some(path) = conf_path {
         if !path.exists() {
-            return Err(KongConfigError::FileNotFound(
-                path.display().to_string(),
-            ));
+            return Err(KongConfigError::FileNotFound(path.display().to_string()));
         }
         tracing::info!("加载配置文件: {}", path.display());
-        Some(parser::load_conf_file(path).map_err(|e| {
-            KongConfigError::IoError(format!("读取配置文件失败: {}", e))
-        })?)
+        Some(
+            parser::load_conf_file(path)
+                .map_err(|e| KongConfigError::IoError(format!("读取配置文件失败: {}", e)))?,
+        )
     } else {
         // Search default paths — 搜索默认路径
         if let Some(default_path) = parser::find_default_conf() {
             tracing::info!("使用默认配置文件: {}", default_path.display());
-            Some(parser::load_conf_file(&default_path).map_err(|e| {
-                KongConfigError::IoError(format!("读取配置文件失败: {}", e))
-            })?)
+            Some(
+                parser::load_conf_file(&default_path)
+                    .map_err(|e| KongConfigError::IoError(format!("读取配置文件失败: {}", e)))?,
+            )
         } else {
             tracing::info!("未找到配置文件，使用默认配置");
             None
@@ -59,11 +59,7 @@ pub fn load_config(conf_path: Option<&Path>) -> Result<KongConfig, KongConfigErr
     // 2. Apply config file values — 应用配置文件值
     if let Some(file_conf) = &file_conf {
         for (key, value) in file_conf {
-            tracing::debug!(
-                "配置文件: {} = {}",
-                key,
-                parser::display_value(key, value)
-            );
+            tracing::debug!("配置文件: {} = {}", key, parser::display_value(key, value));
         }
         config.apply_raw(file_conf);
     }
@@ -117,9 +113,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         && config.declarative_config_string.is_none()
         && config.role != "data_plane"
     {
-        tracing::warn!(
-            "database=off 但未指定 declarative_config 或 declarative_config_string"
-        );
+        tracing::warn!("database=off 但未指定 declarative_config 或 declarative_config_string");
     }
 
     // Validate log_level — 验证 log_level

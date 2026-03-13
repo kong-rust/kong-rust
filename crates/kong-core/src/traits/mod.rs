@@ -1,7 +1,7 @@
-mod plugin;
 mod dao;
 mod entity;
+mod plugin;
 
-pub use plugin::*;
 pub use dao::*;
 pub use entity::*;
+pub use plugin::*;

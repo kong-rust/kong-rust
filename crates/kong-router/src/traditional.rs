@@ -155,11 +155,17 @@ impl TraditionalRouter {
         // 1. Process each route (skip non-HTTP routes) — 处理每个路由（跳过非 HTTP 协议路由）
         for route in routes {
             // Only include routes with HTTP-compatible protocols — 仅包含 HTTP 兼容协议的路由
-            let is_http_route = route.protocols.iter().any(|p| matches!(p,
-                Protocol::Http | Protocol::Https |
-                Protocol::Grpc | Protocol::Grpcs |
-                Protocol::Ws | Protocol::Wss
-            ));
+            let is_http_route = route.protocols.iter().any(|p| {
+                matches!(
+                    p,
+                    Protocol::Http
+                        | Protocol::Https
+                        | Protocol::Grpc
+                        | Protocol::Grpcs
+                        | Protocol::Ws
+                        | Protocol::Wss
+                )
+            });
             if !is_http_route {
                 continue;
             }
@@ -195,10 +201,7 @@ impl TraditionalRouter {
         // 4. Group by match_rules — 按 match_rules 分类
         let mut category_map: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, route) in processed.iter().enumerate() {
-            category_map
-                .entry(route.match_rules)
-                .or_default()
-                .push(i);
+            category_map.entry(route.match_rules).or_default().push(i);
         }
 
         let mut categories: Vec<Category> = category_map
@@ -254,7 +257,12 @@ impl TraditionalRouter {
     }
 
     /// Actual route matching without cache — 实际路由匹配（无缓存）
-    fn find_route_uncached(&self, ctx: &RequestContext, req_host: &str, req_host_no_port: &str) -> Option<RouteMatch> {
+    fn find_route_uncached(
+        &self,
+        ctx: &RequestContext,
+        req_host: &str,
+        req_host_no_port: &str,
+    ) -> Option<RouteMatch> {
         // Iterate categories (starting from highest weight) — 遍历 categories（从权重最高的开始）
         for category in &self.categories {
             for &route_idx in &category.routes {
@@ -337,12 +345,7 @@ impl TraditionalRouter {
     }
 
     /// HOST matching — HOST 匹配
-    fn match_host(
-        &self,
-        route: &ProcessedRoute,
-        req_host: &str,
-        req_host_no_port: &str,
-    ) -> bool {
+    fn match_host(&self, route: &ProcessedRoute, req_host: &str, req_host_no_port: &str) -> bool {
         // 1. Exact match — 精确匹配
         if route.plain_hosts.contains(&req_host.to_string())
             || route.plain_hosts.contains(&req_host_no_port.to_string())
@@ -361,11 +364,7 @@ impl TraditionalRouter {
     }
 
     /// HEADER matching (all headers must match = AND logic) — HEADER 匹配（所有 header 都必须匹配 = AND 逻辑）
-    fn match_headers(
-        &self,
-        route: &ProcessedRoute,
-        req_headers: &HashMap<String, String>,
-    ) -> bool {
+    fn match_headers(&self, route: &ProcessedRoute, req_headers: &HashMap<String, String>) -> bool {
         for header_matcher in &route.headers {
             let header_val = req_headers.get(&header_matcher.name);
 
@@ -402,7 +401,8 @@ impl TraditionalRouter {
 
         // 2. Exact prefix match — 精确前缀匹配
         for path in &route.prefix_paths {
-            if req_uri == path || req_uri.starts_with(&format!("{}/", path.trim_end_matches('/')))
+            if req_uri == path
+                || req_uri.starts_with(&format!("{}/", path.trim_end_matches('/')))
                 || path == "/"
             {
                 return true;
@@ -466,12 +466,8 @@ fn process_route(route: &Route) -> Option<ProcessedRoute> {
                 if host_lower.contains('*') {
                     plain_hosts_only = false;
                     // Wildcard -> regex — 通配符 -> 正则
-                    let regex_str = format!(
-                        "^{}$",
-                        host_lower
-                            .replace('.', "\\.")
-                            .replace('*', ".+")
-                    );
+                    let regex_str =
+                        format!("^{}$", host_lower.replace('.', "\\.").replace('*', ".+"));
                     if let Ok(regex) = Regex::new(&regex_str) {
                         wildcard_hosts.push((host_lower, regex));
                     }
@@ -572,11 +568,7 @@ fn process_route(route: &Route) -> Option<ProcessedRoute> {
     let service_id = route.service.as_ref().map(|fk| fk.id);
 
     // Protocols
-    let protocols: Vec<String> = route
-        .protocols
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
+    let protocols: Vec<String> = route.protocols.iter().map(|p| p.to_string()).collect();
 
     let header_count = headers.len();
 
@@ -666,12 +658,7 @@ mod tests {
 
     #[test]
     fn test_exact_host_match() {
-        let routes = vec![make_route(
-            "test",
-            Some(vec!["example.com"]),
-            None,
-            None,
-        )];
+        let routes = vec![make_route("test", Some(vec!["example.com"]), None, None)];
         let router = TraditionalRouter::new(&routes);
 
         let ctx = RequestContext {

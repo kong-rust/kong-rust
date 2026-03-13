@@ -1,7 +1,7 @@
 //! Test helper module — provides MockUpstream, TestPlugin and other test infrastructure — 测试辅助模块 — 提供 MockUpstream、TestPlugin 等测试基础设施
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -62,7 +62,12 @@ impl TestPlugin {
     }
 
     /// Create a test plugin that modifies response headers — 创建一个修改响应头的测试插件
-    pub fn with_header_modify(name: &str, priority: i32, header_name: &str, header_value: &str) -> Self {
+    pub fn with_header_modify(
+        name: &str,
+        priority: i32,
+        header_name: &str,
+        header_value: &str,
+    ) -> Self {
         let mut p = Self::new(name, priority);
         p.modify_response_header = Some((header_name.to_string(), header_value.to_string()));
         p
@@ -112,7 +117,8 @@ impl PluginHandler for TestPlugin {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         if let Some((ref name, ref value)) = self.modify_response_header {
-            ctx.response_headers_to_set.push((name.clone(), value.clone()));
+            ctx.response_headers_to_set
+                .push((name.clone(), value.clone()));
         }
 
         Ok(())

@@ -86,9 +86,11 @@ impl DnsResolver {
         }
 
         // Async DNS lookup — 异步 DNS 查询
-        let response = self.resolver.lookup_ip(host).await.map_err(|e| {
-            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-        })?;
+        let response = self
+            .resolver
+            .lookup_ip(host)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         response
             .iter()

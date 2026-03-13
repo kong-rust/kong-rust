@@ -13,14 +13,14 @@ use std::sync::Arc;
 
 use std::sync::RwLock;
 
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use axum::response::IntoResponse;
-use tower_http::cors::{AllowOrigin, AllowMethods, AllowHeaders, CorsLayer};
-use tower_http::services::ServeDir;
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 
 /// Admin API application state — Admin API 应用状态
 #[derive(Clone)]
@@ -91,54 +91,125 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Root info endpoint — 根信息端点
         .route("/", get(root_info))
         .route("/status", get(status_info))
+        .route("/schemas/plugins/{name}", get(get_plugin_schema))
         // Services
         .route("/services", get(list_services).post(create_service))
-        .route("/services/{id_or_name}",
-            get(get_service).patch(update_service).put(upsert_service).delete(delete_service))
+        .route(
+            "/services/{id_or_name}",
+            get(get_service)
+                .patch(update_service)
+                .put(upsert_service)
+                .delete(delete_service),
+        )
         // Routes
         .route("/routes", get(list_routes).post(create_route))
-        .route("/routes/{id_or_name}",
-            get(get_route).patch(update_route).put(upsert_route).delete(delete_route))
+        .route(
+            "/routes/{id_or_name}",
+            get(get_route)
+                .patch(update_route)
+                .put(upsert_route)
+                .delete(delete_route),
+        )
         // Nested: Routes and Plugins under Service — 嵌套: Service 下的 Routes 和 Plugins
-        .route("/services/{service_id_or_name}/routes", get(list_nested_routes).post(create_nested_route))
-        .route("/services/{service_id_or_name}/plugins", get(list_service_plugins))
+        .route(
+            "/services/{service_id_or_name}/routes",
+            get(list_nested_routes).post(create_nested_route),
+        )
+        .route(
+            "/services/{service_id_or_name}/plugins",
+            get(list_service_plugins),
+        )
         // Nested: Plugins under Route — 嵌套: Route 下的 Plugins
-        .route("/routes/{route_id_or_name}/plugins", get(list_route_plugins))
+        .route(
+            "/routes/{route_id_or_name}/plugins",
+            get(list_route_plugins),
+        )
         // Consumers
         .route("/consumers", get(list_consumers).post(create_consumer))
-        .route("/consumers/{id_or_name}",
-            get(get_consumer).patch(update_consumer).put(upsert_consumer).delete(delete_consumer))
+        .route(
+            "/consumers/{id_or_name}",
+            get(get_consumer)
+                .patch(update_consumer)
+                .put(upsert_consumer)
+                .delete(delete_consumer),
+        )
         // Nested: Plugins under Consumer — 嵌套: Consumer 下的 Plugins
-        .route("/consumers/{consumer_id_or_name}/plugins", get(list_consumer_plugins))
+        .route(
+            "/consumers/{consumer_id_or_name}/plugins",
+            get(list_consumer_plugins),
+        )
         // Plugins
         .route("/plugins", get(list_plugins).post(create_plugin))
-        .route("/plugins/{id_or_name}",
-            get(get_plugin).patch(update_plugin).put(upsert_plugin).delete(delete_plugin))
+        .route("/plugins/enabled", get(list_enabled_plugins))
+        .route(
+            "/plugins/{id_or_name}",
+            get(get_plugin)
+                .patch(update_plugin)
+                .put(upsert_plugin)
+                .delete(delete_plugin),
+        )
         // Upstreams
         .route("/upstreams", get(list_upstreams).post(create_upstream))
-        .route("/upstreams/{id_or_name}",
-            get(get_upstream).patch(update_upstream).put(upsert_upstream).delete(delete_upstream))
+        .route(
+            "/upstreams/{id_or_name}",
+            get(get_upstream)
+                .patch(update_upstream)
+                .put(upsert_upstream)
+                .delete(delete_upstream),
+        )
         // Targets (nested under upstreams)
-        .route("/upstreams/{upstream_id_or_name}/targets",
-            get(list_nested_targets).post(create_nested_target))
-        .route("/upstreams/{upstream_id_or_name}/targets/{id_or_name}",
-            get(get_nested_target).patch(update_nested_target).delete(delete_nested_target))
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets",
+            get(list_nested_targets).post(create_nested_target),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets/{id_or_name}",
+            get(get_nested_target)
+                .patch(update_nested_target)
+                .delete(delete_nested_target),
+        )
         // Certificates
-        .route("/certificates", get(list_certificates).post(create_certificate))
-        .route("/certificates/{id}",
-            get(get_certificate).patch(update_certificate).put(upsert_certificate).delete(delete_certificate))
+        .route(
+            "/certificates",
+            get(list_certificates).post(create_certificate),
+        )
+        .route(
+            "/certificates/{id}",
+            get(get_certificate)
+                .patch(update_certificate)
+                .put(upsert_certificate)
+                .delete(delete_certificate),
+        )
         // SNIs
         .route("/snis", get(list_snis).post(create_sni))
-        .route("/snis/{id_or_name}",
-            get(get_sni).patch(update_sni).put(upsert_sni).delete(delete_sni))
+        .route(
+            "/snis/{id_or_name}",
+            get(get_sni)
+                .patch(update_sni)
+                .put(upsert_sni)
+                .delete(delete_sni),
+        )
         // CA Certificates
-        .route("/ca_certificates", get(list_ca_certificates).post(create_ca_certificate))
-        .route("/ca_certificates/{id}",
-            get(get_ca_certificate).patch(update_ca_certificate).put(upsert_ca_certificate).delete(delete_ca_certificate))
+        .route(
+            "/ca_certificates",
+            get(list_ca_certificates).post(create_ca_certificate),
+        )
+        .route(
+            "/ca_certificates/{id}",
+            get(get_ca_certificate)
+                .patch(update_ca_certificate)
+                .put(upsert_ca_certificate)
+                .delete(delete_ca_certificate),
+        )
         // Vaults
         .route("/vaults", get(list_vaults).post(create_vault))
-        .route("/vaults/{id_or_name}",
-            get(get_vault).patch(update_vault).put(upsert_vault).delete(delete_vault))
+        .route(
+            "/vaults/{id_or_name}",
+            get(get_vault)
+                .patch(update_vault)
+                .put(upsert_vault)
+                .delete(delete_vault),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::mirror_request())
@@ -148,7 +219,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .expose_headers(tower_http::cors::ExposeHeaders::list([
                     axum::http::header::CONTENT_TYPE,
                     axum::http::header::CONTENT_LENGTH,
-                ]))
+                ])),
         )
         .with_state(state)
 }
@@ -188,8 +259,8 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
     let index_fallback = index_path.clone();
     let root_index_path = index_path.clone();
     let spa_fallback_index_path = index_path.clone();
-    let serve_dir = ServeDir::new(gui_dir)
-        .not_found_service(tower::service_fn(move |_req: axum::http::Request<axum::body::Body>| {
+    let serve_dir = ServeDir::new(gui_dir).not_found_service(tower::service_fn(
+        move |_req: axum::http::Request<axum::body::Body>| {
             let path = index_fallback.clone();
             async move {
                 // SPA fallback: serve index.html for unknown paths — SPA 回退：未知路径返回 index.html
@@ -204,24 +275,34 @@ pub fn build_gui_router(gui_dir: &str, admin_api_url: &str) -> Router {
                         .unwrap()),
                 }
             }
-        }));
+        },
+    ));
 
     Router::new()
-        .route("/", get(move || async move {
-            // Serve index.html directly at root, no redirect — 根路径直接返回 index.html，不重定向
-            serve_gui_index(root_index_path.clone()).await
-        }))
-        .route("/__km_base__/kconfig.js", get(move || async move {
-            axum::http::Response::builder()
-                .header("content-type", "application/javascript; charset=utf-8")
-                .header("cache-control", "no-cache")
-                .body(axum::body::Body::from(kconfig_js.clone()))
-                .unwrap()
-                .into_response()
-        }))
+        .route(
+            "/",
+            get(move || async move {
+                // Serve index.html directly at root, no redirect — 根路径直接返回 index.html，不重定向
+                serve_gui_index(root_index_path.clone()).await
+            }),
+        )
+        .route(
+            "/__km_base__/kconfig.js",
+            get(move || async move {
+                axum::http::Response::builder()
+                    .header("content-type", "application/javascript; charset=utf-8")
+                    .header("cache-control", "no-cache")
+                    .body(axum::body::Body::from(kconfig_js.clone()))
+                    .unwrap()
+                    .into_response()
+            }),
+        )
         .nest_service("/__km_base__", serve_dir)
-        .route("/{*path}", get(move || async move {
-            // SPA fallback for client-side routes like /services — 处理 /services 这类前端路由刷新
-            serve_gui_index(spa_fallback_index_path.clone()).await
-        }))
+        .route(
+            "/{*path}",
+            get(move || async move {
+                // SPA fallback for client-side routes like /services — 处理 /services 这类前端路由刷新
+                serve_gui_index(spa_fallback_index_path.clone()).await
+            }),
+        )
 }

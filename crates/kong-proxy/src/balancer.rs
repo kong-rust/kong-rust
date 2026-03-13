@@ -273,18 +273,28 @@ impl LoadBalancer {
             HashOn::Consumer => ctx.consumer_id.map(|id| id.to_string()),
             HashOn::Ip => {
                 let ip = &ctx.client_ip;
-                if ip.is_empty() { None } else { Some(ip.clone()) }
+                if ip.is_empty() {
+                    None
+                } else {
+                    Some(ip.clone())
+                }
             }
             HashOn::Header => {
                 if let Some(ref header_name) = self.hash_on_header {
-                    ctx.request_headers.get(&header_name.to_lowercase()).cloned()
+                    ctx.request_headers
+                        .get(&header_name.to_lowercase())
+                        .cloned()
                 } else {
                     None
                 }
             }
             HashOn::Path => {
                 let path = &ctx.request_path;
-                if path.is_empty() { None } else { Some(path.clone()) }
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(path.clone())
+                }
             }
             HashOn::Cookie | HashOn::QueryArg | HashOn::UriCapture => {
                 // Simplified implementation: these advanced hash modes are not yet supported — 简化实现：暂不支持这些高级哈希方式

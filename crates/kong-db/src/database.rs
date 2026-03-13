@@ -44,9 +44,14 @@ impl Database {
                     config.effective_pg_ro_database(),
                     config.effective_pg_ro_user(),
                     config.effective_pg_ro_password(),
-                    config.pg_ro_schema.as_deref().or(config.pg_schema.as_deref()),
+                    config
+                        .pg_ro_schema
+                        .as_deref()
+                        .or(config.pg_schema.as_deref()),
                     config.effective_pg_ro_ssl(),
-                    config.pg_ro_pool_size.unwrap_or(config.pg_pool_size.unwrap_or(10)),
+                    config
+                        .pg_ro_pool_size
+                        .unwrap_or(config.pg_pool_size.unwrap_or(10)),
                     config.pg_ro_timeout.unwrap_or(config.pg_timeout),
                 )
                 .await?,

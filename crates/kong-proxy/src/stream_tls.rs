@@ -250,10 +250,10 @@ mod tests {
         hello.push(0x02);
         hello.push(0x00);
         hello.push(0xFF); // TLS_EMPTY_RENEGOTIATION_INFO_SCSV
-        // Compression Methods length: 1
+                          // Compression Methods length: 1
         hello.push(0x01);
         hello.push(0x00); // null compression
-        // Extensions length
+                          // Extensions length
         hello.push((extensions.len() >> 8) as u8);
         hello.push(extensions.len() as u8);
         // Extensions

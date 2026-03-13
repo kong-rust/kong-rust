@@ -43,10 +43,7 @@ fn test_detect_phases_from_handler_code() {
 #[test]
 fn test_extract_priority() {
     assert_eq!(loader::extract_priority("PRIORITY = 1000"), Some(1000));
-    assert_eq!(
-        loader::extract_priority("  PRIORITY  =  750  "),
-        Some(750)
-    );
+    assert_eq!(loader::extract_priority("  PRIORITY  =  750  "), Some(750));
 
     let code = r#"
         local M = {}
@@ -138,12 +135,14 @@ fn test_pdk_kong_log_functions() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.log.debug("debug message")
         kong.log.info("info message")
         kong.log.warn("warn message")
         kong.log.err("error message")
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 }
@@ -155,10 +154,12 @@ fn test_pdk_kong_ctx_shared() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.ctx.shared.my_key = "my_value"
         kong.ctx.shared.counter = 42
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -194,7 +195,10 @@ fn test_pdk_request_get_path_returns_real_path() {
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
     let result: String = lua.load("return kong.request.get_path()").eval().unwrap();
-    assert_eq!(result, "/api/v1/users", "PDK should return the real request path — PDK 应返回真实的请求路径");
+    assert_eq!(
+        result, "/api/v1/users",
+        "PDK should return the real request path — PDK 应返回真实的请求路径"
+    );
 }
 
 #[test]
@@ -237,8 +241,10 @@ fn test_pdk_request_get_port_returns_real_port() {
 fn test_pdk_request_get_header_returns_real_header() {
     let lua = unsafe { mlua::Lua::unsafe_new() };
     let mut ctx = RequestCtx::new();
-    ctx.request_headers.insert("x-api-key".to_string(), "secret-key-123".to_string());
-    ctx.request_headers.insert("content-type".to_string(), "application/json".to_string());
+    ctx.request_headers
+        .insert("x-api-key".to_string(), "secret-key-123".to_string());
+    ctx.request_headers
+        .insert("content-type".to_string(), "application/json".to_string());
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
@@ -266,16 +272,20 @@ fn test_pdk_request_get_header_returns_real_header() {
 fn test_pdk_request_get_headers_returns_all_headers() {
     let lua = unsafe { mlua::Lua::unsafe_new() };
     let mut ctx = RequestCtx::new();
-    ctx.request_headers.insert("host".to_string(), "example.com".to_string());
-    ctx.request_headers.insert("accept".to_string(), "text/html".to_string());
+    ctx.request_headers
+        .insert("host".to_string(), "example.com".to_string());
+    ctx.request_headers
+        .insert("accept".to_string(), "text/html".to_string());
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
     let result: String = lua
-        .load(r#"
+        .load(
+            r#"
             local h = kong.request.get_headers()
             return h.host
-        "#)
+        "#,
+        )
         .eval()
         .unwrap();
     assert_eq!(result, "example.com");
@@ -296,8 +306,15 @@ fn test_pdk_response_exit_sets_short_circuit() {
     // Sync back to RequestCtx — 同步回 RequestCtx
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
-    assert!(ctx.short_circuited, "exit() should set the short-circuit flag — exit() 应设置短路标志");
-    assert_eq!(ctx.exit_status, Some(403), "exit() should set the status code — exit() 应设置状态码");
+    assert!(
+        ctx.short_circuited,
+        "exit() should set the short-circuit flag — exit() 应设置短路标志"
+    );
+    assert_eq!(
+        ctx.exit_status,
+        Some(403),
+        "exit() should set the status code — exit() 应设置状态码"
+    );
     assert_eq!(
         ctx.exit_body.as_deref(),
         Some(r#"{"message":"forbidden"}"#),
@@ -312,11 +329,13 @@ fn test_pdk_response_exit_with_headers() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.response.exit(401, "unauthorized", {
             ["WWW-Authenticate"] = "Bearer"
         })
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -336,10 +355,12 @@ fn test_pdk_service_request_set_header() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.service.request.set_header("X-Consumer-ID", "abc-123")
         kong.service.request.set_header("X-Custom", "value")
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -359,15 +380,19 @@ fn test_pdk_service_request_clear_header() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.service.request.clear_header("X-Remove-Me")
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
-    assert!(ctx.upstream_headers_to_remove.contains(&"X-Remove-Me".to_string()));
+    assert!(ctx
+        .upstream_headers_to_remove
+        .contains(&"X-Remove-Me".to_string()));
 }
 
 #[test]
@@ -377,9 +402,11 @@ fn test_pdk_response_set_header() {
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         kong.response.set_header("X-Response-Custom", "response-value")
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -411,23 +438,29 @@ fn test_ngx_req_get_method_returns_real_method() {
     kong_lua_bridge::pdk::inject_ngx_compat(&lua).unwrap();
 
     let result: String = lua.load("return ngx.req.get_method()").eval().unwrap();
-    assert_eq!(result, "DELETE", "ngx.req.get_method() should return the real method — ngx.req.get_method() 应返回真实方法");
+    assert_eq!(
+        result, "DELETE",
+        "ngx.req.get_method() should return the real method — ngx.req.get_method() 应返回真实方法"
+    );
 }
 
 #[test]
 fn test_ngx_req_get_headers_returns_real_headers() {
     let lua = unsafe { mlua::Lua::unsafe_new() };
     let mut ctx = RequestCtx::new();
-    ctx.request_headers.insert("host".to_string(), "myhost.com".to_string());
+    ctx.request_headers
+        .insert("host".to_string(), "myhost.com".to_string());
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
     kong_lua_bridge::pdk::inject_ngx_compat(&lua).unwrap();
 
     let result: String = lua
-        .load(r#"
+        .load(
+            r#"
             local h = ngx.req.get_headers()
             return h.host
-        "#)
+        "#,
+        )
         .eval()
         .unwrap();
     assert_eq!(result, "myhost.com");
@@ -459,10 +492,7 @@ fn test_ngx_var_reads_real_data() {
 
 #[test]
 fn test_lua_plugin_handler_creation() {
-    let phases = HashMap::from([
-        (Phase::Access, true),
-        (Phase::Log, true),
-    ]);
+    let phases = HashMap::from([(Phase::Access, true), (Phase::Log, true)]);
 
     let handler = kong_lua_bridge::LuaPluginHandler::new(
         "test-plugin".to_string(),
@@ -493,10 +523,7 @@ fn test_lua_vm_basic_execution() {
         .unwrap();
     assert_eq!(result, "hello world");
 
-    let result: Vec<i32> = lua
-        .load("return {1, 2, 3}")
-        .eval()
-        .unwrap();
+    let result: Vec<i32> = lua.load("return {1, 2, 3}").eval().unwrap();
     assert_eq!(result, vec![1, 2, 3]);
 }
 
@@ -504,7 +531,8 @@ fn test_lua_vm_basic_execution() {
 fn test_lua_vm_table_creation_and_method_call() {
     let lua = unsafe { mlua::Lua::unsafe_new() };
 
-    lua.load(r#"
+    lua.load(
+        r#"
         local handler = {}
 
         function handler:access(conf)
@@ -517,7 +545,8 @@ fn test_lua_vm_table_creation_and_method_call() {
         end
 
         return handler
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 }
@@ -560,8 +589,10 @@ fn test_pdk_full_request_context() {
     ctx.request_port = 443;
     ctx.request_query_string = "format=json&pretty=true".to_string();
     ctx.client_ip = "203.0.113.50".to_string();
-    ctx.request_headers.insert("authorization".to_string(), "Bearer tok123".to_string());
-    ctx.request_headers.insert("content-type".to_string(), "application/json".to_string());
+    ctx.request_headers
+        .insert("authorization".to_string(), "Bearer tok123".to_string());
+    ctx.request_headers
+        .insert("content-type".to_string(), "application/json".to_string());
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
@@ -581,7 +612,10 @@ fn test_pdk_full_request_context() {
     let port: i32 = lua.load("return kong.request.get_port()").eval().unwrap();
     assert_eq!(port, 443);
 
-    let qs: String = lua.load("return kong.request.get_raw_query()").eval().unwrap();
+    let qs: String = lua
+        .load("return kong.request.get_raw_query()")
+        .eval()
+        .unwrap();
     assert_eq!(qs, "format=json&pretty=true");
 
     let ip: String = lua.load("return kong.client.get_ip()").eval().unwrap();
@@ -606,12 +640,14 @@ fn test_pdk_plugin_simulation_auth_check() {
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
     // Simulate plugin logic — 模拟插件逻辑
-    lua.load(r#"
+    lua.load(
+        r#"
         local auth = kong.request.get_header("authorization")
         if not auth then
             kong.response.exit(401, '{"message":"unauthorized"}')
         end
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -619,7 +655,10 @@ fn test_pdk_plugin_simulation_auth_check() {
 
     assert!(ctx.short_circuited);
     assert_eq!(ctx.exit_status, Some(401));
-    assert_eq!(ctx.exit_body.as_deref(), Some(r#"{"message":"unauthorized"}"#));
+    assert_eq!(
+        ctx.exit_body.as_deref(),
+        Some(r#"{"message":"unauthorized"}"#)
+    );
 }
 
 #[test]
@@ -629,24 +668,32 @@ fn test_pdk_plugin_simulation_auth_pass() {
     let mut ctx = RequestCtx::new();
     ctx.request_method = "GET".to_string();
     ctx.request_path = "/protected/resource".to_string();
-    ctx.request_headers.insert("authorization".to_string(), "Bearer valid-token".to_string());
+    ctx.request_headers.insert(
+        "authorization".to_string(),
+        "Bearer valid-token".to_string(),
+    );
 
     kong_lua_bridge::pdk::inject_kong_pdk(&lua, &mut ctx).unwrap();
 
-    lua.load(r#"
+    lua.load(
+        r#"
         local auth = kong.request.get_header("authorization")
         if not auth then
             kong.response.exit(401, '{"message":"unauthorized"}')
         else
             kong.service.request.set_header("X-Authenticated", "true")
         end
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
     kong_lua_bridge::pdk::sync_ctx_from_lua(&lua, &mut ctx).unwrap();
 
-    assert!(!ctx.short_circuited, "Should not short-circuit when authorization is present — 有 authorization 时不应短路");
+    assert!(
+        !ctx.short_circuited,
+        "Should not short-circuit when authorization is present — 有 authorization 时不应短路"
+    );
     let headers: HashMap<String, String> = ctx.upstream_headers_to_set.into_iter().collect();
     assert_eq!(headers.get("X-Authenticated").unwrap(), "true");
 }

@@ -362,13 +362,14 @@
 
 ## 阶段 9：Hybrid 模式和集群通信
 
-- [ ] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动
+- [-] 9.1 实现 kong-cluster crate 基础结构和 CP/DP 角色启动
   - 创建 kong-cluster crate，定义 ClusterRole 枚举（Traditional/ControlPlane/DataPlane）
   - 修改 kong-config 添加集群相关配置项（role、cluster_listen、cluster_control_plane、cluster_cert/key 等）
   - 修改 kong-server/main.rs 根据 role 配置分支启动流程
+  - 确保 Hybrid 模式下继续兼容 Kong 插件：DP 侧配置应用后可重建插件链并执行现有 Kong/Lua 插件，不因 CP/DP 拆分破坏插件行为
   - 文件：`crates/kong-cluster/Cargo.toml`, `crates/kong-cluster/src/lib.rs`, `crates/kong-cluster/src/role.rs`, `crates/kong-config/src/lib.rs`, `crates/kong-server/src/main.rs`
   - _Requirements: R9_
-  - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust 工程师 | Task: 创建 kong-cluster crate 并实现角色启动差异。1) 创建 kong-cluster crate 基础结构（参考设计文档 .spec-workflow/specs/kong-rust/design.md 组件 9 的 Workspace 结构）。2) 定义 ClusterRole 枚举：Traditional、ControlPlane、DataPlane。3) 在 kong-config 中添加集群配置项：role（默认 traditional）、cluster_listen（默认 0.0.0.0:8005）、cluster_control_plane、cluster_cert、cluster_cert_key、cluster_data_plane_purge_delay（默认 1209600）、cluster_max_payload（默认 16777216）。4) 修改 kong-server/main.rs 根据 role 分支启动：Traditional → Admin + Proxy + DB；ControlPlane → Admin + DB + WebSocket 服务端；DataPlane → WebSocket 客户端 + Proxy（不启动 Admin API，不连接 DB）。 | Restrictions: 确保 Traditional 模式行为不受影响（向后兼容）。CP 和 DP 模式的启动流程参考设计文档中的角色启动流程变更。 | Success: cargo build 通过，Traditional 模式正常工作，CP/DP 模式能正确识别角色并启动对应组件。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
+  - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust 工程师 | Task: 创建 kong-cluster crate 并实现角色启动差异。1) 创建 kong-cluster crate 基础结构（参考设计文档 .spec-workflow/specs/kong-rust/design.md 组件 9 的 Workspace 结构）。2) 定义 ClusterRole 枚举：Traditional、ControlPlane、DataPlane。3) 在 kong-config 中添加集群配置项：role（默认 traditional）、cluster_listen（默认 0.0.0.0:8005）、cluster_control_plane、cluster_cert、cluster_cert_key、cluster_data_plane_purge_delay（默认 1209600）、cluster_max_payload（默认 16777216）。4) 修改 kong-server/main.rs 根据 role 分支启动：Traditional → Admin + Proxy + DB；ControlPlane → Admin + DB + WebSocket 服务端；DataPlane → WebSocket 客户端 + Proxy（不启动 Admin API，不连接 DB）。5) 确保 Data Plane 在接收配置后仍可装配并执行现有 Kong 插件链，保持对 Kong/Lua 插件的兼容性。 | Restrictions: 确保 Traditional 模式行为不受影响（向后兼容）。CP 和 DP 模式的启动流程参考设计文档中的角色启动流程变更，且不能因 Hybrid 模式削弱插件兼容性。 | Success: cargo build 通过，Traditional 模式正常工作，CP/DP 模式能正确识别角色并启动对应组件，Data Plane 能在 Hybrid 模式下继续执行现有 Kong 插件。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
 
 - [ ] 9.2 实现 Control Plane WebSocket 服务端和配置推送（Sync V1）
   - 在 CP 上启动 WebSocket 服务端（cluster_listen），处理 DP 连接

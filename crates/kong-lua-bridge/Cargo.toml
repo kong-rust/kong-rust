@@ -14,3 +14,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
+regex = { workspace = true }

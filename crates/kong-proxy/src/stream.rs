@@ -194,8 +194,10 @@ impl KongStreamProxy {
                 Err(_) => {
                     tracing::error!("Stream 路由器读取失败");
                     return StreamProxyResult {
-                        status: "ROUTER_ERR", mode: if is_tls { "tls" } else { "tcp" },
-                        route_label: None, upstream: None,
+                        status: "ROUTER_ERR",
+                        mode: if is_tls { "tls" } else { "tcp" },
+                        route_label: None,
+                        upstream: None,
                     };
                 }
             };
@@ -207,14 +209,18 @@ impl KongStreamProxy {
             None => {
                 tracing::debug!("Stream 连接无匹配路由: sni={:?}", ctx.sni);
                 return StreamProxyResult {
-                    status: "NO_ROUTE", mode: if is_tls { "tls" } else { "tcp" },
-                    route_label: None, upstream: None,
+                    status: "NO_ROUTE",
+                    mode: if is_tls { "tls" } else { "tcp" },
+                    route_label: None,
+                    upstream: None,
                 };
             }
         };
 
         let route_label = Some(
-            route_match.route_name.clone()
+            route_match
+                .route_name
+                .clone()
                 .unwrap_or_else(|| route_match.route_id.to_string()),
         );
 
@@ -225,8 +231,10 @@ impl KongStreamProxy {
                     Ok(s) => s,
                     Err(_) => {
                         return StreamProxyResult {
-                            status: "SVC_ERR", mode: if is_tls { "tls" } else { "tcp" },
-                            route_label, upstream: None,
+                            status: "SVC_ERR",
+                            mode: if is_tls { "tls" } else { "tcp" },
+                            route_label,
+                            upstream: None,
                         };
                     }
                 };
@@ -240,8 +248,10 @@ impl KongStreamProxy {
             _ => {
                 tracing::debug!("Stream 路由 {} 无有效 Service", route_match.route_id);
                 return StreamProxyResult {
-                    status: "NO_SVC", mode: if is_tls { "tls" } else { "tcp" },
-                    route_label, upstream: None,
+                    status: "NO_SVC",
+                    mode: if is_tls { "tls" } else { "tcp" },
+                    route_label,
+                    upstream: None,
                 };
             }
         };
@@ -252,8 +262,10 @@ impl KongStreamProxy {
             None => {
                 tracing::error!("Stream 上游解析失败: {}", service.host);
                 return StreamProxyResult {
-                    status: "UPSTREAM_ERR", mode: if is_tls { "tls" } else { "tcp" },
-                    route_label, upstream: Some(service.host.clone()),
+                    status: "UPSTREAM_ERR",
+                    mode: if is_tls { "tls" } else { "tcp" },
+                    route_label,
+                    upstream: Some(service.host.clone()),
                 };
             }
         };
@@ -274,7 +286,12 @@ impl KongStreamProxy {
 
         let result = if is_passthrough {
             self.proxy_passthrough(downstream, &upstream_addr).await
-        } else if is_tls && route_match.protocols.iter().any(|p| matches!(p, Protocol::Tls)) {
+        } else if is_tls
+            && route_match
+                .protocols
+                .iter()
+                .any(|p| matches!(p, Protocol::Tls))
+        {
             // TLS Termination: simplified as TCP passthrough for now — TLS Termination 暂作为 TCP 透传
             // TODO: 实现完整 TLS termination（SslAcceptor + CertificateManager）
             tracing::warn!(
@@ -283,7 +300,8 @@ impl KongStreamProxy {
             );
             self.proxy_passthrough(downstream, &upstream_addr).await
         } else {
-            self.proxy_tcp(downstream, &upstream_addr, upstream_tls).await
+            self.proxy_tcp(downstream, &upstream_addr, upstream_tls)
+                .await
         };
 
         let status = if result.is_ok() { "OK" } else { "ERR" };
@@ -292,7 +310,10 @@ impl KongStreamProxy {
         }
 
         StreamProxyResult {
-            status, mode, route_label, upstream: Some(upstream_addr),
+            status,
+            mode,
+            route_label,
+            upstream: Some(upstream_addr),
         }
     }
 
@@ -335,21 +356,20 @@ impl KongStreamProxy {
             (addr, 80u16)
         };
 
-        let socket_addr = self.dns_resolver.resolve(host, port).await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                Box::from(format!("上游��址解析失败 {}: {}", addr, e))
-            })?;
+        let socket_addr = self.dns_resolver.resolve(host, port).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!("上游址解析失败 {}: {}", addr, e))
+            },
+        )?;
 
         // Build connection using BasicPeer (plain TCP, no TLS) — 使用 BasicPeer 构建连接（纯 TCP，不做 TLS）
         let peer = BasicPeer::new(&socket_addr.to_string());
 
-        let stream = self
-            .connector
-            .new_stream(&peer)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+        let stream = self.connector.new_stream(&peer).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
                 Box::from(format!("上游连接失败 {}: {}", addr, e))
-            })?;
+            },
+        )?;
 
         Ok(stream)
     }
@@ -368,7 +388,9 @@ impl ServerApp for KongStreamProxy {
 }
 
 /// Extract client and local addresses from Stream's SocketDigest — 从 Stream 的 SocketDigest 中提取客户端和本地地址
-fn extract_addrs(stream: &dyn pingora_core::protocols::IO) -> (Option<IpAddr>, Option<u16>, Option<IpAddr>, Option<u16>) {
+fn extract_addrs(
+    stream: &dyn pingora_core::protocols::IO,
+) -> (Option<IpAddr>, Option<u16>, Option<IpAddr>, Option<u16>) {
     let digest = stream.get_socket_digest();
 
     let (source_ip, source_port) = digest

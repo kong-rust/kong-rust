@@ -211,9 +211,7 @@ mod tests {
 
     #[test]
     fn test_parse_localhost() {
-        let addr: ListenAddr = "127.0.0.1:8001 reuseport backlog=16384"
-            .parse()
-            .unwrap();
+        let addr: ListenAddr = "127.0.0.1:8001 reuseport backlog=16384".parse().unwrap();
         assert_eq!(addr.ip, "127.0.0.1");
         assert_eq!(addr.port, 8001);
         assert!(addr.reuseport);

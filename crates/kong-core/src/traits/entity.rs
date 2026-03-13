@@ -1,4 +1,4 @@
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 
 /// Entity marker trait — all Kong data models must implement this — 实体标记 trait — 所有 Kong 数据模型必须实现
