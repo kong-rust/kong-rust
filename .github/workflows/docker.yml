@@ -22,7 +22,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run full test suite
-        run: make test
+        run: cargo test --workspace --locked
 
   docker:
     needs: test
