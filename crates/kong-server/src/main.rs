@@ -705,6 +705,12 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
         };
         tracing::info!("Admin API 监听于: {}", bind_addr);
 
+        let status_bind = self
+            .config
+            .status_listen
+            .first()
+            .map(|addr| format!("{}:{}", addr.ip, addr.port));
+
         // Start cache refresh debounce background task — 启动缓存刷新防抖后台任务
         if let Some(rx) = self.refresh_rx.lock().unwrap().take() {
             let state = self.state.clone();
@@ -756,6 +762,22 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
         }
 
         let app = kong_admin::build_admin_router(self.state.clone());
+        if let Some(status_bind_addr) = status_bind {
+            let status_app = kong_admin::build_status_router(self.state.clone());
+            tracing::info!("Status API 监听于: {}", status_bind_addr);
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&status_bind_addr).await {
+                    Ok(listener) => {
+                        if let Err(e) = axum::serve(listener, status_app).await {
+                            tracing::error!("Status API 异常退出: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Status API 绑定失败 {}: {e}", status_bind_addr);
+                    }
+                }
+            });
+        }
 
         let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
             Ok(l) => l,

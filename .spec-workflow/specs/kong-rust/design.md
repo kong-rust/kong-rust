@@ -44,6 +44,7 @@ graph TB
     Client[客户端请求] --> ProxyListener[HTTP Proxy Listener<br/>0.0.0.0:8000/8443]
     StreamClient[L4 TCP/TLS 连接] --> StreamListener[Stream Proxy Listener<br/>stream_listen 端口]
     AdminClient[管理请求] --> AdminListener[Admin API Listener<br/>127.0.0.1:8001]
+    StatusClient[状态/监控抓取] --> StatusListener[Status API Listener<br/>127.0.0.1:8007]
 
     subgraph KongRust[Kong-Rust 进程 — Traditional / CP+DP]
         ProxyListener --> Router[HTTP 路由引擎<br/>kong-router]
@@ -57,13 +58,17 @@ graph TB
         StreamProxy --> UpstreamConn
 
         AdminListener --> AdminAPI[Admin API<br/>kong-admin / axum]
+        StatusListener --> StatusAPI[Status API<br/>/status + /metrics]
         AdminAPI --> DAO[数据访问层<br/>kong-db]
+        StatusAPI --> DAO
         DAO --> Cache[缓存层<br/>moka]
         DAO --> DB[(PostgreSQL)]
 
         LuaBridge --> LuaVM[LuaJIT VM<br/>mlua]
         LuaVM --> PDK[PDK 兼容层]
         PDK --> PluginChain
+        StatusAPI --> MetricsCollector[Prometheus 指标收集器]
+        MetricsCollector --> LuaBridge
 
         Router --> DAO
         PluginChain --> DAO
@@ -400,7 +405,7 @@ pub struct KongConfig {
     // 监听配置
     pub proxy_listen: Vec<ListenAddr>,   // 默认 0.0.0.0:8000
     pub admin_listen: Vec<ListenAddr>,   // 默认 127.0.0.1:8001
-    pub status_listen: Option<Vec<ListenAddr>>,
+    pub status_listen: Vec<ListenAddr>,  // 默认 127.0.0.1:8007，设为 off 表示禁用
 
     // 数据库
     pub database: DatabaseType,          // postgres 或 off（db-less）
@@ -632,6 +637,8 @@ pub struct PluginInstance {
 - **LuaJIT VM 池**：每个 worker 线程维护一个 LuaJIT VM 池，避免跨线程共享 Lua 状态
 - **PDK 注入**：在 Lua 全局表中注入 `kong` 对象，所有方法通过 Rust 回调实现
 - **ngx.* 兼容**：提供常用 ngx.* API 的兼容实现（ngx.say、ngx.exit、ngx.var 等）
+- **共享字典语义对齐**：`ngx.shared` 使用进程级共享存储，保证业务请求阶段写入的指标可被独立 status 请求读取
+- **Prometheus 收集器**：通过独立 Lua VM 执行官方 `kong.plugins.prometheus.exporter` 生命周期，在 status 端口输出文本指标
 
 ```rust
 pub struct LuaBridge {
@@ -689,13 +696,15 @@ impl PluginHandler for LuaPluginHandler {
 
 ### 组件 8：kong-admin — Admin API
 
-**职责：** 使用 axum 实现与 Kong 完全兼容的 Admin API。
+**职责：** 使用 axum 实现与 Kong 完全兼容的 Admin API，并提供与官方 Kong 对齐的独立 Status API。
 
 **关键设计：**
 
 - 使用泛型 CRUD handler 减少重复代码，类似 Kong 的 `endpoints.lua` 自动生成机制
 - 错误响应格式与 Kong 完全一致（`{ "message": "...", "name": "...", "code": ... }`）
 - 分页响应格式与 Kong 完全一致（`{ "data": [...], "next": "/path?offset=..." }`）
+- `admin_listen` 与 `status_listen` 分离：`8001` 负责管理接口，`8007` 默认仅监听本机并暴露 `/status`、`/metrics`
+- `GET /metrics` 不直接手写指标，而是读取已启用的 `prometheus` 插件实例配置，调用官方 exporter 生成 exposition 文本
 
 ```rust
 // 泛型 CRUD 路由注册
@@ -731,6 +740,7 @@ pub struct PageResponse<T: Serialize> {
 graph TB
     subgraph ControlPlane[Control Plane 节点]
         AdminAPI2[Admin API<br/>127.0.0.1:8001] --> DAO2[DAO 层]
+        StatusAPI2[Status API<br/>127.0.0.1:8007] --> DAO2
         DAO2 --> DB2[(PostgreSQL)]
         DAO2 --> ConfigExporter[配置导出器]
         ConfigExporter --> HashCalculator[多级哈希计算器]
@@ -997,11 +1007,13 @@ match config.role {
     Traditional => {
         启动 Database 连接
         启动 Admin API（admin_listen）
+        启动 Status API（status_listen，默认 127.0.0.1:8007）
         启动 Proxy（proxy_listen）
     }
     ControlPlane => {
         启动 Database 连接
         启动 Admin API（admin_listen）
+        启动 Status API（status_listen）
         启动 CP WebSocket 服务端（cluster_listen）
         // 不启动 Proxy
     }
@@ -1009,7 +1021,7 @@ match config.role {
         启动 DP WebSocket 客户端（连接 cluster_control_plane）
         等待首次配置同步完成
         启动 Proxy（proxy_listen）
-        // 不启动 Admin API，不连接数据库
+        // 不启动 Admin API / Status API，不连接数据库
     }
 }
 ```

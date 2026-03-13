@@ -220,7 +220,8 @@ impl Default for KongConfig {
             admin_listen: parse_listen_addresses(
                 "127.0.0.1:8001 reuseport backlog=16384, 127.0.0.1:8444 http2 ssl reuseport backlog=16384",
             ).unwrap_or_default(),
-            status_listen: parse_listen_addresses("off").unwrap_or_default(),
+            status_listen: parse_listen_addresses("127.0.0.1:8007 reuseport backlog=16384")
+                .unwrap_or_default(),
             stream_listen: parse_listen_addresses("off").unwrap_or_default(),
             admin_gui_listen: parse_listen_addresses(
                 "0.0.0.0:8002, 0.0.0.0:8445 ssl",

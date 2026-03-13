@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use kong_admin::{build_admin_router, AdminState};
+use kong_admin::{build_admin_router, build_status_router, AdminState};
 use kong_core::models::*;
 use kong_db::{DblessDao, DblessStore};
 
@@ -52,6 +52,109 @@ fn create_test_app() -> axum::Router {
     };
 
     build_admin_router(state)
+}
+
+/// Create a test Status API application — 创建测试用的 Status API 应用
+fn create_test_status_app() -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+
+    let mut config = kong_config::KongConfig::default();
+    config.prefix = std::env::current_dir().unwrap().display().to_string();
+    let config = Arc::new(config);
+
+    let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+        dns_resolver,
+        Arc::clone(&config),
+    );
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config,
+        proxy,
+        refresh_tx,
+        stream_router: None,
+    };
+
+    build_status_router(state)
+}
+
+/// Create a Status API application with a prometheus plugin instance — 创建带 prometheus 插件实例的 Status API 应用
+fn create_test_status_app_with_prometheus() -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+
+    store
+        .load_from_json(&json!({
+            "_format_version": "3.0",
+            "plugins": [
+                {
+                    "id": "ba23b46a-6a57-4f78-a8d3-0c12f758f6d7",
+                    "name": "prometheus",
+                    "enabled": true,
+                    "config": {
+                        "status_code_metrics": true,
+                        "latency_metrics": true,
+                        "bandwidth_metrics": true,
+                        "upstream_health_metrics": true
+                    },
+                    "created_at": 1609459200,
+                    "updated_at": 1609459200
+                }
+            ]
+        }))
+        .unwrap();
+
+    let mut config = kong_config::KongConfig::default();
+    config.prefix = std::env::current_dir().unwrap().display().to_string();
+    let config = Arc::new(config);
+
+    let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+        dns_resolver,
+        Arc::clone(&config),
+    );
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config,
+        proxy,
+        refresh_tx,
+        stream_router: None,
+    };
+
+    build_status_router(state)
 }
 
 /// Create a test application with preloaded data — 创建预加载数据的测试应用
@@ -260,6 +363,51 @@ async fn test_status_endpoint() {
 
     let db = json.get("database").unwrap();
     assert!(db.get("reachable").is_some());
+}
+
+#[tokio::test]
+async fn test_status_metrics_without_prometheus_plugin() {
+    let app = create_test_status_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_status_metrics_with_prometheus_plugin() {
+    let app = create_test_status_app_with_prometheus();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+        "text/plain; charset=utf-8"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let metrics = String::from_utf8(body.to_vec()).unwrap();
+    assert!(metrics.contains("# HELP kong_node_info"));
+    assert!(metrics.contains("kong_memory_lua_shared_dict_total_bytes"));
 }
 
 // ========== Service CRUD tests — Service CRUD 测试 ==========

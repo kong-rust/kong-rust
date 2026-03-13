@@ -1,7 +1,47 @@
 use mlua::prelude::*;
 use regex::RegexBuilder;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::runtime;
+
+#[derive(Clone)]
+enum SharedValue {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+}
+
+type SharedDictData = HashMap<String, SharedValue>;
+type SharedDictRegistry = HashMap<String, SharedDictData>;
+
+fn shared_dict_registry() -> &'static Mutex<SharedDictRegistry> {
+    static REGISTRY: OnceLock<Mutex<SharedDictRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lua_value_to_shared(value: LuaValue) -> LuaResult<Option<SharedValue>> {
+    match value {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(value) => Ok(Some(SharedValue::String(
+            value.to_string_lossy().to_string(),
+        ))),
+        LuaValue::Integer(value) => Ok(Some(SharedValue::Number(value as f64))),
+        LuaValue::Number(value) => Ok(Some(SharedValue::Number(value))),
+        LuaValue::Boolean(value) => Ok(Some(SharedValue::Boolean(value))),
+        _ => Err(LuaError::external(
+            "unsupported ngx.shared value type — 不支持的 ngx.shared 值类型",
+        )),
+    }
+}
+
+fn shared_to_lua_value(lua: &Lua, value: &SharedValue) -> LuaResult<LuaValue> {
+    match value {
+        SharedValue::String(value) => Ok(LuaValue::String(lua.create_string(value)?)),
+        SharedValue::Number(value) => Ok(LuaValue::Number(*value)),
+        SharedValue::Boolean(value) => Ok(LuaValue::Boolean(*value)),
+    }
+}
 
 fn render_lua_values(values: LuaMultiValue) -> String {
     values
@@ -60,9 +100,18 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
     methods.set(
         "get",
         lua.create_function(
-            |_, (dict, key): (LuaTable, String)| -> LuaResult<LuaValue> {
-                let data: LuaTable = dict.get("__data")?;
-                data.get(key)
+            |lua, (dict, key): (LuaTable, String)| -> LuaResult<LuaValue> {
+                let dict_name: String = dict.get("__name")?;
+                let registry = shared_dict_registry()
+                    .lock()
+                    .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
+                let Some(data) = registry.get(&dict_name) else {
+                    return Ok(LuaValue::Nil);
+                };
+                let Some(value) = data.get(&key) else {
+                    return Ok(LuaValue::Nil);
+                };
+                shared_to_lua_value(lua, value)
             },
         )?,
     )?;
@@ -70,8 +119,16 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
         "set",
         lua.create_function(
             |_, (dict, key, value): (LuaTable, String, LuaValue)| -> LuaResult<bool> {
-                let data: LuaTable = dict.get("__data")?;
-                data.set(key, value)?;
+                let dict_name: String = dict.get("__name")?;
+                let mut registry = shared_dict_registry()
+                    .lock()
+                    .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
+                let data = registry.entry(dict_name).or_default();
+                if let Some(value) = lua_value_to_shared(value)? {
+                    data.insert(key, value);
+                } else {
+                    data.remove(&key);
+                }
                 Ok(true)
             },
         )?,
@@ -79,8 +136,13 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
     methods.set(
         "delete",
         lua.create_function(|_, (dict, key): (LuaTable, String)| -> LuaResult<bool> {
-            let data: LuaTable = dict.get("__data")?;
-            data.set(key, LuaValue::Nil)?;
+            let dict_name: String = dict.get("__name")?;
+            let mut registry = shared_dict_registry()
+                .lock()
+                .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
+            if let Some(data) = registry.get_mut(&dict_name) {
+                data.remove(&key);
+            }
             Ok(true)
         })?,
     )?;
@@ -90,15 +152,27 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
             |_,
              (dict, key, value, init): (LuaTable, String, f64, Option<f64>)|
              -> LuaResult<(f64, LuaValue, LuaValue)> {
-                let data: LuaTable = dict.get("__data")?;
-                let current = match data.get::<LuaValue>(key.clone())? {
-                    LuaValue::Integer(number) => number as f64,
-                    LuaValue::Number(number) => number,
-                    LuaValue::Nil => init.unwrap_or(0.0),
-                    _ => init.unwrap_or(0.0),
+                let dict_name: String = dict.get("__name")?;
+                let mut registry = shared_dict_registry()
+                    .lock()
+                    .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
+                let data = registry.entry(dict_name).or_default();
+                let current = match data.get(&key) {
+                    Some(SharedValue::Number(number)) => *number,
+                    Some(SharedValue::String(number)) => {
+                        number.parse::<f64>().unwrap_or(init.unwrap_or(0.0))
+                    }
+                    Some(SharedValue::Boolean(number)) => {
+                        if *number {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    None => init.unwrap_or(0.0),
                 };
                 let next = current + value;
-                data.set(key, next)?;
+                data.insert(key, SharedValue::Number(next));
                 Ok((next, LuaValue::Nil, LuaValue::Nil))
             },
         )?,
@@ -107,13 +181,17 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
         "get_keys",
         lua.create_function(
             |lua, (dict, _max): (LuaTable, i64)| -> LuaResult<LuaTable> {
-                let data: LuaTable = dict.get("__data")?;
+                let dict_name: String = dict.get("__name")?;
+                let registry = shared_dict_registry()
+                    .lock()
+                    .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
                 let keys = lua.create_table()?;
                 let mut index = 1;
-                for pair in data.pairs::<String, LuaValue>() {
-                    let (key, _) = pair?;
-                    keys.set(index, key)?;
-                    index += 1;
+                if let Some(data) = registry.get(&dict_name) {
+                    for key in data.keys() {
+                        keys.set(index, key.clone())?;
+                        index += 1;
+                    }
                 }
                 Ok(keys)
             },
@@ -121,8 +199,12 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
     )?;
     methods.set(
         "flush_all",
-        lua.create_function(|lua, dict: LuaTable| -> LuaResult<bool> {
-            dict.set("__data", lua.create_table()?)?;
+        lua.create_function(|_, dict: LuaTable| -> LuaResult<bool> {
+            let dict_name: String = dict.get("__name")?;
+            let mut registry = shared_dict_registry()
+                .lock()
+                .map_err(|_| LuaError::external("shared dict registry poisoned"))?;
+            registry.insert(dict_name, HashMap::new());
             Ok(true)
         })?,
     )?;
@@ -373,7 +455,7 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
             }
 
             let dict = lua.create_table()?;
-            dict.set("__data", lua.create_table()?)?;
+            dict.set("__name", key.clone())?;
             let meta = lua.create_table()?;
             meta.set(
                 "__index",

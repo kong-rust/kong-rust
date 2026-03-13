@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 kong-core = { workspace = true }
+kong-config = { workspace = true }
 kong-db = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

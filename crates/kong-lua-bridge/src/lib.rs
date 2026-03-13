@@ -7,6 +7,7 @@
 //! - Provide ngx.* compatibility layer — 提供 ngx.* 兼容层
 
 pub mod loader;
+pub mod metrics;
 pub mod pdk;
 pub mod runtime;
 pub mod vm;
@@ -61,6 +62,13 @@ impl PluginHandler for LuaPluginHandler {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn has_body_filter(&self) -> bool {
+        self.phases
+            .get(&Phase::BodyFilter)
+            .copied()
+            .unwrap_or(false)
     }
 
     async fn access(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {

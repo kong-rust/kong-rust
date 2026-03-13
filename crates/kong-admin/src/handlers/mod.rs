@@ -11,8 +11,8 @@ pub use schemas::*;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -116,7 +116,7 @@ impl ListParams {
 
 /// Kong-compatible error response format — Kong 兼容的错误响应格式
 #[allow(dead_code)]
-fn error_response(err: KongError) -> impl IntoResponse {
+fn error_response(err: KongError) -> Response {
     let status =
         StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = json!({
@@ -124,7 +124,7 @@ fn error_response(err: KongError) -> impl IntoResponse {
         "name": err.error_name(),
         "code": err.error_code(),
     });
-    (status, Json(body))
+    (status, Json(body)).into_response()
 }
 
 // ============ Special endpoints — 特殊端点 ============
@@ -270,6 +270,50 @@ pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse 
         },
         "configuration_hash": "00000000000000000000000000000000",
     }))
+}
+
+/// GET /metrics — Prometheus metrics from the status port — GET /metrics — 从状态端口暴露的 Prometheus 指标
+pub async fn status_metrics(State(state): State<AdminState>) -> Response {
+    let params = PageParams {
+        size: 1000,
+        offset: None,
+        tags: None,
+    };
+    let plugin_page = match state.plugins.page(&params).await {
+        Ok(page) => page,
+        Err(err) => return error_response(err),
+    };
+
+    let prometheus_configs = plugin_page
+        .data
+        .into_iter()
+        .filter(|plugin| plugin.enabled && plugin.name == "prometheus")
+        .map(|plugin| plugin.config)
+        .collect::<Vec<_>>();
+
+    if prometheus_configs.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": "prometheus plugin is not enabled",
+                "name": "not found",
+                "code": 3,
+            })),
+        )
+            .into_response();
+    }
+
+    match kong_lua_bridge::metrics::collect_prometheus_metrics(&state.config, &prometheus_configs) {
+        Ok(metrics) => {
+            let mut response = metrics.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            response
+        }
+        Err(err) => error_response(err).into_response(),
+    }
 }
 
 // ============ Generic CRUD endpoints — 通用 CRUD 端点 ============

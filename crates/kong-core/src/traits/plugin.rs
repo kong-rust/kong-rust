@@ -149,6 +149,11 @@ pub trait PluginHandler: Send + Sync {
     /// Plugin name — 插件名称
     fn name(&self) -> &str;
 
+    /// Whether the plugin implements the body_filter phase. — 插件是否实现了 body_filter 阶段。
+    fn has_body_filter(&self) -> bool {
+        false
+    }
+
     /// Worker process initialization — Worker 进程初始化
     async fn init_worker(&self, _config: &PluginConfig) -> Result<()> {
         Ok(())

@@ -1037,6 +1037,14 @@ impl ProxyHttp for KongProxy {
             return Ok(None);
         }
 
+        if !ctx
+            .resolved_plugins
+            .iter()
+            .any(|plugin| plugin.handler.has_body_filter())
+        {
+            return Ok(None);
+        }
+
         // body_filter must execute synchronously (Pingora's response_body_filter is synchronous) — body_filter 需要同步执行（Pingora 的 response_body_filter 是同步的）
         // Using block_on to adapt async plugin interface — 使用 block_on 适配异步插件接口
         if let Some(ref mut body_bytes) = body {

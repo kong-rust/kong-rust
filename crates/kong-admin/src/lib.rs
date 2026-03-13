@@ -224,6 +224,16 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .with_state(state)
 }
 
+/// Build the Status API router — 构建 Status API 路由
+pub fn build_status_router(state: AdminState) -> Router {
+    use handlers::*;
+
+    Router::new()
+        .route("/status", get(status_info))
+        .route("/metrics", get(status_metrics))
+        .with_state(state)
+}
+
 /// Build the Kong Manager GUI router (static file server for SPA) — 构建 Kong Manager GUI 路由（SPA 静态文件服务）
 ///
 /// - `GET /` → 301 redirect to `/__km_base__/` — 301 重定向到 `/__km_base__/`
