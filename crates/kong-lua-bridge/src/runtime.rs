@@ -193,7 +193,18 @@ package.preload["resty.counter"] = function()
 
   function Counter:incr(key, value)
     value = value or 1
-    self.pending[key] = (self.pending[key] or 0) + value
+
+    -- Flush immediately in the compatibility runtime because each phase uses a
+    -- fresh Lua VM and there is no real ngx timer loop to sync per-worker
+    -- counters later. — 在兼容运行时中立即刷入共享字典，因为每个阶段都会使用新的 Lua VM，
+    -- 并且当前没有真实的 ngx 定时器循环去稍后同步 worker 本地计数器。
+    local dict = ngx.shared[self.dict_name]
+    if not dict then
+      return nil, "shared dict not found: " .. tostring(self.dict_name)
+    end
+
+    dict:incr(key, value, 0)
+    self.pending[key] = nil
   end
 
   function Counter:sync()

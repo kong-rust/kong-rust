@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 use kong_lua_bridge::{loader, runtime};
 use serde_json::json;
+use uuid::Uuid;
 
 fn prometheus_plugin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kong/plugins/prometheus")
@@ -154,8 +155,6 @@ async fn test_transplanted_prometheus_handler_runs_and_exports_metrics() {
         "latencies": { "request": 30, "proxy": 12, "kong": 18 }
     }));
 
-    handler.log(&config, &mut ctx).await.unwrap();
-
     let lua = unsafe { mlua::Lua::unsafe_new() };
     setup_prometheus_lua(&lua, &mut ctx, "init");
     lua.load(r#"handler = require("kong.plugins.prometheus.handler")"#)
@@ -240,6 +239,74 @@ async fn test_transplanted_prometheus_handler_runs_and_exports_metrics() {
     );
     assert!(
         metrics.contains(r#"kong_bandwidth_bytes{service="svc",route="route-1",direction="egress",workspace="default",consumer="alice"} 512"#),
+        "{}",
+        metrics
+    );
+}
+
+#[tokio::test]
+async fn test_transplanted_prometheus_handler_accepts_default_log_serialize_ids() {
+    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kong/plugins");
+    let handlers = loader::load_lua_plugins(&[plugin_root], &["prometheus".to_string()]).unwrap();
+    let handler = &handlers[0];
+
+    let config = PluginConfig {
+        name: "prometheus".to_string(),
+        config: json!({
+            "per_consumer": false,
+            "status_code_metrics": true,
+            "latency_metrics": false,
+            "bandwidth_metrics": false,
+            "ai_metrics": false,
+            "upstream_health_metrics": false,
+            "wasm_metrics": false
+        }),
+    };
+
+    let mut ctx = RequestCtx::new();
+    ctx.route_id = Some(Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap());
+    ctx.service_id = Some(Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap());
+    ctx.response_status = Some(401);
+    ctx.response_source = Some("service".to_string());
+
+    handler.log(&config, &mut ctx).await.unwrap();
+
+    let lua = unsafe { mlua::Lua::unsafe_new() };
+    setup_prometheus_lua(&lua, &mut RequestCtx::new(), "init");
+    lua.load(r#"handler = require("kong.plugins.prometheus.handler")"#)
+        .exec()
+        .unwrap();
+    runtime::set_phase(&lua, "init_worker").unwrap();
+    lua.load(r#"handler:init_worker({})"#).exec().unwrap();
+    let metrics: String = lua
+        .load(
+            r#"
+            local exporter = require("kong.plugins.prometheus.exporter")
+            handler:configure({
+              {
+                per_consumer = false,
+                status_code_metrics = true,
+                latency_metrics = false,
+                bandwidth_metrics = false,
+                ai_metrics = false,
+                upstream_health_metrics = false,
+                wasm_metrics = false,
+              }
+            })
+            exporter.init()
+            ngx.update_time()
+            local chunks = {}
+            exporter.metric_data(function(chunk)
+              chunks[#chunks + 1] = chunk
+            end)
+            return table.concat(chunks)
+        "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert!(
+        metrics.contains(r#"kong_http_requests_total{service="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",route="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",code="401",source="service",workspace="",consumer=""} 1"#),
         "{}",
         metrics
     );

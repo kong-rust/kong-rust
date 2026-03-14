@@ -3,6 +3,8 @@ use mlua::prelude::*;
 use mlua::LuaSerdeExt;
 use std::collections::HashMap;
 
+use crate::metrics;
+
 fn parse_query_string(query: &str) -> HashMap<String, String> {
     query
         .split('&')
@@ -26,6 +28,7 @@ fn default_log_serialize(lua: &Lua, ctx: &RequestCtx) -> LuaResult<LuaValue> {
     if let Some(service_id) = ctx.service_id {
         let service = lua.create_table()?;
         service.set("id", service_id.to_string())?;
+        service.set("name", service_id.to_string())?;
         message.set("service", service)?;
     }
 
@@ -614,10 +617,11 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         "get_statistics",
         lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
             let stats = lua.create_table()?;
+            let total_requests = metrics::http_total_requests() as i64;
             for (key, value) in [
                 ("connections_accepted", 0),
                 ("connections_handled", 0),
-                ("total_requests", 0),
+                ("total_requests", total_requests),
                 ("connections_active", 0),
                 ("connections_reading", 0),
                 ("connections_writing", 0),

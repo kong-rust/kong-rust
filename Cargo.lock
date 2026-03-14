@@ -1583,6 +1583,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1611,6 +1612,7 @@ dependencies = [
  "kong-config",
  "kong-core",
  "kong-db",
+ "kong-lua-bridge",
  "kong-plugin-system",
  "kong-router",
  "pingora",

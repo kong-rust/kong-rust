@@ -9,6 +9,7 @@ kong-config = { workspace = true }
 kong-db = { workspace = true }
 kong-router = { workspace = true }
 kong-plugin-system = { workspace = true }
+kong-lua-bridge = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

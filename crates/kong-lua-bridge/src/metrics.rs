@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kong_config::KongConfig;
 use kong_core::error::{KongError, Result};
@@ -7,6 +8,18 @@ use mlua::prelude::{LuaFunction, LuaTable};
 use mlua::LuaSerdeExt;
 
 use crate::{loader, pdk, runtime};
+
+static HTTP_TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// Record a completed HTTP request for Kong runtime statistics. — 为 Kong 运行时统计记录一次已完成的 HTTP 请求。
+pub fn record_http_request() {
+    HTTP_TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Return the accumulated HTTP request count exposed via kong.nginx.get_statistics(). — 返回通过 kong.nginx.get_statistics() 暴露的累计 HTTP 请求数。
+pub fn http_total_requests() -> u64 {
+    HTTP_TOTAL_REQUESTS.load(Ordering::Relaxed)
+}
 
 /// Render Prometheus metrics through the transplanted official plugin runtime. — 通过移植后的官方插件运行时渲染 Prometheus 指标文本。
 pub fn collect_prometheus_metrics(

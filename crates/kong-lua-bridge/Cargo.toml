@@ -16,3 +16,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 regex = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

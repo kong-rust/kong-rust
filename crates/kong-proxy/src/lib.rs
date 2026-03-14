@@ -66,6 +66,10 @@ pub struct KongCtx {
     pub last_body_chunk_at: Option<std::time::Instant>,
     /// proxy 注入到 upstream 请求的 real-ip header 键值对，用于 access log 输出
     pub injected_real_ip_headers: Vec<(String, String)>,
+    /// Request start time (for latency tracking) — 请求开始时间（用于延迟统计）
+    pub request_start_time: std::time::Instant,
+    /// Upstream response received time (for latency tracking) — 上游响应接收时间（用于延迟统计）
+    pub upstream_response_time: Option<std::time::Instant>,
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
@@ -503,6 +507,8 @@ impl ProxyHttp for KongProxy {
             deferred_header_filter: false,
             last_body_chunk_at: None,
             injected_real_ip_headers: Vec::new(),
+            request_start_time: std::time::Instant::now(),
+            upstream_response_time: None,
         }
     }
 
@@ -1079,6 +1085,9 @@ impl ProxyHttp for KongProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
+        // Record upstream response time for latency tracking — 记录上游响应时间用于延迟统计
+        ctx.upstream_response_time = Some(std::time::Instant::now());
+
         // Populate response snapshot into RequestCtx — 填充响应快照到 RequestCtx
         ctx.plugin_ctx.response_status = Some(upstream_response.status.as_u16());
         ctx.plugin_ctx.response_headers.clear();
@@ -1350,6 +1359,62 @@ impl ProxyHttp for KongProxy {
             status,
             upstream
         );
+
+        kong_lua_bridge::metrics::record_http_request();
+        if status > 0 {
+            ctx.plugin_ctx.response_status = Some(status);
+        }
+        if ctx.plugin_ctx.response_source.is_none() {
+            ctx.plugin_ctx.response_source = Some("service".to_string());
+        }
+
+        // Calculate latencies for prometheus plugin — 计算延迟指标供 prometheus 插件使用
+        let now = std::time::Instant::now();
+        let request_latency = now.duration_since(ctx.request_start_time).as_millis() as i64;
+        let (kong_latency, proxy_latency) = if let Some(upstream_time) = ctx.upstream_response_time {
+            let proxy = upstream_time.duration_since(ctx.request_start_time).as_millis() as i64;
+            let kong = now.duration_since(upstream_time).as_millis() as i64;
+            (kong, proxy)
+        } else {
+            // If no upstream response time recorded (e.g., short-circuited), all latency is Kong latency — 如果没记录到上游响应时间（如短路），所有延迟都算 Kong 延迟
+            (request_latency, 0)
+        };
+
+        // Build latencies object for kong.log.serialize() — 构建 latencies 对象供 kong.log.serialize() 使用
+        let latencies = serde_json::json!({
+            "kong": kong_latency,
+            "request": request_latency,
+            "proxy": proxy_latency,
+            "session": null
+        });
+
+        // Populate log_serialize for Lua plugins (prometheus plugin expects this) — 填充 log_serialize 供 Lua 插件使用（prometheus 插件依赖此数据）
+        let service_name = ctx.service.as_ref().and_then(|s| s.name.clone()).unwrap_or_default();
+        let route_id = ctx.route_match.as_ref().map(|rm| rm.route_id.to_string()).unwrap_or_default();
+
+        ctx.plugin_ctx.log_serialize = Some(serde_json::json!({
+            "service": {
+                "id": ctx.service.as_ref().map(|s| s.id.to_string()).unwrap_or_default(),
+                "name": service_name,
+                "host": ctx.service.as_ref().map(|s| s.host.clone()).unwrap_or_default()
+            },
+            "route": {
+                "id": route_id.clone(),
+                "name": route_id
+            },
+            "request": {
+                "method": method,
+                "path": uri,
+                "size": session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>() as i64
+            },
+            "response": {
+                "status": status,
+                "size": session.response_written().map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>()).unwrap_or(0) as i64
+            },
+            "latencies": latencies,
+            "consumer": null,
+            "workspace_name": ""
+        }));
 
         // Execute plugin log phase (always executes, even after short-circuit) — 执行插件 log 阶段（总是执行，即使之前短路）
         if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
