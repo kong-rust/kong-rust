@@ -132,6 +132,15 @@ Kong-Rust 使用与 Kong 相同的 `kong.conf` 配置格式。完整配置项请
 | `router_flavor` | `traditional_compatible` | 路由引擎（`traditional_compatible` 或 `expressions`） |
 
 支持 `KONG_` 前缀的环境变量覆盖（例如 `KONG_PG_PORT=5433`）。
+测试同时支持官方 Kong 风格的 `KONG_TEST_*` 和 `KONG_SPEC_TEST_*` 变量，测试入口会在调用 `cargo test` 前自动映射为实际生效的 `KONG_*` 变量，并默认使用 `KONG_DATABASE=postgres`，与 Kong 默认测试策略保持一致。
+
+示例：
+
+```bash
+KONG_TEST_DATABASE=postgres KONG_TEST_PG_PORT=55432 make test
+KONG_TEST_DATABASE=off make test
+./scripts/run-cargo-test.sh --print-effective-env
+```
 
 ## 开发
 
@@ -139,7 +148,9 @@ Kong-Rust 使用与 Kong 相同的 `kong.conf` 配置格式。完整配置项请
 |------|------|
 | `make build` | 编译（debug） |
 | `make check` | 快速类型检查 |
-| `make test` | 运行所有测试 |
+| `make test` | 运行所有测试（默认等价于 `KONG_TEST_DATABASE=postgres`） |
+| `make test-pg` | 自动启动本地 PostgreSQL 测试依赖，并以 `KONG_TEST_DATABASE=postgres` 运行测试 |
+| `make test-dbless` | 以 `KONG_TEST_DATABASE=off` 运行测试 |
 | `make fmt` | 格式化代码 |
 | `make lint` | Clippy 静态分析 |
 | `make dev` | 全栈启动（PG + 初始化 + 运行） |

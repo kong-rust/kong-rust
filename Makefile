@@ -21,27 +21,44 @@ build-crate:
 
 # ---------- 测试 ----------
 
+TEST_RUNNER = ./scripts/run-cargo-test.sh
+
 # 运行所有测试
 test:
-	cargo test --workspace
+	KONG_TEST_DATABASE=$${KONG_TEST_DATABASE:-postgres} $(TEST_RUNNER) --workspace
 
 # 运行单个 crate 的测试
 # 用法: make crate=kong-router test-crate
 test-crate:
-	cargo test -p $(crate)
+	KONG_TEST_DATABASE=$${KONG_TEST_DATABASE:-postgres} $(TEST_RUNNER) -p $(crate)
 
 # 运行匹配名称的测试
 # 用法: make name=test_route_match test-name
 test-name:
-	cargo test --workspace $(name) -- --nocapture
+	KONG_TEST_DATABASE=$${KONG_TEST_DATABASE:-postgres} $(TEST_RUNNER) --workspace $(name) -- --nocapture
 
 # 运行测试并显示输出（不捕获 stdout/stderr）
 test-verbose:
-	cargo test --workspace -- --nocapture
+	KONG_TEST_DATABASE=$${KONG_TEST_DATABASE:-postgres} $(TEST_RUNNER) --workspace -- --nocapture
 
 # 只运行集成测试
 test-integration:
-	cargo test --workspace --test '*'
+	KONG_TEST_DATABASE=$${KONG_TEST_DATABASE:-postgres} $(TEST_RUNNER) --workspace --test '*'
+
+# PostgreSQL 策略测试（自动启动依赖服务）
+test-pg:
+	@export KONG_SERVICE_ENV_FILE=$$(mktemp); \
+		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE up && \
+		. $$KONG_SERVICE_ENV_FILE && \
+		KONG_TEST_DATABASE=postgres $(TEST_RUNNER) --workspace; \
+		status=$$?; \
+		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE down; \
+		rm -f $$KONG_SERVICE_ENV_FILE; \
+		exit $$status
+
+# db-less 策略测试
+test-dbless:
+	KONG_TEST_DATABASE=off $(TEST_RUNNER) --workspace
 
 # ---------- 启动 / 调试 ----------
 

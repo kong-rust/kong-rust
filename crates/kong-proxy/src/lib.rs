@@ -60,6 +60,8 @@ pub struct KongCtx {
     pub request_body_buf: Option<SpillableBuffer>,
     /// Response body buffer (with spill-to-disk protection) — 响应体缓冲区（带落盘保护）
     pub response_body_buf: Option<SpillableBuffer>,
+    /// Whether Lua header_filter should be deferred until the buffered response body is available. — 是否要等响应体缓冲完成后再执行 Lua header_filter。
+    pub deferred_header_filter: bool,
     /// Timestamp of last received body chunk (for timeout protection) — 最后收到 body chunk 的时间戳（用于超时保护）
     pub last_body_chunk_at: Option<std::time::Instant>,
     /// proxy 注入到 upstream 请求的 real-ip header 键值对，用于 access log 输出
@@ -360,6 +362,73 @@ impl KongProxy {
         Ok(resp)
     }
 
+    /// Pre-read buffered request body so access-phase plugins can inspect it. — 预读取需缓冲的请求体，供 access 阶段插件读取。
+    async fn preload_request_body_for_plugins(
+        &self,
+        session: &mut Session,
+        plugin_ctx: &mut RequestCtx,
+        request_body_buf: &mut Option<SpillableBuffer>,
+    ) -> pingora_core::Result<()> {
+        let has_request_body = session
+            .req_header()
+            .headers
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|len| len > 0)
+            .unwrap_or_else(|| {
+                session
+                    .req_header()
+                    .headers
+                    .contains_key("transfer-encoding")
+            });
+
+        if !has_request_body {
+            return Ok(());
+        }
+
+        // Let Pingora reuse the captured downstream body when it opens the upstream request. — 让 Pingora 在建立上游请求时复用已经捕获的下游请求体。
+        session.as_mut().enable_retry_buffering();
+
+        let mut body_buf = request_body_buf.take().unwrap_or_else(SpillableBuffer::new);
+        while let Some(chunk) = session.read_request_body().await? {
+            body_buf.extend(&chunk);
+        }
+
+        let body_bytes = body_buf.finish();
+        plugin_ctx.request_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
+        *request_body_buf = None;
+
+        Ok(())
+    }
+
+    /// Apply upstream target overrides staged by plugins. — 应用插件暂存的上游目标覆写。
+    fn apply_plugin_upstream_overrides(
+        &self,
+        upstream_addr: &mut String,
+        upstream_tls: &mut bool,
+        upstream_sni: &mut String,
+        plugin_ctx: &RequestCtx,
+    ) {
+        if let Some(host) = plugin_ctx.upstream_target_host.as_deref() {
+            let port = plugin_ctx
+                .upstream_target_port
+                .unwrap_or(if *upstream_tls { 443 } else { 80 });
+            *upstream_addr = format!("{host}:{port}");
+            *upstream_sni = host.to_string();
+        }
+
+        if let Some(scheme) = plugin_ctx.upstream_scheme.as_deref() {
+            *upstream_tls = matches!(scheme, "https" | "grpcs" | "tls");
+            if plugin_ctx.upstream_target_host.is_none() && !upstream_sni.is_empty() {
+                let default_port = if *upstream_tls { 443 } else { 80 };
+                if !upstream_addr.contains(':') {
+                    *upstream_addr = format!("{upstream_addr}:{default_port}");
+                }
+            }
+        }
+    }
+
     /// 发送框架级错误响应（JSON 格式，受配置控制）
     async fn send_error_response(
         &self,
@@ -431,6 +500,7 @@ impl ProxyHttp for KongProxy {
             resolved_plugins: Arc::new(Vec::new()),
             request_body_buf: None,
             response_body_buf: None,
+            deferred_header_filter: false,
             last_body_chunk_at: None,
             injected_real_ip_headers: Vec::new(),
         }
@@ -490,7 +560,7 @@ impl ProxyHttp for KongProxy {
         }
 
         // 4. Resolve upstream address — 解析上游地址
-        let (upstream_addr, upstream_tls, upstream_sni) = self
+        let (mut upstream_addr, mut upstream_tls, mut upstream_sni) = self
             .resolve_upstream(&service)
             .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
 
@@ -518,7 +588,22 @@ impl ProxyHttp for KongProxy {
             })
         };
 
-        // 7. Execute rewrite phase — 执行 rewrite 阶段
+        // 7. Pre-read request body when buffering is enabled so access-phase plugins can inspect it. — 当启用 buffering 时预读取请求体，供 access 阶段插件检查。
+        if let Err(err) = self
+            .preload_request_body_for_plugins(
+                session,
+                &mut ctx.plugin_ctx,
+                &mut ctx.request_body_buf,
+            )
+            .await
+        {
+            tracing::error!("请求体预读取失败: {}", err);
+            return self
+                .send_error_response(session, 400, "Bad request body")
+                .await;
+        }
+
+        // 8. Execute rewrite phase — 执行 rewrite 阶段
         if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
             return self
@@ -526,7 +611,7 @@ impl ProxyHttp for KongProxy {
                 .await;
         }
 
-        // 8. Check short-circuit — 检查短路
+        // 9. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
             // Save plugin chain for log phase — 保存插件链供 log 阶段使用
             ctx.resolved_plugins = resolved_plugins;
@@ -535,7 +620,7 @@ impl ProxyHttp for KongProxy {
                 .await;
         }
 
-        // 9. Execute access phase — 执行 access 阶段
+        // 10. Execute access phase — 执行 access 阶段
         if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
             return self
@@ -543,13 +628,20 @@ impl ProxyHttp for KongProxy {
                 .await;
         }
 
-        // 10. Check short-circuit — 检查短路
+        // 11. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
             ctx.resolved_plugins = resolved_plugins;
             return self
                 .send_short_circuit_response(session, &mut ctx.plugin_ctx)
                 .await;
         }
+
+        self.apply_plugin_upstream_overrides(
+            &mut upstream_addr,
+            &mut upstream_tls,
+            &mut upstream_sni,
+            &ctx.plugin_ctx,
+        );
 
         // Save to context — 保存到上下文
         ctx.route_match = Some(route_match);
@@ -765,7 +857,34 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 4. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，默认全部注入）
+        // 4. Apply plugin path/query overrides after route strip_path logic. — 在 strip_path 逻辑之后应用插件路径/查询覆写。
+        if ctx.plugin_ctx.upstream_path.is_some() || ctx.plugin_ctx.upstream_query_to_set.is_some() {
+            let path = ctx
+                .plugin_ctx
+                .upstream_path
+                .as_deref()
+                .unwrap_or_else(|| upstream_request.uri.path());
+            let query = ctx.plugin_ctx.upstream_query_to_set.as_ref().map(|pairs| {
+                pairs.iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            });
+            let new_uri = match query.as_deref() {
+                Some(query) if !query.is_empty() => format!("{path}?{query}"),
+                _ => path.to_string(),
+            };
+            if let Ok(uri) = new_uri.parse() {
+                upstream_request.set_uri(uri);
+            }
+        }
+
+        // 5. If a plugin replaced the upstream body, fix Content-Length for the replayed payload. — 若插件替换了上游请求体，修正回放 payload 的 Content-Length。
+        if let Some(body) = ctx.plugin_ctx.upstream_body.as_ref() {
+            let _ = upstream_request.insert_header("content-length", body.len().to_string());
+        }
+
+        // 6. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，默认全部注入）
         if !self.config.proxy_real_ip_headers.is_empty() {
             let headers_set: std::collections::HashSet<String> = self
                 .config
@@ -867,7 +986,7 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 5. WebSocket 代理：始终透传 Upgrade/Connection 头（与 Kong 原版行为一致）
+        // 7. WebSocket 代理：始终透传 Upgrade/Connection 头（与 Kong 原版行为一致）
         {
             let is_websocket = session
                 .req_header()
@@ -893,6 +1012,25 @@ impl ProxyHttp for KongProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
+        if let Some(upstream_body) = ctx.plugin_ctx.upstream_body.as_ref() {
+            if end_of_stream {
+                *body = Some(Bytes::copy_from_slice(upstream_body.as_bytes()));
+            } else {
+                *body = None;
+            }
+            return Ok(());
+        }
+
+        if let Some(buf) = ctx.request_body_buf.take() {
+            if end_of_stream {
+                *body = Some(Bytes::from(buf.finish()));
+            } else {
+                ctx.request_body_buf = Some(buf);
+                *body = None;
+            }
+            return Ok(());
+        }
+
         // Default buffering=true (Kong's default) — 默认 buffering=true（Kong 默认行为）
         let buffering = ctx
             .route_match
@@ -952,23 +1090,32 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // Execute header_filter phase — 执行 header_filter 阶段
-        let plugins = ctx.resolved_plugins.clone();
-        if let Err(e) = PhaseRunner::run_header_filter(&plugins, &mut ctx.plugin_ctx).await {
-            tracing::error!("HeaderFilter 阶段执行失败: {}", e);
-        }
+        let defer_header_filter = ctx.plugin_ctx.request_buffering_enabled;
+        ctx.deferred_header_filter = defer_header_filter;
 
-        // Apply response header modifications set by plugins — 应用插件设置的响应头修改
-        for (name, value) in ctx.plugin_ctx.response_headers_to_set.drain(..) {
-            if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
-                    upstream_response.headers.insert(header_name, header_value);
+        if defer_header_filter {
+            // The buffered-response path may replace the body later, so avoid locking in a stale length/encoding now. — 完整缓冲响应路径后续可能替换响应体，因此这里先不要锁死旧的长度和编码。
+            upstream_response.headers.remove(http::header::CONTENT_LENGTH);
+            upstream_response.headers.remove(http::header::CONTENT_ENCODING);
+        } else {
+            // Execute header_filter phase — 执行 header_filter 阶段
+            let plugins = ctx.resolved_plugins.clone();
+            if let Err(e) = PhaseRunner::run_header_filter(&plugins, &mut ctx.plugin_ctx).await {
+                tracing::error!("HeaderFilter 阶段执行失败: {}", e);
+            }
+
+            // Apply response header modifications set by plugins — 应用插件设置的响应头修改
+            for (name, value) in ctx.plugin_ctx.response_headers_to_set.drain(..) {
+                if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                    if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
+                        upstream_response.headers.insert(header_name, header_value);
+                    }
                 }
             }
-        }
-        for name in ctx.plugin_ctx.response_headers_to_remove.drain(..) {
-            if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                upstream_response.headers.remove(header_name);
+            for name in ctx.plugin_ctx.response_headers_to_remove.drain(..) {
+                if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                    upstream_response.headers.remove(header_name);
+                }
             }
         }
 
@@ -1008,11 +1155,13 @@ impl ProxyHttp for KongProxy {
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Option<std::time::Duration>> {
         // 1. Response buffering — 响应体缓冲
+        // Plugin-requested buffering must force full upstream response collection. — 插件显式请求的 buffering 必须强制启用完整上游响应缓冲。
         let buffering = ctx
             .route_match
             .as_ref()
             .map(|rm| rm.response_buffering)
-            .unwrap_or(true);
+            .unwrap_or(true)
+            || ctx.plugin_ctx.request_buffering_enabled;
 
         if buffering {
             // Collect chunks into spillable buffer — 收集 chunk 到可溢出缓冲区
@@ -1026,10 +1175,28 @@ impl ProxyHttp for KongProxy {
             if end_of_stream {
                 // Release the buffered body — 释放缓冲的响应体
                 if let Some(buf) = ctx.response_body_buf.take() {
-                    *body = Some(Bytes::from(buf.finish()));
+                    let buffered = buf.finish();
+                    ctx.plugin_ctx.service_response_body =
+                        Some(String::from_utf8_lossy(&buffered).to_string());
+                    *body = Some(Bytes::from(buffered));
                 }
             }
             // When not end_of_stream, body remains None — suppress sending to client — 非 end_of_stream 时 body 保持 None — 抑制发送
+        }
+
+        if end_of_stream && ctx.deferred_header_filter {
+            let plugins = ctx.resolved_plugins.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let result = tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        PhaseRunner::run_header_filter(&plugins, &mut ctx.plugin_ctx).await
+                    })
+                });
+                if let Err(e) = result {
+                    tracing::error!("Deferred HeaderFilter 阶段执行失败: {}", e);
+                }
+            }
+            ctx.deferred_header_filter = false;
         }
 
         // 2. Plugin body_filter phase — 插件 body_filter 阶段
@@ -1047,13 +1214,13 @@ impl ProxyHttp for KongProxy {
 
         // body_filter must execute synchronously (Pingora's response_body_filter is synchronous) — body_filter 需要同步执行（Pingora 的 response_body_filter 是同步的）
         // Using block_on to adapt async plugin interface — 使用 block_on 适配异步插件接口
-        if let Some(ref mut body_bytes) = body {
-            let plugins = ctx.resolved_plugins.clone();
-            // Block on execution within the current tokio runtime — 在当前 tokio 运行时中阻塞执行
-            let handle = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = handle {
-                let mut body_clone = body_bytes.clone();
-                let result = handle.block_on(async {
+        let plugins = ctx.resolved_plugins.clone();
+        // Block on execution within the current tokio runtime — 在当前 tokio 运行时中阻塞执行
+        let handle = tokio::runtime::Handle::try_current();
+        if let Ok(handle) = handle {
+            let mut body_clone = body.clone();
+            let result = tokio::task::block_in_place(|| {
+                handle.block_on(async {
                     PhaseRunner::run_body_filter(
                         &plugins,
                         &mut ctx.plugin_ctx,
@@ -1061,13 +1228,13 @@ impl ProxyHttp for KongProxy {
                         end_of_stream,
                     )
                     .await
-                });
+                })
+            });
 
-                if let Err(e) = result {
-                    tracing::error!("BodyFilter 阶段执行失败: {}", e);
-                } else {
-                    *body_bytes = body_clone;
-                }
+            if let Err(e) = result {
+                tracing::error!("BodyFilter 阶段执行失败: {}", e);
+            } else {
+                *body = body_clone;
             }
         }
 

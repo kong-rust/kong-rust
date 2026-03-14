@@ -46,6 +46,11 @@ fi
 
 # 提取动态映射的端口并导出环境变量
 # 格式: "服务名 环境变量名 容器内端口"（每行一个服务）
+_export_env() {
+    local prefix=$1 env_name=$2 env_value=$3
+    echo "export ${prefix}${env_name}=${env_value}" >> "$KONG_SERVICE_ENV_FILE"
+}
+
 _extract_port() {
     local svc=$1 env_name=$2 private_port=$3
 
@@ -58,9 +63,23 @@ _extract_port() {
     fi
 
     for prefix in KONG_ KONG_TEST_ KONG_SPEC_TEST_; do
-        echo "export ${prefix}${env_name}=$exposed_port" >> "$KONG_SERVICE_ENV_FILE"
-        echo "export ${prefix}$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')_HOST=127.0.0.1" >> "$KONG_SERVICE_ENV_FILE"
+        _export_env "$prefix" "$env_name" "$exposed_port"
+        _export_env "$prefix" "$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')_HOST" "127.0.0.1"
     done
 }
 
 _extract_port postgres PG_PORT 5432
+
+# Export Kong-style PG test variables expected by integration scripts.
+# 导出 Kong 风格的 PG 测试变量，供集成测试脚本直接使用。
+for prefix in KONG_TEST_ KONG_SPEC_TEST_; do
+    _export_env "$prefix" "DATABASE" "postgres"
+    _export_env "$prefix" "PG_HOST" "127.0.0.1"
+    _export_env "$prefix" "PG_USER" "kong"
+    _export_env "$prefix" "PG_PASSWORD" ""
+    _export_env "$prefix" "PG_DATABASE" "kong_tests"
+done
+
+# Keep direct KONG_PG_HOST aligned with the local compose host for development flows.
+# 保持直接的 KONG_PG_HOST 与本地 compose 主机一致，方便开发流程复用。
+_export_env "KONG_" "PG_HOST" "127.0.0.1"

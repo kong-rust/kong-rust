@@ -25,6 +25,22 @@ pub struct RequestCtx {
     pub upstream_headers_to_set: Vec<(String, String)>,
     /// Upstream request header removal queue — 上游请求头删除队列
     pub upstream_headers_to_remove: Vec<String>,
+    /// Upstream query string replacement staged by plugins — 插件暂存的上游查询参数替换
+    pub upstream_query_to_set: Option<std::collections::HashMap<String, String>>,
+    /// Upstream request body replacement staged by plugins — 插件暂存的上游请求体替换
+    pub upstream_body: Option<String>,
+    /// Upstream request path override staged by plugins — 插件暂存的上游请求路径覆写
+    pub upstream_path: Option<String>,
+    /// Upstream request scheme override staged by plugins — 插件暂存的上游请求 scheme 覆写
+    pub upstream_scheme: Option<String>,
+    /// Upstream target host override staged by plugins — 插件暂存的上游目标主机覆写
+    pub upstream_target_host: Option<String>,
+    /// Upstream target port override staged by plugins — 插件暂存的上游目标端口覆写
+    pub upstream_target_port: Option<u16>,
+    /// Whether request buffering was explicitly enabled by the plugin — 插件是否显式开启了请求缓冲
+    pub request_buffering_enabled: bool,
+    /// Whether a retry callback was registered by the plugin — 插件是否注册了重试回调
+    pub upstream_retry_callback_registered: bool,
     /// Response header modification queue — 响应头修改队列
     pub response_headers_to_set: Vec<(String, String)>,
     /// Response header removal queue — 响应头删除队列
@@ -51,10 +67,14 @@ pub struct RequestCtx {
     pub client_ip: String,
     /// Query string — 查询字符串
     pub request_query_string: String,
+    /// Raw request body snapshot used by Lua plugins — 供 Lua 插件读取的原始请求体快照
+    pub request_body: Option<String>,
     /// Upstream response status code (available in header_filter/log phases) — 上游响应状态码（header_filter/log 阶段可用）
     pub response_status: Option<u16>,
     /// Upstream response headers — 上游响应头
     pub response_headers: std::collections::HashMap<String, String>,
+    /// Buffered upstream response body for PDK helpers such as kong.service.response.get_raw_body(). — 供 PDK 辅助接口（如 kong.service.response.get_raw_body()）读取的缓冲上游响应体。
+    pub service_response_body: Option<String>,
     /// Optional payload returned by kong.log.serialize() for Lua plugins that
     /// depend on the Kong logging schema.
     pub log_serialize: Option<serde_json::Value>,
@@ -76,6 +96,14 @@ impl RequestCtx {
             exit_headers: None,
             upstream_headers_to_set: Vec::new(),
             upstream_headers_to_remove: Vec::new(),
+            upstream_query_to_set: None,
+            upstream_body: None,
+            upstream_path: None,
+            upstream_scheme: None,
+            upstream_target_host: None,
+            upstream_target_port: None,
+            request_buffering_enabled: false,
+            upstream_retry_callback_registered: false,
             response_headers_to_set: Vec::new(),
             response_headers_to_remove: Vec::new(),
             authenticated_credential: None,
@@ -88,8 +116,10 @@ impl RequestCtx {
             request_headers: std::collections::HashMap::new(),
             client_ip: String::new(),
             request_query_string: String::new(),
+            request_body: None,
             response_status: None,
             response_headers: std::collections::HashMap::new(),
+            service_response_body: None,
             log_serialize: None,
             response_source: None,
         }
@@ -189,7 +219,7 @@ pub trait PluginHandler: Send + Sync {
         &self,
         _config: &PluginConfig,
         _ctx: &mut RequestCtx,
-        _body: &mut Bytes,
+        _body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<()> {
         Ok(())

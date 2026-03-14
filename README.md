@@ -132,6 +132,15 @@ Key settings:
 | `router_flavor` | `traditional_compatible` | Router engine (`traditional_compatible` or `expressions`) |
 
 Environment variable overrides are supported with `KONG_` prefix (e.g., `KONG_PG_PORT=5433`).
+Tests also support official Kong-style `KONG_TEST_*` and `KONG_SPEC_TEST_*` variables. The test runner maps them to effective `KONG_*` values before invoking `cargo test`, and defaults to `KONG_DATABASE=postgres` to match Kong's default test strategy.
+
+Examples:
+
+```bash
+KONG_TEST_DATABASE=postgres KONG_TEST_PG_PORT=55432 make test
+KONG_TEST_DATABASE=off make test
+./scripts/run-cargo-test.sh --print-effective-env
+```
 
 ## Development
 
@@ -139,7 +148,9 @@ Environment variable overrides are supported with `KONG_` prefix (e.g., `KONG_PG
 |---------|-------------|
 | `make build` | Build (debug) |
 | `make check` | Fast type check |
-| `make test` | Run all tests |
+| `make test` | Run all tests (defaults to `KONG_TEST_DATABASE=postgres`) |
+| `make test-pg` | Start local PostgreSQL test dependency and run tests with `KONG_TEST_DATABASE=postgres` |
+| `make test-dbless` | Run tests with `KONG_TEST_DATABASE=off` |
 | `make fmt` | Format code |
 | `make lint` | Clippy analysis |
 | `make dev` | Full-stack start (PG + bootstrap + run) |

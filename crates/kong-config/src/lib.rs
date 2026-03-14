@@ -173,10 +173,36 @@ pub enum KongConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_cleared_kong_env<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap();
+        let saved = std::env::vars()
+            .filter(|(key, _)| key.starts_with("KONG_"))
+            .collect::<Vec<_>>();
+
+        for (key, _) in &saved {
+            std::env::remove_var(key);
+        }
+
+        let result = f();
+
+        for (key, value) in saved {
+            std::env::set_var(key, value);
+        }
+
+        result
+    }
 
     #[test]
     fn test_load_from_string() {
-        let conf = r#"
+        with_cleared_kong_env(|| {
+            let conf = r#"
 database = postgres
 pg_host = 10.0.0.1
 pg_port = 5433
@@ -187,54 +213,63 @@ router_flavor = expressions
 plugins = bundled, my-plugin
 proxy_listen = 0.0.0.0:8080, 0.0.0.0:8443 ssl
 "#;
-        let config = load_config_from_string(conf).unwrap();
-        assert_eq!(config.pg_host, "10.0.0.1");
-        assert_eq!(config.pg_port, 5433);
-        assert_eq!(config.pg_user, "myuser");
-        assert_eq!(config.pg_password, Some("mypass".to_string()));
-        assert_eq!(config.log_level, "debug");
-        assert_eq!(config.router_flavor, "expressions");
-        assert_eq!(config.plugins, vec!["bundled", "my-plugin"]);
-        assert_eq!(config.proxy_listen.len(), 2);
+            let config = load_config_from_string(conf).unwrap();
+            assert_eq!(config.pg_host, "10.0.0.1");
+            assert_eq!(config.pg_port, 5433);
+            assert_eq!(config.pg_user, "myuser");
+            assert_eq!(config.pg_password, Some("mypass".to_string()));
+            assert_eq!(config.log_level, "debug");
+            assert_eq!(config.router_flavor, "expressions");
+            assert_eq!(config.plugins, vec!["bundled", "my-plugin"]);
+            assert_eq!(config.proxy_listen.len(), 2);
+        });
     }
 
     #[test]
     fn test_load_dbless() {
-        let conf = r#"
+        with_cleared_kong_env(|| {
+            let conf = r#"
 database = off
 declarative_config = /etc/kong/kong.yml
 "#;
-        let config = load_config_from_string(conf).unwrap();
-        assert!(config.is_dbless());
-        assert_eq!(
-            config.declarative_config,
-            Some("/etc/kong/kong.yml".to_string())
-        );
+            let config = load_config_from_string(conf).unwrap();
+            assert!(config.is_dbless());
+            assert_eq!(
+                config.declarative_config,
+                Some("/etc/kong/kong.yml".to_string())
+            );
+        });
     }
 
     #[test]
     fn test_invalid_database() {
-        let conf = "database = mysql\n";
-        let result = load_config_from_string(conf);
-        assert!(result.is_err());
+        with_cleared_kong_env(|| {
+            let conf = "database = mysql\n";
+            let result = load_config_from_string(conf);
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_invalid_log_level() {
-        let conf = "log_level = verbose\n";
-        let result = load_config_from_string(conf);
-        assert!(result.is_err());
+        with_cleared_kong_env(|| {
+            let conf = "log_level = verbose\n";
+            let result = load_config_from_string(conf);
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_default_values() {
-        let config = load_config_from_string("").unwrap();
-        assert_eq!(config.database, "postgres");
-        assert_eq!(config.pg_host, "127.0.0.1");
-        assert_eq!(config.pg_port, 5432);
-        assert_eq!(config.log_level, "notice");
-        assert_eq!(config.router_flavor, "traditional_compatible");
-        assert!(!config.pg_ssl);
-        assert_eq!(config.upstream_keepalive_pool_size, 512);
+        with_cleared_kong_env(|| {
+            let config = load_config_from_string("").unwrap();
+            assert_eq!(config.database, "postgres");
+            assert_eq!(config.pg_host, "127.0.0.1");
+            assert_eq!(config.pg_port, 5432);
+            assert_eq!(config.log_level, "notice");
+            assert_eq!(config.router_flavor, "traditional_compatible");
+            assert!(!config.pg_ssl);
+            assert_eq!(config.upstream_keepalive_pool_size, 512);
+        });
     }
 }

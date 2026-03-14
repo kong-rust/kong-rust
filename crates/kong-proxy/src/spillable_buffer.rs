@@ -42,6 +42,14 @@ impl SpillableBuffer {
         }
     }
 
+    /// Create a buffer preloaded with bytes. — 使用现有字节内容创建预填充缓冲区。
+    pub fn from_bytes(data: Vec<u8>) -> Self {
+        Self {
+            state: BufferState::Memory(data),
+            threshold: DEFAULT_THRESHOLD,
+        }
+    }
+
     /// Append data to the buffer, spilling to disk if threshold exceeded — 追加数据，超过阈值时溢出到磁盘
     pub fn extend(&mut self, data: &[u8]) {
         match &mut self.state {

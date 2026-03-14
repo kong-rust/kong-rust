@@ -93,7 +93,9 @@ kong-server（入口）
 
 | 命令 | 作用 |
 |------|------|
-| `make test` | 运行所有测试 |
+| `make test` | 运行所有测试（默认 `KONG_TEST_DATABASE=postgres`） |
+| `make test-pg` | 自动启动 PostgreSQL 测试依赖，并以 `KONG_TEST_DATABASE=postgres` 运行 |
+| `make test-dbless` | 以 `KONG_TEST_DATABASE=off` 运行测试 |
 | `make test-crate crate=kong-router` | 运行单个 crate 的测试 |
 | `make test-name name=test_route_match` | 按名称匹配运行测试 |
 | `make test-verbose` | 运行测试并显示 stdout/stderr |
@@ -175,6 +177,7 @@ kong-server（入口）
 - **格式化**：`cargo fmt` / rustfmt（通过 `make fmt`）
 - **测试框架**：Rust 内置测试（`#[test]`、`#[tokio::test]`）
 - **集成测试**：各 crate 的 `tests/` 目录
+- **测试环境变量**：支持 `KONG_TEST_*` / `KONG_SPEC_TEST_*`，由 `scripts/run-cargo-test.sh` 映射为生效的 `KONG_*`，默认测试策略为 `postgres`
 
 ### 版本控制
 

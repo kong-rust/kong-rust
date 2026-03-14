@@ -38,7 +38,7 @@ impl PhaseRunner {
     pub async fn run_body_filter(
         plugins: &[ResolvedPlugin],
         ctx: &mut RequestCtx,
-        body: &mut bytes::Bytes,
+        body: &mut Option<bytes::Bytes>,
         end_of_stream: bool,
     ) -> Result<()> {
         PluginExecutor::execute_body_filter(plugins, ctx, body, end_of_stream).await

@@ -784,6 +784,262 @@ pub async fn list_service_plugins(
     }
 }
 
+async fn create_scoped_plugin(
+    state: &AdminState,
+    mut body: Value,
+    scope_field: &str,
+    scope_id: uuid::Uuid,
+) -> (StatusCode, Json<Value>) {
+    let Some(obj) = body.as_object_mut() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "schema violation: expected JSON object",
+                "name": "schema violation",
+                "code": 2,
+            })),
+        );
+    };
+
+    obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
+    do_create::<Plugin>(&state.plugins, body).await
+}
+
+fn plugin_scope_matches(plugin: &Plugin, scope_field: &str, scope_id: uuid::Uuid) -> bool {
+    match scope_field {
+        "service" => plugin.service.as_ref().map(|fk| fk.id) == Some(scope_id),
+        "route" => plugin.route.as_ref().map(|fk| fk.id) == Some(scope_id),
+        "consumer" => plugin.consumer.as_ref().map(|fk| fk.id) == Some(scope_id),
+        _ => false,
+    }
+}
+
+async fn get_scoped_plugin(
+    dao: &Arc<dyn Dao<Plugin>>,
+    plugin_id_or_name: &str,
+    scope_field: &str,
+    scope_id: uuid::Uuid,
+) -> (StatusCode, Json<Value>) {
+    let pk = PrimaryKey::from_str_or_uuid(plugin_id_or_name);
+    match dao.select(&pk).await {
+        Ok(Some(plugin)) if plugin_scope_matches(&plugin, scope_field, scope_id) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(plugin).unwrap_or(json!(null))),
+        ),
+        Ok(Some(_)) | Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": "plugins not found",
+                "name": "not found",
+                "code": 3,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        ),
+    }
+}
+
+async fn update_scoped_plugin(
+    dao: &Arc<dyn Dao<Plugin>>,
+    plugin_id_or_name: &str,
+    mut body: Value,
+    scope_field: &str,
+    scope_id: uuid::Uuid,
+    upsert: bool,
+) -> (StatusCode, Json<Value>) {
+    let existing = get_scoped_plugin(dao, plugin_id_or_name, scope_field, scope_id).await;
+    if existing.0 == StatusCode::NOT_FOUND {
+        return existing;
+    }
+
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
+    }
+
+    if upsert {
+        do_upsert::<Plugin>(dao, plugin_id_or_name, body).await
+    } else {
+        do_update::<Plugin>(dao, plugin_id_or_name, &body).await
+    }
+}
+
+async fn delete_scoped_plugin(
+    dao: &Arc<dyn Dao<Plugin>>,
+    plugin_id_or_name: &str,
+    scope_field: &str,
+    scope_id: uuid::Uuid,
+) -> axum::response::Response {
+    let existing = get_scoped_plugin(dao, plugin_id_or_name, scope_field, scope_id).await;
+    if existing.0 == StatusCode::NOT_FOUND {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": "plugins not found",
+                "name": "not found",
+                "code": 3,
+            })),
+        )
+            .into_response();
+    }
+
+    do_delete::<Plugin>(dao, plugin_id_or_name).await
+}
+
+/// POST /services/:service_id/plugins
+pub async fn create_service_plugin(
+    State(state): State<AdminState>,
+    Path(service_id_or_name): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(service)) => service,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    let result = create_scoped_plugin(&state, body, "service", service.id).await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+/// GET /services/:service_id/plugins/:plugin_id
+pub async fn get_service_plugin(
+    State(state): State<AdminState>,
+    Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(service)) => service,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    get_scoped_plugin(&state.plugins, &plugin_id_or_name, "service", service.id).await
+}
+
+/// PATCH /services/:service_id/plugins/:plugin_id
+pub async fn update_service_plugin(
+    State(state): State<AdminState>,
+    Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(service)) => service,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "service",
+        service.id,
+        false,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+/// PUT /services/:service_id/plugins/:plugin_id
+pub async fn upsert_service_plugin(
+    State(state): State<AdminState>,
+    Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(service)) => service,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "service",
+        service.id,
+        true,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+/// DELETE /services/:service_id/plugins/:plugin_id
+pub async fn delete_service_plugin(
+    State(state): State<AdminState>,
+    Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
+    let service = match state.services.select(&service_pk).await {
+        Ok(Some(service)) => service,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "service not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let _ = state.refresh_tx.send("plugins");
+    delete_scoped_plugin(&state.plugins, &plugin_id_or_name, "service", service.id).await
+}
+
 /// GET /routes/:route_id/plugins
 pub async fn list_route_plugins(
     State(state): State<AdminState>,
@@ -822,6 +1078,151 @@ pub async fn list_route_plugins(
     }
 }
 
+/// POST /routes/:route_id/plugins
+pub async fn create_route_plugin(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "route not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    let result = create_scoped_plugin(&state, body, "route", route.id).await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn get_route_plugin(
+    State(state): State<AdminState>,
+    Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "route not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    get_scoped_plugin(&state.plugins, &plugin_id_or_name, "route", route.id).await
+}
+
+pub async fn update_route_plugin(
+    State(state): State<AdminState>,
+    Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "route not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "route",
+        route.id,
+        false,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn upsert_route_plugin(
+    State(state): State<AdminState>,
+    Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "route not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "route",
+        route.id,
+        true,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn delete_route_plugin(
+    State(state): State<AdminState>,
+    Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route = match state.routes.select(&route_pk).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "route not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let _ = state.refresh_tx.send("plugins");
+    delete_scoped_plugin(&state.plugins, &plugin_id_or_name, "route", route.id).await
+}
+
 /// GET /consumers/:consumer_id/plugins
 pub async fn list_consumer_plugins(
     State(state): State<AdminState>,
@@ -858,6 +1259,151 @@ pub async fn list_consumer_plugins(
             Json(json!({"message": e.to_string()})),
         ),
     }
+}
+
+/// POST /consumers/:consumer_id/plugins
+pub async fn create_consumer_plugin(
+    State(state): State<AdminState>,
+    Path(consumer_id_or_name): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(consumer)) => consumer,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "consumer not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+
+    let result = create_scoped_plugin(&state, body, "consumer", consumer.id).await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn get_consumer_plugin(
+    State(state): State<AdminState>,
+    Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(consumer)) => consumer,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "consumer not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    get_scoped_plugin(&state.plugins, &plugin_id_or_name, "consumer", consumer.id).await
+}
+
+pub async fn update_consumer_plugin(
+    State(state): State<AdminState>,
+    Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(consumer)) => consumer,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "consumer not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "consumer",
+        consumer.id,
+        false,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn upsert_consumer_plugin(
+    State(state): State<AdminState>,
+    Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(consumer)) => consumer,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "consumer not found"})),
+            )
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+        }
+    };
+    let result = update_scoped_plugin(
+        &state.plugins,
+        &plugin_id_or_name,
+        body,
+        "consumer",
+        consumer.id,
+        true,
+    )
+    .await;
+    let _ = state.refresh_tx.send("plugins");
+    result
+}
+
+pub async fn delete_consumer_plugin(
+    State(state): State<AdminState>,
+    Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
+    let consumer = match state.consumers.select(&consumer_pk).await {
+        Ok(Some(consumer)) => consumer,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "consumer not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let _ = state.refresh_tx.send("plugins");
+    delete_scoped_plugin(&state.plugins, &plugin_id_or_name, "consumer", consumer.id).await
 }
 
 /// POST /services/:service_id/routes

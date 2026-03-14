@@ -185,7 +185,7 @@ async fn test_body_filter_called_with_data() {
     let resolved = vec![make_resolved_plugin(plugin_arc)];
 
     let mut ctx = RequestCtx::new();
-    let mut body = bytes::Bytes::from("hello world");
+    let mut body = Some(bytes::Bytes::from("hello world"));
     let result = PhaseRunner::run_body_filter(&resolved, &mut ctx, &mut body, false).await;
 
     assert!(result.is_ok());
@@ -204,7 +204,7 @@ async fn test_empty_plugin_chain() {
         .await
         .is_ok());
 
-    let mut body = bytes::Bytes::from("test");
+    let mut body = Some(bytes::Bytes::from("test"));
     assert!(
         PhaseRunner::run_body_filter(&resolved, &mut ctx, &mut body, true)
             .await
@@ -237,7 +237,7 @@ async fn test_full_phase_chain() {
     assert!(plugin.header_filter_called.load(Ordering::SeqCst));
 
     // body_filter
-    let mut body = bytes::Bytes::from("response body");
+    let mut body = Some(bytes::Bytes::from("response body"));
     let _ = PhaseRunner::run_body_filter(&resolved, &mut ctx, &mut body, true).await;
     assert!(plugin.body_filter_called.load(Ordering::SeqCst));
 

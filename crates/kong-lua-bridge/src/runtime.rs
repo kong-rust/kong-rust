@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use mlua::prelude::*;
+use mlua::LuaSerdeExt;
 
 const COMPAT_MODULES: &str = r#"
 package.preload["string.buffer"] = function()
@@ -46,10 +47,128 @@ package.preload["string.buffer"] = function()
   }
 end
 
+do
+  local raw_pairs = pairs
+  local raw_ipairs = ipairs
+
+  pairs = function(value)
+    local mt = type(value) == "table" and getmetatable(value) or nil
+    if mt and type(mt.__pairs) == "function" then
+      return mt.__pairs(value)
+    end
+    return raw_pairs(value)
+  end
+
+  ipairs = function(value)
+    local mt = type(value) == "table" and getmetatable(value) or nil
+    if mt and type(mt.__ipairs) == "function" then
+      return mt.__ipairs(value)
+    end
+    return raw_ipairs(value)
+  end
+end
+
 package.preload["table.new"] = function()
   return function()
     return {}
   end
+end
+
+package.preload["table.clone"] = function()
+  return function(t)
+    if type(t) ~= "table" then
+      return t
+    end
+
+    local copy = {}
+    for k, v in pairs(t) do
+      copy[k] = v
+    end
+    return copy
+  end
+end
+
+package.preload["table.isarray"] = function()
+  return function(t)
+    if type(t) ~= "table" then
+      return false
+    end
+
+    local count = 0
+    for k in pairs(t) do
+      if type(k) ~= "number" or k < 1 or math.floor(k) ~= k then
+        return false
+      end
+      count = count + 1
+    end
+
+    for i = 1, count do
+      if t[i] == nil then
+        return false
+      end
+    end
+
+    return true
+  end
+end
+
+package.preload["pl.tablex"] = function()
+  return {
+    readonly = function(t)
+      return setmetatable({}, {
+        __index = t,
+        __newindex = function()
+          error("attempt to modify readonly table")
+        end,
+        __pairs = function()
+          return next, t, nil
+        end,
+      })
+    end,
+  }
+end
+
+package.preload["pl.stringx"] = function()
+  local function split(input, sep)
+    sep = sep or "%s+"
+    local text = tostring(input or "")
+    local result = {}
+
+    if sep == "" then
+      for i = 1, #text do
+        result[#result + 1] = text:sub(i, i)
+      end
+      return result
+    end
+
+    if sep == "%s+" then
+      for part in text:gmatch("%S+") do
+        result[#result + 1] = part
+      end
+      return result
+    end
+
+    local start = 1
+    while true do
+      local first, last = text:find(sep, start, true)
+      if not first then
+        result[#result + 1] = text:sub(start)
+        break
+      end
+      result[#result + 1] = text:sub(start, first - 1)
+      start = last + 1
+    end
+
+    return result
+  end
+
+  return {
+    split = split,
+  }
+end
+
+package.preload["cjson.safe"] = function()
+  return {}
 end
 
 package.preload["kong.tools.yield"] = function()
@@ -113,6 +232,132 @@ package.preload["kong.constants"] = function()
       PLUGIN_SET_INCOMPATIBLE = "PLUGIN_SET_INCOMPATIBLE",
       PLUGIN_VERSION_INCOMPATIBLE = "PLUGIN_VERSION_INCOMPATIBLE",
     },
+    HEADERS = {},
+  }
+end
+
+package.preload["kong.tools.table"] = function()
+  local empty = require("pl.tablex").readonly({})
+
+    return {
+      EMPTY = empty,
+      deep_copy = function(value)
+      if type(value) ~= "table" then
+        return value
+      end
+
+      local copy = {}
+      for k, v in pairs(value) do
+        copy[k] = type(v) == "table" and require("kong.tools.table").deep_copy(v) or v
+      end
+      return copy
+    end,
+    cycle_aware_deep_copy = function(value)
+      return require("kong.tools.table").deep_copy(value)
+    end,
+    table_contains = function(arr, needle)
+      if type(arr) ~= "table" then
+        return false
+      end
+
+      for _, value in pairs(arr) do
+        if value == needle then
+          return true
+        end
+      end
+      return false
+    end,
+  }
+end
+
+package.preload["kong.tools.string"] = function()
+  local function split_impl(input, sep, limit)
+    sep = sep or ","
+    local result = {}
+    local pattern = string.format("([^%s]+)", sep:gsub("%%", "%%%%"))
+
+    for chunk in tostring(input):gmatch(pattern) do
+      result[#result + 1] = chunk
+      if limit and #result >= limit then
+        break
+      end
+    end
+
+    return result
+  end
+
+  return {
+    split = function(input, sep)
+      return split_impl(input, sep)
+    end,
+    splitn = function(input, sep, count)
+      return split_impl(input, sep, count)
+    end,
+  }
+end
+
+package.preload["kong.tools.gzip"] = function()
+  return {
+    deflate_gzip = function(value)
+      return value
+    end,
+  }
+end
+
+package.preload["socket.url"] = function()
+  return {
+    parse = function(url)
+      local scheme, authority, path = tostring(url):match("^(https?)://([^/]+)(.*)$")
+      if not scheme then
+        return nil
+      end
+
+      local host, port = authority:match("^([^:]+):?(%d*)$")
+      return {
+        scheme = scheme,
+        authority = authority,
+        host = host,
+        port = port ~= "" and port or nil,
+        path = path ~= "" and path or "/",
+      }
+    end,
+  }
+end
+
+package.preload["resty.http"] = function()
+  return {
+    new = function()
+      return {
+        set_timeout = function() end,
+        request_uri = function()
+          return nil, "resty.http request_uri is not implemented in compat runtime"
+        end,
+      }
+    end,
+  }
+end
+
+package.preload["resty.gcp.request.credentials.accesstoken"] = function()
+  return function()
+    return nil, "resty.gcp credentials are not implemented in compat runtime"
+  end
+end
+
+package.preload["resty.aws.config"] = function()
+  return {}
+end
+
+package.preload["resty.aws"] = function()
+  return function()
+    return nil, "resty.aws is not implemented in compat runtime"
+  end
+end
+
+package.preload["kong.tools.aws_stream"] = function()
+  return {
+    decode = function()
+      return nil, "aws stream decode is not implemented in compat runtime"
+    end,
   }
 end
 
@@ -148,12 +393,25 @@ package.preload["kong.db.schema.typedefs"] = function()
         type = "string",
       },
     },
+    protocols_http = {
+      type = "set",
+      elements = {
+        type = "string",
+      },
+      default = { "http", "https", "grpc", "grpcs" },
+    },
+    url = function(definition)
+      definition = definition or {}
+      definition.type = "string"
+      return definition
+    end,
   }
 end
 "#;
 
 pub fn install(lua: &Lua) -> LuaResult<()> {
-    lua.load(COMPAT_MODULES).exec()
+    lua.load(COMPAT_MODULES).exec()?;
+    install_cjson_safe(lua)
 }
 
 pub fn set_phase(lua: &Lua, phase: &str) -> LuaResult<()> {
@@ -175,4 +433,37 @@ pub fn configure_package_path(lua: &Lua, plugin_path: &Path) -> LuaResult<()> {
         package_path
     ))
     .exec()
+}
+
+fn install_cjson_safe(lua: &Lua) -> LuaResult<()> {
+    let module = lua.create_table()?;
+    module.set(
+        "encode",
+        lua.create_function(|lua, value: LuaValue| -> LuaResult<(String, LuaValue)> {
+            let json: serde_json::Value = lua.from_value(value)?;
+            let encoded = serde_json::to_string(&json).map_err(LuaError::external)?;
+            Ok((encoded, LuaValue::Nil))
+        })?,
+    )?;
+    module.set(
+        "decode",
+        lua.create_function(|lua, value: String| -> LuaResult<(LuaValue, LuaValue)> {
+            match serde_json::from_str::<serde_json::Value>(&value) {
+                Ok(json) => Ok((lua.to_value(&json)?, LuaValue::Nil)),
+                Err(err) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(err.to_string())?))),
+            }
+        })?,
+    )?;
+
+    let package: LuaTable = lua.globals().get("package")?;
+    let preload: LuaTable = package.get("preload")?;
+    for module_name in ["cjson", "cjson.safe"] {
+        let module_for_require = module.clone();
+        preload.set(
+            module_name,
+            lua.create_function(move |_, _: ()| Ok(module_for_require.clone()))?,
+        )?;
+    }
+
+    Ok(())
 }

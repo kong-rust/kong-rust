@@ -117,12 +117,26 @@ pub fn build_admin_router(state: AdminState) -> Router {
         )
         .route(
             "/services/{service_id_or_name}/plugins",
-            get(list_service_plugins),
+            get(list_service_plugins).post(create_service_plugin),
+        )
+        .route(
+            "/services/{service_id_or_name}/plugins/{plugin_id_or_name}",
+            get(get_service_plugin)
+                .patch(update_service_plugin)
+                .put(upsert_service_plugin)
+                .delete(delete_service_plugin),
         )
         // Nested: Plugins under Route — 嵌套: Route 下的 Plugins
         .route(
             "/routes/{route_id_or_name}/plugins",
-            get(list_route_plugins),
+            get(list_route_plugins).post(create_route_plugin),
+        )
+        .route(
+            "/routes/{route_id_or_name}/plugins/{plugin_id_or_name}",
+            get(get_route_plugin)
+                .patch(update_route_plugin)
+                .put(upsert_route_plugin)
+                .delete(delete_route_plugin),
         )
         // Consumers
         .route("/consumers", get(list_consumers).post(create_consumer))
@@ -136,7 +150,14 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Nested: Plugins under Consumer — 嵌套: Consumer 下的 Plugins
         .route(
             "/consumers/{consumer_id_or_name}/plugins",
-            get(list_consumer_plugins),
+            get(list_consumer_plugins).post(create_consumer_plugin),
+        )
+        .route(
+            "/consumers/{consumer_id_or_name}/plugins/{plugin_id_or_name}",
+            get(get_consumer_plugin)
+                .patch(update_consumer_plugin)
+                .put(upsert_consumer_plugin)
+                .delete(delete_consumer_plugin),
         )
         // Plugins
         .route("/plugins", get(list_plugins).post(create_plugin))

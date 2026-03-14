@@ -179,7 +179,7 @@ impl PluginExecutor {
     pub async fn execute_body_filter(
         plugins: &[ResolvedPlugin],
         ctx: &mut RequestCtx,
-        body: &mut bytes::Bytes,
+        body: &mut Option<bytes::Bytes>,
         end_of_stream: bool,
     ) -> Result<()> {
         for plugin in plugins {

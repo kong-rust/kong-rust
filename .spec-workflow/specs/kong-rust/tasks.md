@@ -299,6 +299,16 @@
   - 新建 `crates/kong-proxy/tests/phase_chain.rs` — 10 个阶段链测试（短路、优先级、ctx.shared 传递等）
   - 扩展 `crates/kong-lua-bridge/tests/lua_plugin_compat.rs` — 新增 20+ PDK 真实数据测试（验证不再硬编码）
   - 修复 `crates/kong-admin/tests/admin_api_compat.rs` — 补全缺失的 proxy 和 refresh_tx 字段
+  - 新建 `scripts/run-cargo-test.sh` 并统一 `make test*` / CI 入口 — 支持 `KONG_TEST_*`、`KONG_SPEC_TEST_*` 映射到 `KONG_*`
+  - 扩展 `scripts/dependency_services/common.sh` — 补齐 `KONG_TEST_PG_HOST/PORT/USER/PASSWORD/DATABASE` 导出
+
+- [ ] 8.12a 构建 `busted + spec.helpers` 兼容层，直接执行官方 AI 插件 Lua Spec
+  - 目标：在不修改官方 Lua spec 测试源码的前提下，支持运行 `/Users/dawxy/proj/kong/spec/03-plugins/38-ai-proxy/` 目录下的官方 `ai-proxy` 测试
+  - 需要补齐 `spec.helpers` / `spec.internal.*` 的最小兼容实现，覆盖 `helpers.get_db_utils`、`helpers.all_strategies`、`helpers.http_mock`、`helpers.start_kong/stop_kong`、`admin_client/proxy_client`、prefix 管理、测试数据库和 mock upstream 启动
+  - 需要提供 `busted` 测试入口与 fixture 路径映射，尽量直接复用官方 `spec/fixtures/ai-proxy/` 与 `03-plugins/38-ai-proxy/*.lua`
+  - 初期范围仅覆盖 `ai-proxy` 官方 spec，不要求一次性兼容 Kong 全量插件 spec
+  - _Requirements: R5_
+  - _Prompt: "Implement the task for spec kong-rust, first run spec-workflow-guide to get the workflow guide then implement the task: Role: Rust + Lua 测试基础设施工程师 | Task: 为 Kong-Rust 构建 `busted + spec.helpers` 兼容层，使官方 `/Users/dawxy/proj/kong/spec/03-plugins/38-ai-proxy/` 目录中的 Lua spec 文件可以尽量原样执行。1) 分析官方 `spec.helpers`、`spec.internal.*`、`busted` 入口和 `ai-proxy` spec 的最小依赖闭包。2) 在当前仓库提供兼容目录和模块映射，优先复用现有 `KONG_TEST_*` 环境变量、测试 PG、Admin API/Proxy 启动脚本、Lua 插件目录。3) 提供可运行的 Lua test runner，支持 `helpers.all_strategies()`、http mock、prefix 生命周期、Admin/Proxy 客户端。4) 首批验证至少能直接跑通 `03-plugins/38-ai-proxy` 下的 unit/config spec，并为 integration spec 列出剩余缺口。 | Restrictions: 不修改官方 `ai-proxy` Lua 插件源码；尽量不修改官方 spec 测试源码，必要 shim 应放在兼容层。不要为了这个任务破坏现有 Rust 测试入口。 | _Leverage: `/Users/dawxy/proj/kong/spec/helpers.lua`, `/Users/dawxy/proj/kong/spec/internal/`, `scripts/run-cargo-test.sh`, `scripts/dependency_services/common.sh`, `crates/kong-lua-bridge/tests/ai_proxy_plugin_compat.rs`。 | Success: 仓库内新增一套可调用的 Lua spec 兼容测试入口，至少能直接执行官方 `ai-proxy` 的部分原始 spec 文件，并文档化剩余兼容缺口。在 tasks.md 中将 [ ] 改为 [-] 标记开始，完成后用 log-implementation 记录，然后改为 [x]。"_
 
 ## 阶段 8c：L4 Stream 代理
 

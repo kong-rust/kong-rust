@@ -14,6 +14,7 @@ pub mod vm;
 
 use kong_core::error::{KongError, Result};
 use kong_core::traits::{Phase, PluginConfig, PluginHandler, RequestCtx};
+use bytes::Bytes;
 use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -47,6 +48,11 @@ impl LuaPluginHandler {
             plugin_path,
             phases,
         }
+    }
+
+    /// Check whether the Lua handler exposes a specific Kong phase. — 检查 Lua handler 是否暴露指定 Kong 阶段。
+    pub fn supports_phase(&self, phase: Phase) -> bool {
+        self.phases.get(&phase).copied().unwrap_or(false)
     }
 }
 
@@ -104,6 +110,31 @@ impl PluginHandler for LuaPluginHandler {
             return Ok(());
         }
         execute_lua_phase(&self.name, &self.plugin_path, "log", config, ctx)
+    }
+
+    async fn body_filter(
+        &self,
+        config: &PluginConfig,
+        ctx: &mut RequestCtx,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<()> {
+        if !self
+            .phases
+            .get(&Phase::BodyFilter)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        execute_lua_body_filter(
+            &self.name,
+            &self.plugin_path,
+            config,
+            ctx,
+            body,
+            end_of_stream,
+        )
     }
 
     async fn init_worker(&self, config: &PluginConfig) -> Result<()> {
@@ -220,5 +251,91 @@ fn execute_lua_phase(
     // Sync changes from Lua side back to RequestCtx — 从 Lua 侧同步回 RequestCtx 的变更
     pdk::sync_ctx_from_lua(&lua, ctx).map_err(|e| KongError::LuaError(e.to_string()))?;
 
+    Ok(())
+}
+
+/// Execute body_filter in the Lua VM and sync ngx.arg back to Rust. — 在 Lua VM 中执行 body_filter 并把 ngx.arg 同步回 Rust。
+fn execute_lua_body_filter(
+    plugin_name: &str,
+    plugin_path: &PathBuf,
+    config: &PluginConfig,
+    ctx: &mut RequestCtx,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+) -> Result<()> {
+    let lua = unsafe { Lua::unsafe_new() };
+
+    runtime::configure_package_path(&lua, plugin_path)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::set_phase(&lua, "init").map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::install(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::inject_kong_pdk(&lua, ctx).map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::inject_ngx_compat(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+    pdk::set_body_filter_args(&lua, body.as_ref().map(|b| b.as_ref()), end_of_stream)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+
+    let handler_path = plugin_path.join("handler.lua");
+    if !handler_path.exists() {
+        return Err(KongError::LuaError(format!(
+            "handler.lua not found for plugin {}: {} — 插件 {} 的 handler.lua 不存在: {}",
+            plugin_name,
+            handler_path.display(),
+            plugin_name,
+            handler_path.display()
+        )));
+    }
+
+    let handler_code = std::fs::read_to_string(&handler_path).map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to read handler.lua: {} — 读取 handler.lua 失败: {}",
+            e, e
+        ))
+    })?;
+
+    let handler_table: LuaTable = lua.load(&handler_code).eval().map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to load handler.lua: {} — 加载 handler.lua 失败: {}",
+            e, e
+        ))
+    })?;
+
+    let config_value = lua
+        .to_value(&config.config)
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+
+    let configure_fn: Option<LuaFunction> = handler_table.get("configure").ok();
+    if let Some(configure_fn) = configure_fn {
+        let configs = lua
+            .create_table()
+            .map_err(|e| KongError::LuaError(e.to_string()))?;
+        configs
+            .set(1, config_value.clone())
+            .map_err(|e| KongError::LuaError(e.to_string()))?;
+        let _ = configure_fn.call::<()>((handler_table.clone(), configs));
+    }
+
+    let init_worker_fn: Option<LuaFunction> = handler_table.get("init_worker").ok();
+    if let Some(init_worker_fn) = init_worker_fn {
+        runtime::set_phase(&lua, "init_worker")
+            .map_err(|e| KongError::LuaError(e.to_string()))?;
+        let _ = init_worker_fn.call::<()>((handler_table.clone(), config_value.clone()));
+    }
+
+    runtime::set_phase(&lua, "body_filter").map_err(|e| KongError::LuaError(e.to_string()))?;
+    let phase_fn: Option<LuaFunction> = handler_table.get("body_filter").ok();
+    if let Some(func) = phase_fn {
+        func.call::<()>((handler_table, config_value))
+            .map_err(|e| {
+                KongError::LuaError(format!(
+                    "Plugin {} failed in body_filter phase: {} — 插件 {} body_filter 阶段执行失败: {}",
+                    plugin_name, e, plugin_name, e
+                ))
+            })?;
+    }
+
+    pdk::sync_ctx_from_lua(&lua, ctx).map_err(|e| KongError::LuaError(e.to_string()))?;
+    let (next_body, _next_end_of_stream) =
+        pdk::read_body_filter_args(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+    *body = next_body.map(Bytes::from);
     Ok(())
 }

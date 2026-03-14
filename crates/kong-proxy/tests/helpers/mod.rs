@@ -128,7 +128,7 @@ impl PluginHandler for TestPlugin {
         &self,
         _config: &PluginConfig,
         _ctx: &mut RequestCtx,
-        _body: &mut Bytes,
+        _body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<()> {
         self.body_filter_called.store(true, Ordering::SeqCst);

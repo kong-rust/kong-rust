@@ -1,4 +1,5 @@
 use mlua::prelude::*;
+use mlua::LuaSerdeExt;
 use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -215,6 +216,29 @@ fn create_shared_dict_methods(lua: &Lua) -> LuaResult<LuaTable> {
     Ok(methods)
 }
 
+/// Seed ngx.arg for body_filter execution. — 为 body_filter 执行预置 ngx.arg。
+pub fn set_body_filter_args(lua: &Lua, body: Option<&[u8]>, end_of_stream: bool) -> LuaResult<()> {
+    let globals = lua.globals();
+    match body {
+        Some(body) => globals.set("__ngx_arg_1", lua.create_string(body)?)?,
+        None => globals.set("__ngx_arg_1", LuaValue::Nil)?,
+    }
+    globals.set("__ngx_arg_2", end_of_stream)?;
+    Ok(())
+}
+
+/// Read ngx.arg after body_filter execution. — 读取 body_filter 执行后的 ngx.arg。
+pub fn read_body_filter_args(lua: &Lua) -> LuaResult<(Option<Vec<u8>>, bool)> {
+    let globals = lua.globals();
+    let body = match globals.get::<LuaValue>("__ngx_arg_1")? {
+        LuaValue::Nil => None,
+        LuaValue::String(value) => Some(value.as_bytes().to_vec()),
+        value => Some(render_lua_values(LuaMultiValue::from_vec(vec![value])).into_bytes()),
+    };
+    let end_of_stream = globals.get::<bool>("__ngx_arg_2").unwrap_or(false);
+    Ok((body, end_of_stream))
+}
+
 /// Inject the ngx compatibility table into the Lua VM. — 将 ngx 兼容表注入 Lua VM。
 pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     runtime::install(lua)?;
@@ -292,8 +316,16 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
     ngx.set(
+        "update_time",
+        lua.create_function(|_, _: ()| -> LuaResult<()> { Ok(()) })?,
+    )?;
+    ngx.set(
         "sleep",
         lua.create_function(|_, _: f64| -> LuaResult<()> { Ok(()) })?,
+    )?;
+    ngx.set(
+        "exit",
+        lua.create_function(|_, code: i32| -> LuaResult<i32> { Ok(code) })?,
     )?;
     ngx.set(
         "get_phase",
@@ -422,6 +454,49 @@ pub fn inject_ngx_compat(lua: &Lua) -> LuaResult<()> {
     ngx.set("var", var)?;
 
     ngx.set("header", lua.create_table()?)?;
+    globals.set("__ngx_arg_1", LuaValue::Nil)?;
+    globals.set("__ngx_arg_2", false)?;
+    let arg_meta = lua.create_table()?;
+    arg_meta.set(
+        "__index",
+        lua.create_function(|lua, (_table, key): (LuaTable, LuaValue)| -> LuaResult<LuaValue> {
+            let globals = lua.globals();
+            match key {
+                LuaValue::Integer(1) | LuaValue::Number(1.0) => globals.get("__ngx_arg_1"),
+                LuaValue::Integer(2) | LuaValue::Number(2.0) => globals.get("__ngx_arg_2"),
+                _ => Ok(LuaValue::Nil),
+            }
+        })?,
+    )?;
+    arg_meta.set(
+        "__newindex",
+        lua.create_function(|lua, (_table, key, value): (LuaTable, LuaValue, LuaValue)| {
+            let globals = lua.globals();
+            match key {
+                LuaValue::Integer(1) | LuaValue::Number(1.0) => globals.set("__ngx_arg_1", value),
+                LuaValue::Integer(2) | LuaValue::Number(2.0) => globals.set("__ngx_arg_2", value),
+                _ => Ok(()),
+            }
+        })?,
+    )?;
+    let arg = lua.create_table()?;
+    arg.set_metatable(Some(arg_meta));
+    ngx.set("arg", arg)?;
+    let persisted_ctx = match globals.get::<LuaValue>("__persisted_ngx_ctx")? {
+        LuaValue::Table(table) => table,
+        LuaValue::Nil => lua.create_table()?,
+        value => lua
+            .from_value::<serde_json::Value>(value)
+            .ok()
+            .map(|value| lua.to_value(&value))
+            .transpose()?
+            .and_then(|value| match value {
+                LuaValue::Table(table) => Some(table),
+                _ => None,
+            })
+            .unwrap_or(lua.create_table()?),
+    };
+    ngx.set("ctx", persisted_ctx)?;
     globals.set("__ngx_output", lua.create_table()?)?;
     ngx.set(
         "print",

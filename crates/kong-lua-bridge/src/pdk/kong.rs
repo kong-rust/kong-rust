@@ -1,6 +1,18 @@
 use kong_core::traits::RequestCtx;
 use mlua::prelude::*;
 use mlua::LuaSerdeExt;
+use std::collections::HashMap;
+
+fn parse_query_string(query: &str) -> HashMap<String, String> {
+    query
+        .split('&')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| match segment.split_once('=') {
+            Some((key, value)) => (key.to_string(), value.to_string()),
+            None => (segment.to_string(), String::new()),
+        })
+        .collect()
+}
 
 fn default_log_serialize(lua: &Lua, ctx: &RequestCtx) -> LuaResult<LuaValue> {
     let message = lua.create_table()?;
@@ -31,6 +43,20 @@ fn default_log_serialize(lua: &Lua, ctx: &RequestCtx) -> LuaResult<LuaValue> {
     Ok(LuaValue::Table(message))
 }
 
+/// Convert Lua scalar values into optional strings while tolerating ngx.null. — 将 Lua 标量值转换为可选字符串，并兼容 ngx.null。
+fn lua_value_to_optional_string(lua: &Lua, value: LuaValue) -> LuaResult<Option<String>> {
+    match value {
+        LuaValue::Nil | LuaValue::LightUserData(_) => Ok(None),
+        LuaValue::String(value) => Ok(Some(value.to_string_lossy().to_string())),
+        LuaValue::Integer(value) => Ok(Some(value.to_string())),
+        LuaValue::Number(value) => Ok(Some(value.to_string())),
+        LuaValue::Boolean(value) => Ok(Some(value.to_string())),
+        other => Ok(lua
+            .coerce_string(other)?
+            .map(|value| value.to_string_lossy().to_string())),
+    }
+}
+
 /// Inject the Kong global table into the Lua VM. — 将 Kong 全局表注入 Lua VM。
 pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     let globals = lua.globals();
@@ -43,6 +69,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     req_data.set("port", ctx.request_port as i32)?;
     req_data.set("query_string", ctx.request_query_string.as_str())?;
     req_data.set("client_ip", ctx.client_ip.as_str())?;
+    req_data.set("body", ctx.request_body.clone())?;
 
     let headers_table = lua.create_table()?;
     for (name, value) in &ctx.request_headers {
@@ -60,6 +87,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         resp_headers_table.set(name.as_str(), value.as_str())?;
     }
     resp_data.set("headers", resp_headers_table)?;
+    resp_data.set("body", ctx.service_response_body.clone())?;
     globals.set("__kong_resp_data", resp_data)?;
 
     globals.set("__kong_short_circuited", false)?;
@@ -68,6 +96,14 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     globals.set("__kong_exit_headers", lua.create_table()?)?;
     globals.set("__kong_upstream_headers_set", lua.create_table()?)?;
     globals.set("__kong_upstream_headers_remove", lua.create_table()?)?;
+    globals.set("__kong_upstream_query_set", lua.create_table()?)?;
+    globals.set("__kong_upstream_path", LuaValue::Nil)?;
+    globals.set("__kong_upstream_scheme", LuaValue::Nil)?;
+    globals.set("__kong_upstream_target_host", LuaValue::Nil)?;
+    globals.set("__kong_upstream_target_port", LuaValue::Nil)?;
+    globals.set("__kong_upstream_body", LuaValue::Nil)?;
+    globals.set("__kong_request_buffering_enabled", false)?;
+    globals.set("__kong_retry_callback_registered", false)?;
     globals.set("__kong_response_headers_set", lua.create_table()?)?;
     globals.set("__kong_response_headers_remove", lua.create_table()?)?;
     globals.set(
@@ -83,6 +119,16 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
             .clone()
             .unwrap_or_else(|| "service".to_string()),
     )?;
+    if let Some(value) = ctx.shared.get("__ngx_ctx_state") {
+        globals.set("__persisted_ngx_ctx", lua.to_value(value)?)?;
+    } else {
+        globals.set("__persisted_ngx_ctx", LuaValue::Nil)?;
+    }
+    if let Some(value) = ctx.shared.get("__ngx_ctx_global_source") {
+        globals.set("__persisted_ngx_ctx_global_source", lua.to_value(value)?)?;
+    } else {
+        globals.set("__persisted_ngx_ctx_global_source", LuaValue::Nil)?;
+    }
 
     let kong = lua.create_table()?;
     kong.set("version", "3.0.0")?;
@@ -161,7 +207,23 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     )?;
     request.set(
         "get_query",
-        lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> { lua.create_table() })?,
+        lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
+            let data: LuaTable = lua.globals().get("__kong_req_data")?;
+            let query_string: String = data.get("query_string")?;
+            let query = lua.create_table()?;
+            for (key, value) in parse_query_string(&query_string) {
+                query.set(key, value)?;
+            }
+            Ok(query)
+        })?,
+    )?;
+    request.set(
+        "get_query_arg",
+        lua.create_function(|lua, name: String| -> LuaResult<Option<String>> {
+            let data: LuaTable = lua.globals().get("__kong_req_data")?;
+            let query_string: String = data.get("query_string")?;
+            Ok(parse_query_string(&query_string).remove(&name))
+        })?,
     )?;
     request.set(
         "get_raw_query",
@@ -170,19 +232,61 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
             data.get("query_string")
         })?,
     )?;
+    request.set(
+        "get_raw_body",
+        lua.create_function(|lua, _: ()| -> LuaResult<Option<String>> {
+            let data: LuaTable = lua.globals().get("__kong_req_data")?;
+            data.get("body")
+        })?,
+    )?;
+    request.set(
+        "get_body",
+        lua.create_function(
+            |lua, (_mimetype, _max_args, _max_bytes): (Option<String>, Option<i64>, Option<i64>)| {
+                let data: LuaTable = lua.globals().get("__kong_req_data")?;
+                let body: Option<String> = data.get("body")?;
+                let Some(body) = body else {
+                    return Ok(LuaValue::Nil);
+                };
+
+                match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(value) => lua.to_value(&value),
+                    Err(_) => Ok(LuaValue::Nil),
+                }
+            },
+        )?,
+    )?;
+    request.set(
+        "get_uri_captures",
+        lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
+            let captures = lua.create_table()?;
+            captures.set("unnamed", lua.create_table()?)?;
+            captures.set("named", lua.create_table()?)?;
+            Ok(captures)
+        })?,
+    )?;
     kong.set("request", request)?;
 
     let response = lua.create_table()?;
     response.set(
         "exit",
         lua.create_function(
-            |lua,
-             (status, body, headers): (u16, Option<String>, Option<LuaTable>)|
-             -> LuaResult<()> {
+            |lua, (status, body, headers): (u16, Option<LuaValue>, Option<LuaTable>)| -> LuaResult<()> {
                 let globals = lua.globals();
                 globals.set("__kong_short_circuited", true)?;
                 globals.set("__kong_exit_status", status)?;
                 if let Some(body) = body {
+                    let body = match body {
+                        LuaValue::String(value) => value.to_string_lossy().to_string(),
+                        LuaValue::Table(value) => serde_json::to_string(
+                            &lua.from_value::<serde_json::Value>(LuaValue::Table(value))?,
+                        )
+                        .map_err(LuaError::external)?,
+                        LuaValue::Nil => String::new(),
+                        other => lua.coerce_string(other)?.map(|value| value.to_string_lossy().to_string()).ok_or_else(|| {
+                            LuaError::external("unsupported kong.response.exit body type")
+                        })?,
+                    };
                     globals.set("__kong_exit_body", body)?;
                 }
                 if let Some(headers) = headers {
@@ -194,7 +298,13 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     )?;
     response.set(
         "set_header",
-        lua.create_function(|lua, (name, value): (String, String)| -> LuaResult<()> {
+        lua.create_function(|lua, (name, value): (LuaValue, LuaValue)| -> LuaResult<()> {
+            let Some(name) = lua_value_to_optional_string(lua, name)? else {
+                return Ok(());
+            };
+            let Some(value) = lua_value_to_optional_string(lua, value)? else {
+                return Ok(());
+            };
             let headers_set: LuaTable = lua.globals().get("__kong_response_headers_set")?;
             headers_set.set(name, value)?;
             Ok(())
@@ -202,7 +312,13 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     )?;
     response.set(
         "add_header",
-        lua.create_function(|lua, (name, value): (String, String)| -> LuaResult<()> {
+        lua.create_function(|lua, (name, value): (LuaValue, LuaValue)| -> LuaResult<()> {
+            let Some(name) = lua_value_to_optional_string(lua, name)? else {
+                return Ok(());
+            };
+            let Some(value) = lua_value_to_optional_string(lua, value)? else {
+                return Ok(());
+            };
             let headers_set: LuaTable = lua.globals().get("__kong_response_headers_set")?;
             headers_set.set(name, value)?;
             Ok(())
@@ -236,13 +352,42 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
             lua.globals().get("__kong_response_source")
         })?,
     )?;
+    response.set(
+        "set_header",
+        lua.create_function(|lua, (name, value): (LuaValue, LuaValue)| -> LuaResult<()> {
+            let Some(name) = lua_value_to_optional_string(lua, name)? else {
+                return Ok(());
+            };
+            let Some(value) = lua_value_to_optional_string(lua, value)? else {
+                return Ok(());
+            };
+            let headers_set: LuaTable = lua.globals().get("__kong_response_headers_set")?;
+            headers_set.set(name, value)?;
+            Ok(())
+        })?,
+    )?;
+    response.set(
+        "clear_header",
+        lua.create_function(|lua, name: String| -> LuaResult<()> {
+            let headers_remove: LuaTable = lua.globals().get("__kong_response_headers_remove")?;
+            let len = headers_remove.len()? + 1;
+            headers_remove.set(len, name)?;
+            Ok(())
+        })?,
+    )?;
     kong.set("response", response)?;
 
     let service = lua.create_table()?;
     let service_request = lua.create_table()?;
     service_request.set(
         "set_header",
-        lua.create_function(|lua, (name, value): (String, String)| -> LuaResult<()> {
+        lua.create_function(|lua, (name, value): (LuaValue, LuaValue)| -> LuaResult<()> {
+            let Some(name) = lua_value_to_optional_string(lua, name)? else {
+                return Ok(());
+            };
+            let Some(value) = lua_value_to_optional_string(lua, value)? else {
+                return Ok(());
+            };
             let headers_set: LuaTable = lua.globals().get("__kong_upstream_headers_set")?;
             headers_set.set(name, value)?;
             Ok(())
@@ -259,9 +404,84 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     )?;
     service_request.set(
         "set_scheme",
-        lua.create_function(|_, _: String| -> LuaResult<()> { Ok(()) })?,
+        lua.create_function(|lua, scheme: String| -> LuaResult<()> {
+            lua.globals().set("__kong_upstream_scheme", scheme)?;
+            Ok(())
+        })?,
+    )?;
+    service_request.set(
+        "set_path",
+        lua.create_function(|lua, path: String| -> LuaResult<()> {
+            lua.globals().set("__kong_upstream_path", path)?;
+            Ok(())
+        })?,
+    )?;
+    service_request.set(
+        "set_query",
+        lua.create_function(|lua, query: LuaTable| -> LuaResult<()> {
+            let globals = lua.globals();
+            let query_table: LuaTable = globals.get("__kong_upstream_query_set")?;
+            query_table.clear()?;
+            for pair in query.pairs::<String, LuaValue>() {
+                let (name, value) = pair?;
+                match value {
+                    LuaValue::String(value) => {
+                        query_table.set(name, value.to_string_lossy().to_string())?
+                    }
+                    LuaValue::Integer(value) => query_table.set(name, value.to_string())?,
+                    LuaValue::Number(value) => query_table.set(name, value.to_string())?,
+                    LuaValue::Boolean(value) => query_table.set(name, value.to_string())?,
+                    LuaValue::Nil => {}
+                    _ => {}
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    service_request.set(
+        "set_body",
+        lua.create_function(
+            |lua, (body, _content_type): (LuaValue, Option<String>)| -> LuaResult<()> {
+                let string_body = match body {
+                    LuaValue::String(value) => value.to_string_lossy().to_string(),
+                    LuaValue::Table(value) => serde_json::to_string(
+                        &lua.from_value::<serde_json::Value>(LuaValue::Table(value))?,
+                    )
+                    .map_err(LuaError::external)?,
+                    LuaValue::Nil => String::new(),
+                    other => format!("{other:?}"),
+                };
+                lua.globals().set("__kong_upstream_body", string_body)?;
+                Ok(())
+            },
+        )?,
+    )?;
+    service_request.set(
+        "enable_buffering",
+        lua.create_function(|lua, _: ()| -> LuaResult<()> {
+            lua.globals()
+                .set("__kong_request_buffering_enabled", true)?;
+            Ok(())
+        })?,
     )?;
     service.set("request", service_request)?;
+    service.set(
+        "set_target",
+        lua.create_function(|lua, (host, port): (String, i64)| -> LuaResult<()> {
+            let globals = lua.globals();
+            globals.set("__kong_upstream_target_host", host)?;
+            globals.set("__kong_upstream_target_port", port)?;
+            Ok(())
+        })?,
+    )?;
+    service.set(
+        "set_target_retry_callback",
+        lua.create_function(|lua, _callback: LuaFunction| -> LuaResult<()> {
+            lua.globals()
+                .set("__kong_retry_callback_registered", true)?;
+            Ok(())
+        })?,
+    )?;
 
     let service_response = lua.create_table()?;
     service_response.set(
@@ -286,11 +506,20 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
             data.get("headers")
         })?,
     )?;
+    service_response.set(
+        "get_raw_body",
+        lua.create_function(|lua, _: ()| -> LuaResult<String> {
+            let data: LuaTable = lua.globals().get("__kong_resp_data")?;
+            let body: Option<String> = data.get("body")?;
+            Ok(body.unwrap_or_default())
+        })?,
+    )?;
     service.set("response", service_response)?;
     kong.set("service", service)?;
 
     let log = lua.create_table()?;
     for (name, level) in [
+        ("trace", "trace"),
         ("debug", "debug"),
         ("info", "info"),
         ("warn", "warn"),
@@ -303,6 +532,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
                     msg.into_iter().map(|value| format!("{value:?}")).collect();
                 let text = parts.join(" ");
                 match level {
+                    "trace" => tracing::trace!("[lua] {}", text),
                     "debug" => tracing::debug!("[lua] {}", text),
                     "info" => tracing::info!("[lua] {}", text),
                     "warn" => tracing::warn!("[lua] {}", text),
@@ -328,6 +558,7 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         }
     }
     ctx_table.set("shared", shared)?;
+    ctx_table.set("plugin", lua.create_table()?)?;
     kong.set("ctx", ctx_table)?;
 
     let client = lua.create_table()?;
@@ -436,6 +667,21 @@ pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
         }
     }
 
+    if let Ok(ngx) = globals.get::<LuaTable>("ngx") {
+        if let Ok(ngx_ctx) = ngx.get::<LuaTable>("ctx") {
+            if let Ok(value) = lua.from_value::<serde_json::Value>(LuaValue::Table(ngx_ctx.clone())) {
+                ctx.shared.insert("__ngx_ctx_state".to_string(), value);
+            }
+
+            if let Ok(source_map) = ngx_ctx.get::<LuaTable>("ai_namespaced_ctx_global_source") {
+                if let Ok(value) = lua.from_value::<serde_json::Value>(LuaValue::Table(source_map)) {
+                    ctx.shared
+                        .insert("__ngx_ctx_global_source".to_string(), value);
+                }
+            }
+        }
+    }
+
     if let Ok(true) = globals.get::<bool>("__kong_short_circuited") {
         ctx.short_circuited = true;
         ctx.exit_status = globals
@@ -474,6 +720,44 @@ pub fn sync_ctx_from_lua(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
             }
         }
     }
+    if let Ok(query_set) = globals.get::<LuaTable>("__kong_upstream_query_set") {
+        let mut query = HashMap::new();
+        for pair in query_set.pairs::<String, String>() {
+            if let Ok((name, value)) = pair {
+                query.insert(name, value);
+            }
+        }
+        if !query.is_empty() {
+            ctx.upstream_query_to_set = Some(query);
+        }
+    }
+    ctx.upstream_path = globals
+        .get::<Option<String>>("__kong_upstream_path")
+        .ok()
+        .flatten();
+    ctx.upstream_scheme = globals
+        .get::<Option<String>>("__kong_upstream_scheme")
+        .ok()
+        .flatten();
+    ctx.upstream_target_host = globals
+        .get::<Option<String>>("__kong_upstream_target_host")
+        .ok()
+        .flatten();
+    ctx.upstream_target_port = globals
+        .get::<Option<i64>>("__kong_upstream_target_port")
+        .ok()
+        .flatten()
+        .map(|port| port as u16);
+    ctx.upstream_body = globals
+        .get::<Option<String>>("__kong_upstream_body")
+        .ok()
+        .flatten();
+    ctx.request_buffering_enabled = globals
+        .get::<bool>("__kong_request_buffering_enabled")
+        .unwrap_or(false);
+    ctx.upstream_retry_callback_registered = globals
+        .get::<bool>("__kong_retry_callback_registered")
+        .unwrap_or(false);
 
     if let Ok(headers_set) = globals.get::<LuaTable>("__kong_response_headers_set") {
         for pair in headers_set.pairs::<String, String>() {

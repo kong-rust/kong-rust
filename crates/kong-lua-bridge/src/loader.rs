@@ -196,8 +196,19 @@ fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler
     let priority = extract_priority(&handler_code).unwrap_or(1000);
     let version = extract_version(&handler_code).unwrap_or_else(|| "0.1.0".to_string());
 
-    // Detect supported phases — 检测支持的阶段
-    let phases = detect_phases(&handler_code);
+    // Detect supported phases. Prefer evaluating handler.lua so meta-plugins like ai-proxy
+    // expose their generated lifecycle methods correctly. — 检测支持的阶段。优先执行 handler.lua，
+    // 这样 ai-proxy 这类元插件动态生成的生命周期方法也能被正确识别。
+    let phases = detect_runtime_phases(plugin_path, &handler_code).unwrap_or_else(|err| {
+        tracing::warn!(
+            "runtime phase detection failed for plugin {}: {} — 插件 {} 的运行时 phase 检测失败: {}",
+            name,
+            err,
+            name,
+            err
+        );
+        detect_phases(&handler_code)
+    });
 
     Ok(LuaPluginHandler::new(
         name.to_string(),
@@ -206,6 +217,44 @@ fn load_single_plugin(name: &str, plugin_path: &Path) -> Result<LuaPluginHandler
         plugin_path.to_path_buf(),
         phases,
     ))
+}
+
+fn detect_runtime_phases(plugin_path: &Path, handler_code: &str) -> Result<HashMap<Phase, bool>> {
+    let lua = unsafe { Lua::unsafe_new() };
+    runtime::configure_package_path(&lua, &plugin_path.to_path_buf())
+        .map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::set_phase(&lua, "init").map_err(|e| KongError::LuaError(e.to_string()))?;
+    runtime::install(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+    crate::pdk::inject_ngx_compat(&lua).map_err(|e| KongError::LuaError(e.to_string()))?;
+
+    let handler_table: LuaTable = lua.load(handler_code).eval().map_err(|e| {
+        KongError::LuaError(format!(
+            "Failed to load handler.lua for runtime phase detection: {} — 运行时 phase 检测加载 handler.lua 失败: {}",
+            e, e
+        ))
+    })?;
+
+    let mut phases = HashMap::new();
+    for (phase, key) in [
+        (Phase::InitWorker, "init_worker"),
+        (Phase::Certificate, "certificate"),
+        (Phase::Rewrite, "rewrite"),
+        (Phase::Access, "access"),
+        (Phase::Response, "response"),
+        (Phase::HeaderFilter, "header_filter"),
+        (Phase::BodyFilter, "body_filter"),
+        (Phase::Log, "log"),
+    ] {
+        phases.insert(
+            phase,
+            matches!(
+                handler_table.get::<LuaValue>(key),
+                Ok(LuaValue::Function(_))
+            ),
+        );
+    }
+
+    Ok(phases)
 }
 
 /// Extract plugin priority from handler.lua source code — 从 handler.lua 源码中提取插件优先级

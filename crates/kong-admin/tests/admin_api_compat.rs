@@ -212,6 +212,19 @@ fn create_test_app_with_data() -> axum::Router {
                 "updated_at": 1609459200
             }
         ],
+        "plugins": [
+            {
+                "id": "877dc65d-b37a-408c-bcf6-5d081ea55f7b",
+                "name": "key-auth",
+                "enabled": true,
+                "service": { "id": "550e8400-e29b-41d4-a716-446655440000" },
+                "config": {
+                    "key_names": ["apikey"]
+                },
+                "created_at": 1609459200,
+                "updated_at": 1609459200
+            }
+        ],
         "consumers": [
             {
                 "id": "770e8400-e29b-41d4-a716-446655440002",
@@ -708,6 +721,62 @@ async fn test_nested_service_routes_by_name() {
 
     let data = json.get("data").unwrap().as_array().unwrap();
     assert_eq!(data.len(), 1);
+}
+
+#[tokio::test]
+async fn test_create_service_scoped_plugin() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/services/550e8400-e29b-41d4-a716-446655440000/plugins")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "key-auth",
+                        "enabled": true,
+                        "config": {
+                            "key_names": ["apikey"]
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_service_scoped_plugin_detail() {
+    let app = create_test_app_with_data();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/services/550e8400-e29b-41d4-a716-446655440000/plugins/877dc65d-b37a-408c-bcf6-5d081ea55f7b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["id"], "877dc65d-b37a-408c-bcf6-5d081ea55f7b");
+    assert_eq!(
+        json["service"]["id"],
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
 }
 
 #[tokio::test]

@@ -150,6 +150,7 @@ kong-rust/
 ├── kong.conf.default             # 开发环境默认配置（兼容 Kong 的 kong.conf 格式）
 │
 ├── scripts/                      # 开发和测试脚本
+│   ├── run-cargo-test.sh         # 测试入口（映射 KONG_TEST_* / KONG_SPEC_TEST_* 到 KONG_*）
 │   └── dependency_services/      # 依赖服务管理（参考原版 Kong 结构）
 │       ├── docker-compose-test-services.yml  # Docker Compose 服务定义
 │       ├── common.sh             # 核心逻辑（启动/停止、端口提取、环境变量导出）
