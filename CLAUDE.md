@@ -89,3 +89,30 @@ crates/
 5. **更新 requirements.md**：如果需求范围有变化，更新需求文档
 
 **不要跳过这些步骤**——spec-workflow 是项目的持久知识库，确保每个 AI agent 都能快速了解项目全貌。
+
+## gstack
+
+- **所有网页浏览一律使用 `/browse` skill**，不要使用 `mcp__claude-in-chrome__*` 工具
+- 可用 skills 列表：
+  - `/office-hours` - 办公时间
+  - `/plan-ceo-review` - CEO 评审计划
+  - `/plan-eng-review` - 工程评审计划
+  - `/plan-design-review` - 设计评审计划
+  - `/design-consultation` - 设计咨询
+  - `/review` - 代码审查
+  - `/ship` - 发布
+  - `/browse` - 网页浏览
+  - `/qa` - 质量保证
+  - `/qa-only` - 仅 QA
+  - `/design-review` - 设计评审
+  - `/setup-browser-cookies` - 设置浏览器 cookies
+  - `/retro` - 复盘
+  - `/investigate` - 调查
+  - `/document-release` - 发布文档
+  - `/codex` - Codex
+  - `/careful` - 谨慎模式
+  - `/freeze` - 冻结
+  - `/guard` - 守卫
+  - `/unfreeze` - 解冻
+  - `/gstack-upgrade` - 升级 gstack
+- 如果 gstack skills 无法使用，运行 `cd .claude/skills/gstack && ./setup` 重新构建二进制并注册 skills
