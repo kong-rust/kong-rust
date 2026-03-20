@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 -- 插入默认工作空间（仅在全新数据库时生效；已有 Kong DB 中 workspaces 表已存在则跳过）
 INSERT INTO workspaces (id, name)
 VALUES ('00000000-0000-0000-0000-000000000000', 'default')
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ============================================================
 -- 为所有实体表添加 ws_id 列
