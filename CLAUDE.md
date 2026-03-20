@@ -49,46 +49,32 @@ crates/
 3. **直接 SQL**：不用 ORM，确保与 Kong 数据库 Schema 100% 一致
 4. **最小侵入**：不修改 Kong 的 Lua 插件代码，不改变数据库 Schema
 
-## Spec-Workflow 索引
+## 项目文档索引
 
-项目使用 `.spec-workflow/` 目录管理规划和设计文档，这是项目的核心知识库。
-
-### 导航文档（Steering）
+项目文档统一存放在 `docs/` 目录：
 
 | 文件 | 内容 |
 |------|------|
-| `.spec-workflow/steering/product.md` | 产品目标、用户画像、核心特性、成功标准 |
-| `.spec-workflow/steering/tech.md` | 技术栈、依赖清单、开发命令、技术约束 |
-| `.spec-workflow/steering/structure.md` | 目录结构、命名规范、导入规范、代码组织原则 |
-
-### 功能规格（Specs）
-
-| 文件 | 内容 |
-|------|------|
-| `.spec-workflow/specs/kong-rust/requirements.md` | 9 个需求（R1-R9）：代理引擎、路由、Admin API、数据库、Lua 插件、配置、健康检查、TLS、Hybrid 模式 |
-| `.spec-workflow/specs/kong-rust/design.md` | 9 个组件设计：kong-core 到 kong-cluster 的详细接口和架构 |
-| `.spec-workflow/specs/kong-rust/tasks.md` | 15 个阶段（1-11）的任务清单，含状态标记（`[x]` 已完成 / `[ ]` 待实现） |
-
-### 实现日志
-
-`.spec-workflow/specs/kong-rust/Implementation Logs/` 目录记录每个已完成任务的实现详情（修改文件、代码统计、API/组件/函数等 artifact 信息）。
+| `docs/requirements.md` | 9 个需求（R1-R9）：代理引擎、路由、Admin API、数据库、Lua 插件、配置、健康检查、TLS、Hybrid 模式 |
+| `docs/design.md` | 9 个组件设计：kong-core 到 kong-cluster 的详细接口和架构 |
+| `docs/tasks.md` | 13 个阶段（1-13）的任务清单，含进度概览表 |
+| `docs/implementation-logs/` | 37 个已完成任务的实现日志（修改文件、代码统计、artifact 信息） |
 
 ### 进度概览
 
-- **阶段 1-8e, 10-11**：已完成（54 个任务），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化
-- **阶段 9**：待实现（7 个任务），Hybrid 模式 CP/DP 集群通信
+- **已完成**：58 个任务（阶段 1-8e, 10-13），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理
+- **待实现**：8 个任务（阶段 9 Hybrid 模式 + 8.12a busted 兼容层）
 
-## 强制要求：自动更新 Spec-Workflow
+## 强制要求：变更时同步更新文档
 
-**每次实现新功能、修复 Bug 或进行重要代码变更时，必须同步更新 spec-workflow：**
+**每次实现新功能、修复 Bug 或进行重要代码变更时，必须同步更新：**
 
-1. **更新 tasks.md**：如果涉及已有任务，更新状态标记；如果是新增任务，追加到对应阶段
-2. **记录 Implementation Log**：使用 `mcp__spec-workflow__log-implementation` 工具记录实现详情（artifact 信息至关重要，供未来 AI agent 检索复用）
-3. **更新 structure.md**：如果新增了文件/目录/crate，更新项目结构文档
-4. **更新 design.md**：如果涉及架构变更或新组件，更新设计文档
-5. **更新 requirements.md**：如果需求范围有变化，更新需求文档
+1. **更新 `docs/tasks.md`**：如果涉及已有任务，更新状态标记；新增任务追加到对应阶段
+2. **记录实现日志**：在 `docs/implementation-logs/` 创建日志文件，记录修改文件、代码统计、artifact 信息
+3. **更新 `docs/design.md`**：如果涉及架构变更或新组件
+4. **更新 `docs/requirements.md`**：如果需求范围有变化
 
-**不要跳过这些步骤**——spec-workflow 是项目的持久知识库，确保每个 AI agent 都能快速了解项目全貌。
+**不要跳过这些步骤**——docs/ 是项目的持久知识库，确保每个 AI agent 都能快速了解项目全貌。
 
 ## gstack
 
