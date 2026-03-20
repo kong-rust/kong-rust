@@ -1157,7 +1157,7 @@ pub fn target_schema() -> EntitySchema {
         .column("created_at", "created_at", ColumnType::TimestampMs, false)
         .column("updated_at", "updated_at", ColumnType::TimestampMs, false)
         .text("target")
-        .float("weight")
+        .integer("weight")
         .text_opt("cache_key")
         .tags()
         .foreign_key_required("upstream")
