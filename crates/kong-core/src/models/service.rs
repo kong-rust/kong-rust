@@ -46,6 +46,9 @@ pub struct Service {
     pub ca_certificates: Option<Vec<Uuid>>,
     /// Whether enabled, default true — 是否启用，默认 true
     pub enabled: bool,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Service {
@@ -69,6 +72,7 @@ impl Default for Service {
             tls_verify_depth: None,
             ca_certificates: None,
             enabled: true,
+            ws_id: None,
         }
     }
 }

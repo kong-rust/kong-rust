@@ -241,6 +241,9 @@ pub struct Upstream {
     /// Whether to use SRV hostname, default false — 是否使用 SRV 主机名，默认 false
     #[serde(default)]
     pub use_srv_name: bool,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Upstream {
@@ -267,6 +270,7 @@ impl Default for Upstream {
             host_header: None,
             client_certificate: None,
             use_srv_name: false,
+            ws_id: None,
         }
     }
 }

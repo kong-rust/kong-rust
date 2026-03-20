@@ -17,6 +17,9 @@ pub struct CaCertificate {
     pub cert_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for CaCertificate {
@@ -28,6 +31,7 @@ impl Default for CaCertificate {
             cert: String::new(),
             cert_digest: None,
             tags: None,
+            ws_id: None,
         }
     }
 }

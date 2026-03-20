@@ -520,3 +520,20 @@
   - 为上游 (Upstream) 代理配置 `ALPN::H2H1`，优先协商 HTTP/2。
   - 检查并兼容配置文件中的 `http2` 标志。
   - 文件：`crates/kong-server/src/main.rs`, `crates/kong-proxy/src/lib.rs`
+
+## 阶段 13：数据库兼容性与 WebSocket 代理修复
+
+- [x] 13.1 添加 workspaces 表和 ws_id 列支持
+  - 创建 workspaces 表（与 Kong 原版 schema 一致）
+  - 为所有 10 个实体表（services/routes/consumers/plugins/upstreams/targets/certificates/snis/ca_certificates/sm_vaults）添加 ws_id 列
+  - 迁移自动为现有数据设置默认 workspace 的 ws_id
+  - 所有模型结构体添加 `ws_id: Option<Uuid>` 字段
+  - 所有 EntitySchema 添加 ws_id 列定义
+  - 文件：`crates/kong-db/migrations/core/001_add_workspaces.sql`, `crates/kong-db/src/migrations.rs`, `crates/kong-core/src/models/*.rs`, `crates/kong-db/src/dao/postgres.rs`
+  - _Requirements: R4_
+
+- [x] 13.2 修复 WebSocket 代理握手头转发
+  - 修复仅透传 Upgrade/Connection 头的问题，增加转发所有 sec-websocket-* 握手头
+  - 确保 Sec-WebSocket-Key、Sec-WebSocket-Version、Sec-WebSocket-Protocol、Sec-WebSocket-Extensions 等头正确到达上游
+  - 文件：`crates/kong-proxy/src/lib.rs`
+  - _Requirements: R1_

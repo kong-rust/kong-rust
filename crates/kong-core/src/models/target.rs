@@ -23,6 +23,9 @@ pub struct Target {
     pub cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Target {
@@ -36,6 +39,7 @@ impl Default for Target {
             weight: 100,
             cache_key: None,
             tags: None,
+            ws_id: None,
         }
     }
 }

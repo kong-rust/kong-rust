@@ -17,6 +17,9 @@ pub struct Sni {
     pub tags: Option<Vec<String>>,
     /// Associated certificate (foreign key to certificates), required — 关联的证书（外键引用 certificates），必填
     pub certificate: ForeignKey,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Sni {
@@ -28,6 +31,7 @@ impl Default for Sni {
             updated_at: 0,
             tags: None,
             certificate: ForeignKey::new(Uuid::nil()),
+            ws_id: None,
         }
     }
 }

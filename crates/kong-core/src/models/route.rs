@@ -62,6 +62,9 @@ pub struct Route {
     /// Expression route priority — 表达式路由优先级
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Route {
@@ -90,6 +93,7 @@ impl Default for Route {
             path_handling: PathHandling::V0,
             expression: None,
             priority: None,
+            ws_id: None,
         }
     }
 }

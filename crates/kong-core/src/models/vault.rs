@@ -23,6 +23,9 @@ pub struct Vault {
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Vault {
@@ -36,6 +39,7 @@ impl Default for Vault {
             created_at: 0,
             updated_at: 0,
             tags: None,
+            ws_id: None,
         }
     }
 }

@@ -1082,6 +1082,7 @@ pub fn service_schema() -> EntitySchema {
         .integer_opt("tls_verify_depth")
         .uuid_array("ca_certificates")
         .boolean("enabled")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Route entity — 创建 Route 实体的 Schema
@@ -1109,6 +1110,7 @@ pub fn route_schema() -> EntitySchema {
         .jsonb_array("destinations")
         .text_opt("expression")
         .integer_opt("priority")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Consumer entity — 创建 Consumer 实体的 Schema
@@ -1119,6 +1121,7 @@ pub fn consumer_schema() -> EntitySchema {
         .text_opt("username")
         .text_opt("custom_id")
         .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Upstream entity — 创建 Upstream 实体的 Schema
@@ -1144,6 +1147,7 @@ pub fn upstream_schema() -> EntitySchema {
         .text_opt("host_header")
         .foreign_key("client_certificate")
         .boolean("use_srv_name")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Target entity — 创建 Target 实体的 Schema
@@ -1157,6 +1161,7 @@ pub fn target_schema() -> EntitySchema {
         .text_opt("cache_key")
         .tags()
         .foreign_key_required("upstream")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Plugin entity — 创建 Plugin 实体的 Schema
@@ -1174,6 +1179,7 @@ pub fn plugin_schema() -> EntitySchema {
         .foreign_key("route")
         .foreign_key("service")
         .foreign_key("consumer")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Certificate entity — 创建 Certificate 实体的 Schema
@@ -1186,6 +1192,7 @@ pub fn certificate_schema() -> EntitySchema {
         .text_opt("cert_alt")
         .text_opt("key_alt")
         .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for SNI entity — 创建 Sni 实体的 Schema
@@ -1196,6 +1203,7 @@ pub fn sni_schema() -> EntitySchema {
         .text("name")
         .tags()
         .foreign_key_required("certificate")
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for CaCertificate entity — 创建 CaCertificate 实体的 Schema
@@ -1206,6 +1214,7 @@ pub fn ca_certificate_schema() -> EntitySchema {
         .text("cert")
         .text_opt("cert_digest")
         .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
 /// Create Schema for Vault entity — 创建 Vault 实体的 Schema
@@ -1218,4 +1227,5 @@ pub fn vault_schema() -> EntitySchema {
         .text_opt("description")
         .jsonb("config")
         .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }

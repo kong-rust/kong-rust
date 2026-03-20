@@ -15,10 +15,16 @@ struct Migration {
 }
 
 /// Core migration list (SQL embedded at compile time) — 核心 migration 列表（编译期嵌入 SQL）
-const CORE_MIGRATIONS: &[Migration] = &[Migration {
-    name: "000_base",
-    sql: include_str!("../migrations/core/000_base.sql"),
-}];
+const CORE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "000_base",
+        sql: include_str!("../migrations/core/000_base.sql"),
+    },
+    Migration {
+        name: "001_add_workspaces",
+        sql: include_str!("../migrations/core/001_add_workspaces.sql"),
+    },
+];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
 const SUBSYSTEM: &str = "core";
@@ -38,6 +44,7 @@ const KNOWN_TABLES: &[&str] = &[
     "ca_certificates",
     "sm_vaults",
     "schema_meta",
+    "workspaces",
 ];
 
 /// Migration state (corresponds to Kong's schema_state) — migration 状态（对应 Kong 的 schema_state）

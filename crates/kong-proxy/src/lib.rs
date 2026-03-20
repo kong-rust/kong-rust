@@ -992,7 +992,8 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 7. WebSocket 代理：始终透传 Upgrade/Connection 头（与 Kong 原版行为一致）
+        // 7. WebSocket 代理：透传所有 WebSocket 握手头（与 Kong 原版行为一致）
+        // 除了 Upgrade/Connection，还需要转发 Sec-WebSocket-Key/Version/Protocol/Extensions 等
         {
             let is_websocket = session
                 .req_header()
@@ -1004,6 +1005,24 @@ impl ProxyHttp for KongProxy {
             if is_websocket {
                 let _ = upstream_request.insert_header("upgrade", "websocket");
                 let _ = upstream_request.insert_header("connection", "upgrade");
+
+                // 转发所有 sec-websocket-* 握手头 — Forward all sec-websocket-* handshake headers
+                let ws_headers: Vec<(String, Vec<u8>)> = session
+                    .req_header()
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| {
+                        name.as_str()
+                            .to_ascii_lowercase()
+                            .starts_with("sec-websocket-")
+                    })
+                    .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+                    .collect();
+                for (name, value) in ws_headers {
+                    if let Ok(v) = std::str::from_utf8(&value) {
+                        let _ = upstream_request.insert_header(name, v);
+                    }
+                }
             }
         }
 

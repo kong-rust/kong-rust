@@ -40,6 +40,9 @@ pub struct Plugin {
     /// Plugin ordering configuration — 插件排序配置
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ordering: Option<PluginOrdering>,
+    /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_id: Option<Uuid>,
 }
 
 impl Default for Plugin {
@@ -59,6 +62,7 @@ impl Default for Plugin {
             enabled: true,
             tags: None,
             ordering: None,
+            ws_id: None,
         }
     }
 }
