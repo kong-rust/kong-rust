@@ -17,7 +17,8 @@
 | 11 | HTTP 代理性能优化 | 7 | 7 | 0 |
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
-| **合计** | | **66** | **58** | **8** |
+| 14 | QA 测试与 Bug 修复 | 2 | 2 | 0 |
+| **合计** | | **68** | **60** | **8** |
 
 ---
 
@@ -324,3 +325,38 @@
 - [x] **13.2** 修复 WebSocket 代理握手头转发 `[R1]`
   - 透传所有 sec-websocket-* 握手头到上游
   - 文件：`crates/kong-proxy/src/lib.rs`
+
+## 阶段 14：QA 测试与 Bug 修复
+
+- [x] **14.1** 修复 Target weight 列类型不匹配 `[R4]`
+  - target_schema() 中 weight 从 `.float()` 改为 `.integer()`，与 DB schema (INTEGER) 一致
+  - 文件：`crates/kong-db/src/dao/postgres.rs`
+
+- [x] **14.2** 修复 Docker 容器 workspace migration 冲突导致无限重启 `[R4]`
+  - INSERT workspaces 从 `ON CONFLICT (id) DO NOTHING` 改为 `ON CONFLICT DO NOTHING`，兼容已有 Kong DB
+  - 文件：`crates/kong-db/migrations/core/001_add_workspaces.sql`
+
+### 已知问题（QA 发现，待修复）
+
+以下问题由 QA 测试（2026-03-20）发现，完整报告见 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`。
+
+**High（3 个）：**
+- [ ] 负载均衡不分发请求到多个 targets — round-robin 全部请求只发到第一个 target
+- [ ] Header 路由匹配不严格 — 缺少必要 header 的请求仍被匹配
+- [ ] HTTPS-only 路由匹配 HTTP 请求 — `protocols: ["https"]` 路由未过滤 HTTP 请求
+
+**Medium（8 个）：**
+- [ ] PUT upsert Service 不解析 `url` shorthand（host 为空、时间戳为 0）
+- [ ] preserve_host=true 时 Host 头丢失端口号
+- [ ] Targets created_at/updated_at 返回 0.0
+- [ ] Prometheus 插件缺少请求级别指标（kong_http_requests_total 等）
+- [ ] 上游不可达返回 500 空响应体（应返回 JSON 错误）
+- [ ] 1MB 请求体导致 502 超时
+- [ ] 代理响应缺少 Kong 特征头（Server、X-Kong-*-Latency、X-Kong-Request-Id）
+- [ ] Service 创建缺少 host 字段必填验证
+
+**Low（4 个）：**
+- [ ] Admin API 未知路径 404 响应体为空
+- [ ] 失败的 Target 创建请求仍部分写入数据库（事务未回滚）
+- [ ] Prometheus 指标中 node_id 全零、version 显示 3.0.0
+- [ ] 删除有关联路由的 Service 返回 400 而非 409 Conflict

@@ -42,6 +42,42 @@ crates/
 | `make lint` | Clippy 检查 |
 | `make services-up` / `make services-down` | 启停依赖服务 |
 
+### Docker 构建与测试
+
+| 命令 | 作用 |
+|------|------|
+| `DOCKER_PLATFORM=linux/arm64 make DOCKER_TAG=fengyi95/kong-rust:latest docker-build` | 构建 arm64 镜像（M 系列 Mac 本地测试用） |
+| `make DOCKER_TAG=fengyi95/kong-rust:latest docker-build` | 构建 amd64 镜像（线上发布，默认平台） |
+| `make docker-push` | 推送镜像到 Docker Hub |
+| `make docker-run` | db-less 模式运行容器 |
+| `make docker-run-pg` | PostgreSQL 模式运行容器 |
+| `make docker-stop` | 停止容器 |
+
+**Docker 端到端测试流程**（本地验证镜像是否正常工作）：
+
+```bash
+# 1. 构建 arm64 测试镜像
+DOCKER_PLATFORM=linux/arm64 make DOCKER_TAG=fengyi95/kong-rust:latest docker-build
+
+# 2. 用 /Users/dawxy/kong/docker-compose.yml 启动完整环境
+cd /Users/dawxy/kong && docker compose up -d
+
+# 3. 等待健康检查通过后验证
+curl -s http://127.0.0.1:8001/        # Admin API
+curl -s http://127.0.0.1:8001/status   # 状态检查
+curl -s http://127.0.0.1:80/           # 代理端口（无路由时 404）
+curl -s http://127.0.0.1:8002/         # Kong Manager GUI
+docker exec kong-kong-1 kong health    # 容器内健康检查
+
+# 4. 构建 amd64 线上镜像并推送
+make DOCKER_TAG=fengyi95/kong-rust:latest docker-build
+make DOCKER_TAG=fengyi95/kong-rust:latest docker-push
+```
+
+**Docker Compose 测试环境**：`/Users/dawxy/kong/docker-compose.yml`
+- PostgreSQL 15 + Kong-Rust，端口：80（代理）、443（Stream）、6443（HTTPS）、8001（Admin）、8002（GUI）、8007（Status）
+- 数据持久化：`/Users/dawxy/kong/db`，SSL 证书：`/Users/dawxy/kong/certs/`
+
 ## 核心设计原则
 
 1. **兼容优先**：所有外部行为与 Kong 完全一致
@@ -57,13 +93,14 @@ crates/
 |------|------|
 | `docs/requirements.md` | 9 个需求（R1-R9）：代理引擎、路由、Admin API、数据库、Lua 插件、配置、健康检查、TLS、Hybrid 模式 |
 | `docs/design.md` | 9 个组件设计：kong-core 到 kong-cluster 的详细接口和架构 |
-| `docs/tasks.md` | 13 个阶段（1-13）的任务清单，含进度概览表 |
-| `docs/implementation-logs/` | 37 个已完成任务的实现日志（修改文件、代码统计、artifact 信息） |
+| `docs/tasks.md` | 14 个阶段（1-14）的任务清单，含进度概览表和已知问题 |
+| `docs/implementation-logs/` | 38 个已完成任务的实现日志（修改文件、代码统计、artifact 信息） |
 
 ### 进度概览
 
-- **已完成**：58 个任务（阶段 1-8e, 10-13），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理
+- **已完成**：60 个任务（阶段 1-8e, 10-14），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理、QA 测试与 Bug 修复
 - **待实现**：8 个任务（阶段 9 Hybrid 模式 + 8.12a busted 兼容层）
+- **已知问题**：15 个（QA 发现，详见 `docs/tasks.md` 阶段 14 和 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`）
 
 ## 强制要求：变更时同步更新文档
 
