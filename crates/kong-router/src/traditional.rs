@@ -341,6 +341,14 @@ impl TraditionalRouter {
             }
         }
 
+        // Protocol matching — 协议匹配
+        // If route defines protocols, request scheme must be in the list — 如果路由定义了 protocols，请求 scheme 必须在列表中
+        if !route.protocols.is_empty() {
+            if !route.protocols.iter().any(|p| p == &ctx.scheme) {
+                return false;
+            }
+        }
+
         true
     }
 

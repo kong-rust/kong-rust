@@ -373,6 +373,37 @@ async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
     }
 }
 
+/// Expand `url` shorthand field into protocol/host/port/path — 将 `url` 快捷字段展开为 protocol/host/port/path
+fn expand_url_shorthand(body: &Value) -> Value {
+    let mut body = body.clone();
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(url_val) = obj.remove("url") {
+            if let Some(url_str) = url_val.as_str() {
+                if let Ok(parsed) = url::Url::parse(url_str) {
+                    if !obj.contains_key("protocol") {
+                        obj.insert("protocol".to_string(), json!(parsed.scheme()));
+                    }
+                    if !obj.contains_key("host") {
+                        if let Some(host) = parsed.host_str() {
+                            obj.insert("host".to_string(), json!(host));
+                        }
+                    }
+                    if !obj.contains_key("port") {
+                        if let Some(port) = parsed.port_or_known_default() {
+                            obj.insert("port".to_string(), json!(port));
+                        }
+                    }
+                    let path = parsed.path();
+                    if !obj.contains_key("path") && path != "/" && !path.is_empty() {
+                        obj.insert("path".to_string(), json!(path));
+                    }
+                }
+            }
+        }
+    }
+    body
+}
+
 /// Generic create handler — 通用创建处理
 async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
@@ -417,6 +448,22 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
+    // Validate required fields (Service.host must not be empty) — 验证必填字段（Service.host 不能为空）
+    if let Some(obj) = body.as_object() {
+        if let Some(host) = obj.get("host") {
+            if host.as_str().map_or(false, |s| s.is_empty()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (host: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                    })),
+                );
+            }
+        }
+    }
+
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -457,8 +504,10 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     id_or_name: &str,
     body: &Value,
 ) -> (StatusCode, Json<Value>) {
+    // Parse url shorthand for Service updates — Service 更新时解析 url 快捷方式
+    let body = expand_url_shorthand(body);
     let pk = PrimaryKey::from_str_or_uuid(id_or_name);
-    match dao.update(&pk, body).await {
+    match dao.update(&pk, &body).await {
         Ok(updated) => {
             let body = serde_json::to_value(&updated).unwrap_or(json!(null));
             (StatusCode::OK, Json(body))
@@ -484,6 +533,17 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     id_or_name: &str,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
+    // Parse url shorthand + inject timestamps — 解析 url 快捷方式 + 注入时间戳
+    let mut body = expand_url_shorthand(&body);
+    if let Some(obj) = body.as_object_mut() {
+        let now = chrono::Utc::now().timestamp();
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), json!(now));
+        }
+        if !obj.contains_key("updated_at") {
+            obj.insert("updated_at".to_string(), json!(now));
+        }
+    }
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {

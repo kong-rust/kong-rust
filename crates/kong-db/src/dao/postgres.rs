@@ -1154,8 +1154,7 @@ pub fn upstream_schema() -> EntitySchema {
 pub fn target_schema() -> EntitySchema {
     EntitySchema::new("targets")
         .pk()
-        .column("created_at", "created_at", ColumnType::TimestampMs, false)
-        .column("updated_at", "updated_at", ColumnType::TimestampMs, false)
+        .timestamps()
         .text("target")
         .integer("weight")
         .text_opt("cache_key")
