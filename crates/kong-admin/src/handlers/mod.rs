@@ -156,6 +156,9 @@ fn listen_addrs_to_strings(addrs: &[kong_config::ListenAddr]) -> Vec<String> {
         .collect()
 }
 
+/// Kong-compatible version string — Kong 兼容版本号
+pub const KONG_VERSION: &str = "3.10.0";
+
 /// GET / — Node info (Kong-compatible) — GET / — 节点信息（兼容 Kong）
 pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
     let config = &state.config;
@@ -173,11 +176,12 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
             .collect()
     };
 
-    Json(json!({
-        "version": "0.1.0",
+    // Return Kong-compatible version and Server header — 返回 Kong 兼容的版本号和 Server 响应头
+    let body = Json(json!({
+        "version": KONG_VERSION,
         "edition": "community",
         "lua_version": "LuaJIT 2.1.0-beta3",
-        "tagline": "Welcome to kong-rust",
+        "tagline": "Welcome to kong",
         "hostname": hostname,
         "node_id": state.node_id.to_string(),
         "configuration": {
@@ -237,7 +241,15 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
             "master": std::process::id(),
             "workers": [std::process::id()],
         },
-    }))
+    }));
+
+    // Add Server header for Kong compatibility — 添加 Kong 兼容的 Server 响应头
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::SERVER,
+        HeaderValue::from_static("kong/3.10.0"),
+    );
+    response
 }
 
 /// GET /plugins/enabled — List registered plugins on this node. — GET /plugins/enabled — 返回当前节点已注册插件。
@@ -322,15 +334,19 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
 // ============ Generic CRUD helpers — 通用 CRUD 辅助 ============
 
 /// Build Kong-compatible paginated response — 构建 Kong 兼容的分页响应
-/// Only includes offset/next when present — 仅在存在时包含 offset/next
+/// Always includes `next` (null when no more pages), only includes `offset` when present —
+/// 始终包含 `next`（无更多页时为 null），仅在存在时包含 `offset`
 fn build_page_response<T: Serialize>(page: &Page<T>) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("data".to_string(), json!(page.data));
+    // Always include next (null when no more pages) — 始终包含 next（无更多页时为 null）
+    body.insert("next".to_string(), match &page.next {
+        Some(n) => json!(n),
+        None => Value::Null,
+    });
+    // Only include offset when present — 仅在存在时包含 offset
     if let Some(ref offset) = page.offset {
         body.insert("offset".to_string(), json!(offset));
-    }
-    if let Some(ref next) = page.next {
-        body.insert("next".to_string(), json!(next));
     }
     Value::Object(body)
 }
@@ -430,9 +446,14 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                         obj.insert("port".to_string(), json!(port));
                     }
                 }
-                let path = parsed.path();
-                if !obj.contains_key("path") && !path.is_empty() {
-                    obj.insert("path".to_string(), json!(path));
+                // Only set path if the original URL explicitly includes a path component — 仅当原始 URL 明确包含路径部分时才设置 path
+                // e.g. "http://example.com" → no path, "http://example.com/" → path="/", "http://example.com/foo" → path="/foo"
+                let has_explicit_path = {
+                    let after_scheme = url_str.find("://").map(|i| i + 3).unwrap_or(0);
+                    url_str[after_scheme..].find('/').is_some()
+                };
+                if has_explicit_path && !obj.contains_key("path") {
+                    obj.insert("path".to_string(), json!(parsed.path()));
                 }
             }
         }
@@ -498,9 +519,13 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                                 obj.insert("port".to_string(), json!(port));
                             }
                         }
-                        let path = parsed.path();
-                        if !obj.contains_key("path") && !path.is_empty() {
-                            obj.insert("path".to_string(), json!(path));
+                        // Only set path if the original URL explicitly includes a path component — 仅当原始 URL 明确包含路径部分时才设置 path
+                        let has_explicit_path = {
+                            let after_scheme = url_str.find("://").map(|i| i + 3).unwrap_or(0);
+                            url_str[after_scheme..].find('/').is_some()
+                        };
+                        if has_explicit_path && !obj.contains_key("path") {
+                            obj.insert("path".to_string(), json!(parsed.path()));
                         }
                     }
                     Err(_) => {
@@ -518,14 +543,42 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
-    // Validate required fields (Service.host must not be empty) — 验证必填字段（Service.host 不能为空）
+    // Entity-specific validation before deserialization — 实体类型特定的前置验证
     if let Some(obj) = body.as_object() {
-        if let Some(host) = obj.get("host") {
-            if host.as_str().map_or(false, |s| s.is_empty()) {
+        // Issue 1: Service.host is required and must be non-empty — Service.host 必填且不能为空
+        if T::table_name() == "services" {
+            let host_missing = match obj.get("host") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(h) => h.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if host_missing {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
                         "message": "schema violation (host: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                    })),
+                );
+            }
+        }
+
+        // Issue 2: Consumer requires at least one of username or custom_id — Consumer 至少需要 username 或 custom_id 之一
+        if T::table_name() == "consumers" {
+            let has_username = obj
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| !s.is_empty());
+            let has_custom_id = obj
+                .get("custom_id")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| !s.is_empty());
+            if !has_username && !has_custom_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (at least one of these fields must be non-empty: 'custom_id', 'username')",
                         "name": "schema violation",
                         "code": 2,
                     })),
@@ -1745,4 +1798,87 @@ pub async fn delete_nested_target(
             (status, Json(body)).into_response()
         }
     }
+}
+
+// ============ Tags API — 标签 API ============
+
+/// Collect tags from a single entity table and append to results — 从单个实体表收集标签并追加到结果
+async fn collect_tags_from<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
+    dao: &Arc<dyn Dao<T>>,
+    entity_name: &str,
+    tag_filter: Option<&str>,
+    results: &mut Vec<Value>,
+) {
+    let params = PageParams {
+        size: 10000,
+        offset: None,
+        tags: None,
+    };
+    if let Ok(page) = dao.page(&params).await {
+        for entity in &page.data {
+            if let Some(tags) = entity.tags() {
+                for tag in tags {
+                    // If filtering by tag, skip non-matching — 如果按标签过滤，跳过不匹配的
+                    if let Some(filter) = tag_filter {
+                        if tag != filter {
+                            continue;
+                        }
+                    }
+                    results.push(json!({
+                        "entity_name": entity_name,
+                        "entity_id": entity.id().to_string(),
+                        "tag": tag,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// GET /tags — List all tags across all entity types — GET /tags — 列出所有实体类型的全部标签
+pub async fn list_all_tags(State(state): State<AdminState>) -> impl IntoResponse {
+    let mut results = Vec::new();
+
+    collect_tags_from(&state.services, "services", None, &mut results).await;
+    collect_tags_from(&state.routes, "routes", None, &mut results).await;
+    collect_tags_from(&state.consumers, "consumers", None, &mut results).await;
+    collect_tags_from(&state.plugins, "plugins", None, &mut results).await;
+    collect_tags_from(&state.upstreams, "upstreams", None, &mut results).await;
+    collect_tags_from(&state.targets, "targets", None, &mut results).await;
+    collect_tags_from(&state.certificates, "certificates", None, &mut results).await;
+    collect_tags_from(&state.snis, "snis", None, &mut results).await;
+    collect_tags_from(&state.ca_certificates, "ca_certificates", None, &mut results).await;
+    collect_tags_from(&state.vaults, "vaults", None, &mut results).await;
+
+    Json(json!({
+        "data": results,
+        "offset": null,
+        "next": null,
+    }))
+}
+
+/// GET /tags/:tag — List entities filtered by a specific tag — GET /tags/:tag — 按指定标签过滤实体
+pub async fn list_by_tag(
+    State(state): State<AdminState>,
+    Path(tag): Path<String>,
+) -> impl IntoResponse {
+    let mut results = Vec::new();
+    let tag_ref = tag.as_str();
+
+    collect_tags_from(&state.services, "services", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.routes, "routes", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.consumers, "consumers", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.plugins, "plugins", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.upstreams, "upstreams", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.targets, "targets", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.certificates, "certificates", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.snis, "snis", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.ca_certificates, "ca_certificates", Some(tag_ref), &mut results).await;
+    collect_tags_from(&state.vaults, "vaults", Some(tag_ref), &mut results).await;
+
+    Json(json!({
+        "data": results,
+        "offset": null,
+        "next": null,
+    }))
 }

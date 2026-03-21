@@ -429,6 +429,79 @@ function Blueprint:new(admin_client)
         vaults       = "/vaults",
     }
 
+    -- Standard entity default value generators (like Kong's blueprints.lua)
+    -- 标准实体默认值生成器（对齐 Kong 的 blueprints.lua）
+    local standard_defaults = {}
+    standard_defaults.services = function(overrides)
+        overrides = overrides or {}
+        return {
+            protocol = overrides.protocol or "http",
+            host = overrides.host or "127.0.0.1",
+            port = overrides.port or 15555,
+            name = overrides.name,
+            path = overrides.path,
+            tags = overrides.tags,
+            enabled = overrides.enabled,
+            connect_timeout = overrides.connect_timeout,
+            read_timeout = overrides.read_timeout,
+            write_timeout = overrides.write_timeout,
+            retries = overrides.retries,
+            client_certificate = overrides.client_certificate,
+            tls_verify = overrides.tls_verify,
+            tls_verify_depth = overrides.tls_verify_depth,
+            ca_certificates = overrides.ca_certificates,
+            url = overrides.url,
+        }
+    end
+    standard_defaults.consumers = function(overrides)
+        overrides = overrides or {}
+        local n = next_seq()
+        return {
+            custom_id = overrides.custom_id or ("consumer-cid-" .. n),
+            username = overrides.username or ("consumer-" .. n),
+            tags = overrides.tags,
+        }
+    end
+    standard_defaults.routes = function(overrides)
+        overrides = overrides or {}
+        local service = overrides.service
+        if not service and not overrides.no_service then
+            local svc_data = standard_defaults.services()
+            local res = bp.admin:post("/services", {
+                body = svc_data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if res and res.status >= 200 and res.status < 300 then
+                service = { id = cjson.decode(res.body).id }
+            end
+        end
+        local out = {}
+        for k, v in pairs(overrides) do
+            if k ~= "no_service" then out[k] = v end
+        end
+        out.service = service
+        return out
+    end
+    standard_defaults.upstreams = function(overrides)
+        overrides = overrides or {}
+        local n = next_seq()
+        return {
+            name = overrides.name or ("upstream-" .. n),
+            slots = overrides.slots or 100,
+            host_header = overrides.host_header,
+            tags = overrides.tags,
+        }
+    end
+    standard_defaults.targets = function(overrides)
+        overrides = overrides or {}
+        return {
+            weight = overrides.weight or 10,
+            target = overrides.target or "127.0.0.1:15555",
+            upstream = overrides.upstream,
+            tags = overrides.tags,
+        }
+    end
+
     -- default data generators for "named_*" entities — "named_*" 实体的默认数据生成器
     local defaults_generators = {
         named_services = function(overrides)
@@ -577,6 +650,15 @@ function Blueprint:new(admin_client)
                 end
             end,
 
+            -- insert_n: batch insert N entities with optional defaults — 批量插入 N 个实体，可选默认值
+            insert_n = function(self, count, defaults)
+                local entities = {}
+                for i = 1, count do
+                    entities[i] = self:insert(defaults)
+                end
+                return entities
+            end,
+
             -- remove: alias for delete by id — remove: 按 id 删除的别名
             remove = function(_, data)
                 if data and data.id then
@@ -597,7 +679,9 @@ function Blueprint:new(admin_client)
             local endpoint = entity_endpoints[key]
             if not endpoint then return nil end
 
-            return make_entity_ops(key, endpoint, nil)
+            -- use standard defaults if available — 使用标准默认值（如果有）
+            local std_gen = standard_defaults[key]
+            return make_entity_ops(key, endpoint, std_gen)
         end,
     })
 

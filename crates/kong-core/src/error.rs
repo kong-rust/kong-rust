@@ -16,7 +16,7 @@ pub enum KongError {
     ValidationError(String),
 
     /// Unique constraint violation — 唯一约束冲突
-    #[error("唯一约束冲突: {0}")]
+    #[error("UNIQUE violation detected on '{0}'")]
     UniqueViolation(String),
 
     /// Foreign key constraint violation — 外键约束错误

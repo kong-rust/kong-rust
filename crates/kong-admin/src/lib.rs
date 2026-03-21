@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use std::sync::RwLock;
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -86,6 +87,29 @@ pub async fn run_cache_refresher(
     }
 }
 
+/// Issue 4: OPTIONS middleware — return 204 with CORS headers for OPTIONS requests (Kong-compatible)
+/// OPTIONS 中间件 — 对 OPTIONS 请求返回 204 并带 CORS 头（兼容 Kong）
+async fn options_middleware(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    if req.method() == Method::OPTIONS {
+        return axum::http::Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header("Allow", "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS")
+            .header(
+                "Access-Control-Allow-Methods",
+                "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
+            )
+            .header("Access-Control-Allow-Headers", "Content-Type")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(axum::body::Body::empty())
+            .unwrap()
+            .into_response();
+    }
+    next.run(req).await
+}
+
 /// Build the Admin API router — 构建 Admin API 路由
 pub fn build_admin_router(state: AdminState) -> Router {
     use handlers::*;
@@ -95,6 +119,9 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/", get(root_info))
         .route("/status", get(status_info))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
+        // Tags — 标签 API
+        .route("/tags", get(list_all_tags))
+        .route("/tags/{tag}", get(list_by_tag))
         // Services
         .route("/services", get(list_services).post(create_service))
         .route(
@@ -235,6 +262,10 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(delete_vault),
         )
         .fallback(admin_fallback)
+        // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
+        .method_not_allowed_fallback(method_not_allowed_handler)
+        // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
+        .layer(middleware::from_fn(options_middleware))
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::mirror_request())
@@ -247,6 +278,16 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 ])),
         )
         .with_state(state)
+}
+
+/// Admin API 405 handler — Kong 兼容的 405 Method Not Allowed JSON 响应
+async fn method_not_allowed_handler() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "message": "Method not allowed",
+        })),
+    )
 }
 
 /// Admin API 404 fallback — Kong 兼容的 404 JSON 响应
