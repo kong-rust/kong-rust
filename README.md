@@ -1,20 +1,25 @@
 # Kong-Rust
 
-A high-performance API Gateway written in Rust, fully compatible with [Kong Gateway](https://github.com/Kong/kong). Drop-in replacement — zero migration cost.
+A high-performance **AI-Native API Gateway** written in Rust, fully compatible with [Kong Gateway](https://github.com/Kong/kong). Drop-in replacement for Kong — zero migration cost — with a Rust-native AI gateway engine on the roadmap.
 
 ## Why Kong-Rust?
 
 Kong is the world's most popular open-source API gateway, but it runs on LuaJIT + OpenResty. Kong-Rust rewrites the core engine in Rust using [Cloudflare Pingora](https://github.com/cloudflare/pingora), while maintaining **100% compatibility** with Kong's configuration, Admin API, database schema, and Lua plugin ecosystem.
 
-| | Kong (Lua/OpenResty) | Kong-Rust |
-|---|---|---|
-| **Proxy Engine** | OpenResty (Nginx + LuaJIT) | Pingora (Rust, multi-threaded) |
-| **Admin API** | Lapis (Lua) | axum (Rust) |
-| **Database** | pgmoon (Lua) | sqlx (Rust, async) |
-| **Lua Plugins** | Native | mlua (LuaJIT binding) |
-| **Memory Safety** | Manual (GC + FFI) | Rust ownership system |
+**Beyond traditional API gateway**, Kong-Rust is building a **Rust-native AI gateway engine** — LLM Proxy, MCP Gateway, and Skill/Agent Gateway — all implemented in Rust for maximum performance. This is the only project that combines full Kong compatibility with a full-stack AI gateway in a single Rust binary.
+
+| | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
+|---|---|---|---|
+| **Traditional API Gateway** | Full | None | Full (100% Kong compatible) |
+| **AI / LLM Proxy** | Lua plugins | Full (100+ providers) | Rust-native (roadmap) |
+| **MCP Gateway** | Enterprise | Basic | Rust-native (roadmap) |
+| **Proxy Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, multi-threaded) |
+| **Language** | Lua | Python | Rust |
+| **Memory Safety** | Manual (GC + FFI) | GC | Rust ownership system |
 
 ## Features
+
+### API Gateway (Kong Compatible)
 
 - **Full Kong Compatibility** — Same data models, Admin API, `kong.conf` format, declarative config (YAML/JSON), and Lua plugin interface (PDK + `ngx.*`)
 - **High-Performance Proxy** — Pingora's multi-threaded architecture with shared connection pools
@@ -26,6 +31,12 @@ Kong is the world's most popular open-source API gateway, but it runs on LuaJIT 
 - **Kong Manager UI** — Works with the official Kong Manager frontend
 - **Multiple Data Sources** — PostgreSQL or db-less (declarative config) modes
 - **Hybrid Mode** — Control Plane / Data Plane separation (planned)
+
+### AI Gateway (Roadmap)
+
+- **LLM Proxy** — Token-based rate limiting (TPM/RPM), multi-model load balancing & fallback, virtual API key management, token cost tracking, semantic caching, prompt guard
+- **MCP Gateway** — MCP server registration/discovery/routing/auth/observability
+- **Skill / Agent Gateway** — Skill registration & orchestration, agent communication routing, identity management
 
 ## Architecture
 
@@ -170,6 +181,8 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 
 ## Project Status
 
+### Traditional API Gateway
+
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 1. Core Models | Done | Data models, traits, configuration |
@@ -179,9 +192,32 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 | 5. Plugin System | Done | Plugin registry, Lua bridge, PDK |
 | 6. Admin API | Done | Full CRUD, nested endpoints, Kong Manager support |
 | 7. TLS | Done | Certificate management, SNI routing |
-| 8. Integration | Done | End-to-end testing, access logs |
-| 8c. Stream Proxy | Done | L4 TCP/TLS passthrough proxy, SNI/CIDR routing |
+| 8. Integration | Done | End-to-end testing, access logs, L4 stream proxy |
 | 9. Hybrid Mode | Planned | CP/DP cluster communication |
+
+### AI Gateway Roadmap
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| Phase 0 | In Progress | Stability hardening — Kong official spec test alignment |
+| Phase 1 | Planned | Hybrid CP/DP mode (traditional gateway completion) |
+| Phase 2 | Planned | LLM Proxy — Token rate limiting, multi-model LB & fallback, virtual API keys, cost tracking, semantic caching, prompt guard |
+| Phase 3 | Planned | MCP Gateway — Server registration, discovery, routing, auth, observability |
+| Phase 4 | Planned | Skill / Agent Gateway — Skill orchestration, agent routing, identity management |
+
+**All AI capabilities will be implemented in Rust-native code** — no Lua plugins. This is Kong-Rust's core performance advantage over Kong (Lua) and LiteLLM (Python).
+
+See [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md) for the full strategic roadmap.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Roadmap](docs/designs/kong-rust-roadmap.md) | Product roadmap & technical strategy |
+| [Design](docs/design.md) | Architecture & component design |
+| [Requirements](docs/requirements.md) | Functional & non-functional requirements |
+| [Tasks](docs/tasks.md) | Task tracking & progress |
+| [TODOs](TODOS.md) | Prioritized backlog |
 
 ## License
 

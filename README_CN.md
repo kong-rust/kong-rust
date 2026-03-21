@@ -1,20 +1,25 @@
 # Kong-Rust
 
-使用 Rust 完全重写的高性能 API 网关，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换，无需修改任何现有配置。
+使用 Rust 完全重写的高性能 **AI 原生 API 网关**，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换 Kong，同时规划 Rust 原生 AI 网关引擎。
 
 ## 为什么选择 Kong-Rust？
 
 Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
 
-| | Kong (Lua/OpenResty) | Kong-Rust |
-|---|---|---|
-| **代理引擎** | OpenResty (Nginx + LuaJIT) | Pingora (Rust, 多线程) |
-| **Admin API** | Lapis (Lua) | axum (Rust) |
-| **数据库驱动** | pgmoon (Lua) | sqlx (Rust, 异步) |
-| **Lua 插件** | 原生运行 | mlua (LuaJIT 绑定) |
-| **内存安全** | 手动管理 (GC + FFI) | Rust 所有权系统 |
+**不止于传统 API 网关**，Kong-Rust 正在构建 **Rust 原生 AI 网关引擎** —— LLM Proxy、MCP Gateway、Skill/Agent Gateway —— 全部 Rust 实现，追求极致性能。这是市场上唯一同时覆盖完整 Kong 兼容 + 全栈 AI 网关的 Rust 原生项目。
+
+| | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
+|---|---|---|---|
+| **传统 API 网关** | 完整 | 无 | 完整（100% Kong 兼容） |
+| **AI / LLM Proxy** | Lua 插件 | 完整（100+ provider） | Rust 原生（规划中） |
+| **MCP Gateway** | 企业版 | 基础 | Rust 原生（规划中） |
+| **代理引擎** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, 多线程) |
+| **实现语言** | Lua | Python | Rust |
+| **内存安全** | 手动管理 (GC + FFI) | GC | Rust 所有权系统 |
 
 ## 核心特性
+
+### API 网关（Kong 兼容）
 
 - **完全兼容 Kong** — 数据模型、Admin API、`kong.conf` 配置格式、声明式配置（YAML/JSON）、Lua 插件接口（PDK + `ngx.*`）完全一致
 - **高性能代理** — Pingora 多线程架构，共享连接池
@@ -26,6 +31,12 @@ Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty
 - **Kong Manager UI** — 兼容官方 Kong Manager 前端管理界面
 - **多数据源** — PostgreSQL 数据库模式或 db-less 声明式配置模式
 - **Hybrid 模式** — Control Plane / Data Plane 分离部署（规划中）
+
+### AI 网关（规划中）
+
+- **LLM Proxy** — Token 限流（TPM/RPM）、多模型负载均衡与 Fallback、虚拟 API Key 管理、Token 成本追踪、语义缓存、Prompt Guard
+- **MCP Gateway** — MCP Server 注册/发现/路由/认证/可观测性
+- **Skill / Agent Gateway** — Skill 注册与编排、Agent 通信路由、身份管理
 
 ## 架构
 
@@ -46,7 +57,7 @@ kong-server（主入口二进制）
 
 ### 环境要求
 
-- Rust 1.84+（含 Cargo）
+- Rust 1.94.0+（含 Cargo）
 - PostgreSQL 15+（数据库模式），或无需数据库（db-less 模式）
 - Docker（可选，用于托管 PostgreSQL）
 
@@ -170,6 +181,8 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 ## 项目进度
 
+### 传统 API 网关
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | 1. 核心模型 | 已完成 | 数据模型、trait、配置解析 |
@@ -179,9 +192,32 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 | 5. 插件系统 | 已完成 | 插件注册、Lua Bridge、PDK |
 | 6. Admin API | 已完成 | 完整 CRUD、嵌套端点、Kong Manager 支持 |
 | 7. TLS | 已完成 | 证书管理、SNI 路由 |
-| 8. 集成测试 | 已完成 | 端到端测试、访问日志 |
-| 8c. Stream 代理 | 已完成 | L4 TCP/TLS Passthrough 代理、SNI/CIDR 路由 |
+| 8. 集成测试 | 已完成 | 端到端测试、访问日志、L4 Stream 代理 |
 | 9. Hybrid 模式 | 规划中 | CP/DP 集群通信 |
+
+### AI 网关路线图
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| Phase 0 | 进行中 | 稳定性加固 — Kong 官方 spec 测试对齐 |
+| Phase 1 | 规划中 | Hybrid CP/DP 模式（传统网关封顶） |
+| Phase 2 | 规划中 | LLM Proxy — Token 限流、多模型负载均衡与 Fallback、虚拟 API Key、成本追踪、语义缓存、Prompt Guard |
+| Phase 3 | 规划中 | MCP Gateway — Server 注册、发现、路由、认证、可观测性 |
+| Phase 4 | 规划中 | Skill / Agent Gateway — Skill 编排、Agent 路由、身份管理 |
+
+**所有 AI 能力将以 Rust 原生代码实现** —— 不依赖 Lua 插件。这是 Kong-Rust 相对于 Kong（Lua）和 LiteLLM（Python）的核心性能优势。
+
+详细路线图请参阅 [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md)。
+
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [产品路线图](docs/designs/kong-rust-roadmap.md) | 产品路线图与技术战略 |
+| [设计文档](docs/design.md) | 架构与组件设计 |
+| [需求文档](docs/requirements.md) | 功能与非功能需求 |
+| [任务跟踪](docs/tasks.md) | 任务进度 |
+| [待办事项](TODOS.md) | 优先级排序的待办清单 |
 
 ## 许可证
 
