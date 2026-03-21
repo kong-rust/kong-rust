@@ -1,5 +1,7 @@
 //! Kong-Rust API Gateway — main entry point — Kong-Rust API Gateway — 主入口
 
+pub mod mock_upstream;
+
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +43,15 @@ enum Commands {
     },
     Config,
     Version,
+    /// Start mock upstream server for spec tests — 启动 spec 测试用 mock upstream 服务器
+    MockUpstream {
+        /// HTTP port (default: 15555) — HTTP 端口（默认：15555）
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// HTTPS port (default: 15556) — HTTPS 端口（默认：15556）
+        #[arg(short, long)]
+        ssl_port: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -144,6 +155,13 @@ fn main() -> anyhow::Result<()> {
             health_check(&config)?;
             return Ok(());
         }
+        Some(Commands::MockUpstream { port, ssl_port }) => {
+            // Mock upstream doesn't need full config/logging — Mock upstream 不需要完整配置/日志
+            tracing_subscriber::fmt::init();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(mock_upstream::run(port.unwrap_or(15555), *ssl_port))?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -184,7 +202,7 @@ fn main() -> anyhow::Result<()> {
             start_gateway(config, true)?;
         }
         // Already handled above — 已在上方处理
-        Commands::Version | Commands::Health => unreachable!(),
+        Commands::Version | Commands::Health | Commands::MockUpstream { .. } => unreachable!(),
     }
 
     Ok(())

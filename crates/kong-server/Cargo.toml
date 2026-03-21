@@ -22,7 +22,10 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
+gethostname = { workspace = true }
 axum = { workspace = true }
 uuid = { workspace = true }
 pingora = { workspace = true }
