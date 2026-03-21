@@ -392,7 +392,7 @@ impl Default for KongConfig {
                 "X-Forwarded-Path".to_string(),
                 "X-Forwarded-Prefix".to_string(),
             ],
-            proxy_hide_server_header: true,
+            proxy_hide_server_header: false,
             proxy_response_headers: vec![],
 
             // Nginx dynamic directives — Nginx 动态指令

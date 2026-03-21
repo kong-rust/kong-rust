@@ -426,13 +426,8 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
         },
     }));
 
-    // Add Server header for Kong compatibility — 添加 Kong 兼容的 Server 响应头
-    let mut response = body.into_response();
-    response.headers_mut().insert(
-        header::SERVER,
-        HeaderValue::from_static("kong/3.10.0"),
-    );
-    response
+    // Server header is now handled by admin_headers_middleware — Server 头现在由 admin_headers_middleware 中间件处理
+    body.into_response()
 }
 
 /// GET /plugins/enabled — List registered plugins on this node. — GET /plugins/enabled — 返回当前节点已注册插件。
@@ -2122,6 +2117,12 @@ fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String,
             config.entry("bandwidth_metrics".to_string()).or_insert(json!(false));
             config.entry("upstream_health_metrics".to_string()).or_insert(json!(false));
         }
+        "error-generator" | "error-generator-last" | "error-generator-pre" | "error-generator-post" => {
+            config.entry("rewrite".to_string()).or_insert(json!(false));
+            config.entry("access".to_string()).or_insert(json!(false));
+            config.entry("header_filter".to_string()).or_insert(json!(false));
+            config.entry("log".to_string()).or_insert(json!(false));
+        }
         // Other plugins: leave config as-is — 其他插件：保持 config 不变
         _ => {}
     }
@@ -2136,7 +2137,7 @@ fn is_valid_plugin_name(name: &str) -> bool {
     // Known test/development plugins — 已知的测试/开发插件
     const TEST_PLUGINS: &[&str] = &[
         "rewriter", "dummy", "ctx-tests", "error-handler-log",
-        "error-generator-last", "error-generator-pre", "error-generator-post",
+        "error-generator", "error-generator-last", "error-generator-pre", "error-generator-post",
         "short-circuit", "short-circuit-last", "logger", "reports-api",
         "request-transformer-advanced", "response-transformer-advanced",
         "rate-limiting-advanced", "canary", "forward-proxy", "upstream-tls",
@@ -2146,6 +2147,8 @@ fn is_valid_plugin_name(name: &str) -> bool {
         "mtls-auth", "application-registration", "websocket-size-limit",
         "websocket-validator", "openid-connect", "proxy-cache-advanced",
         "tls-handshake-modifier", "tls-metadata-headers",
+        "enable-buffering", "enable-buffering-response",
+        "admin-api-method",
     ];
     TEST_PLUGINS.contains(&name)
 }

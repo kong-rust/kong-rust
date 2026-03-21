@@ -139,8 +139,11 @@ impl PluginExecutor {
         ctx: &mut RequestCtx,
     ) -> Result<()> {
         for plugin in plugins {
-            // After short-circuit, only Log phase continues — 短路后只有 Log 阶段继续执行
-            if ctx.is_short_circuited() && phase != Phase::Log {
+            // After short-circuit, only Log/HeaderFilter/BodyFilter phases continue — 短路后只有 Log/HeaderFilter/BodyFilter 阶段继续执行
+            // In Kong, response phases (header_filter, body_filter, log) always run — 在 Kong 中，响应阶段（header_filter, body_filter, log）总是执行
+            if ctx.is_short_circuited()
+                && !matches!(phase, Phase::Log | Phase::HeaderFilter | Phase::BodyFilter)
+            {
                 break;
             }
 

@@ -209,8 +209,9 @@ const BUNDLED_PLUGINS: &[&str] = &[
     "zipkin", "opentelemetry", "grpc-gateway", "grpc-web",
     "aws-lambda", "azure-functions", "proxy-cache", "request-debug",
     // Test/dev plugins — 测试/开发插件
-    "rewriter", "dummy", "error-generator-last", "short-circuit",
-    "ctx-checker", "ctx-checker-last", "enable-buffering", "mocking",
+    "rewriter", "dummy", "error-generator", "error-generator-last", "short-circuit",
+    "ctx-checker", "ctx-checker-last", "enable-buffering", "enable-buffering-response", "mocking",
+    "admin-api-method",
 ];
 
 /// Return a detailed plugin schema for known plugins, or minimal stub for others — 返回已知插件的详细 schema，或其他插件的最小占位
@@ -583,6 +584,12 @@ fn get_plugin_config_schema(name: &str) -> serde_json::Value {
             {"status": {"type": "integer", "default": 503}},
             {"message": {"type": "string", "default": "short-circuited"}},
         ]),
+        "error-generator" => json!([
+            {"access": {"type": "boolean", "default": false}},
+            {"header_filter": {"type": "boolean", "default": false}},
+            {"log": {"type": "boolean", "default": false}},
+            {"rewrite": {"type": "boolean", "default": false}},
+        ]),
         "error-generator-last" => json!([
             {"access": {"type": "boolean", "default": false}},
             {"header_filter": {"type": "boolean", "default": false}},
@@ -597,7 +604,7 @@ fn get_plugin_config_schema(name: &str) -> serde_json::Value {
             {"ctx_check_value": {"type": "string", "default": ""}},
             {"ctx_throw_error": {"type": "boolean", "default": false}},
         ]),
-        "enable-buffering" => json!([
+        "enable-buffering" | "enable-buffering-response" => json!([
             {"phase": {"type": "string", "default": "access"}},
             {"mode": {"type": "string", "default": "full"}},
         ]),
@@ -865,9 +872,10 @@ fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
         "pre-function" | "post-function" => vec!["certificate", "rewrite", "access", "header_filter", "body_filter", "log", "ws_handshake", "ws_client_frame", "ws_upstream_frame", "ws_close"],
         "dummy" => vec!["resp_header_value", "resp_code", "append_body", "resp_headers", "old_field", "new_field"],
         "short-circuit" => vec!["status", "message"],
+        "error-generator" => vec!["access", "header_filter", "log", "rewrite"],
         "error-generator-last" => vec!["access", "header_filter", "log", "rewrite"],
         "ctx-checker" | "ctx-checker-last" => vec!["ctx_kind", "ctx_set_field", "ctx_set_value", "ctx_check_field", "ctx_check_value", "ctx_throw_error"],
-        "enable-buffering" => vec!["phase", "mode"],
+        "enable-buffering" | "enable-buffering-response" => vec!["phase", "mode"],
         "mocking" => vec!["api_specification"],
         "rewriter" => vec!["value"],
         _ => vec![], // Unknown plugin: skip config field validation — 未知插件：跳过 config 字段验证

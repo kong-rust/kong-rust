@@ -336,19 +336,57 @@ impl KongProxy {
         Ok((addr, use_tls, sni))
     }
 
-    /// 构建响应头（公共逻辑：Content-Type + Content-Length + Server 头 + 自定义头注入）
+    // Helper: check if a specific header feature is enabled in config.headers — 检查配置中是否启用了特定 header 功能
+    fn has_header_feature(&self, feature: &str) -> bool {
+        self.config.headers.iter().any(|h| h.eq_ignore_ascii_case(feature))
+    }
+
+    // Helper: check if Server header should be included (server_tokens or explicit "Server") — 检查是否应包含 Server 头
+    fn should_include_server(&self) -> bool {
+        self.has_header_feature("server_tokens") || self.has_header_feature("server")
+    }
+
+    // Helper: check if Via header should be included (server_tokens or explicit "Via") — 检查是否应包含 Via 头
+    fn should_include_via(&self) -> bool {
+        self.has_header_feature("server_tokens") || self.has_header_feature("via")
+    }
+
+    // Helper: check if X-Kong-Proxy-Latency should be included — 检查是否应包含 X-Kong-Proxy-Latency
+    fn should_include_proxy_latency(&self) -> bool {
+        self.has_header_feature("latency_tokens") || self.has_header_feature("x-kong-proxy-latency")
+    }
+
+    // Helper: check if X-Kong-Upstream-Latency should be included — 检查是否应包含 X-Kong-Upstream-Latency
+    fn should_include_upstream_latency(&self) -> bool {
+        self.has_header_feature("latency_tokens") || self.has_header_feature("x-kong-upstream-latency")
+    }
+
+    // Helper: check if X-Kong-Response-Latency should be included (for non-proxied responses) — 检查是否应包含 X-Kong-Response-Latency（非代理响应）
+    fn should_include_response_latency(&self) -> bool {
+        self.has_header_feature("latency_tokens") || self.has_header_feature("x-kong-response-latency")
+    }
+
+    /// 构建非代理响应头（404/错误/短路）— Content-Type + Content-Length + Server 头 + 延迟头 + 自定义头注入
+    /// Build non-proxied response header (404/error/short-circuit)
     fn build_response_header(
         &self,
         status_code: u16,
         body_len: usize,
     ) -> pingora_core::Result<ResponseHeader> {
-        let mut resp = ResponseHeader::build(status_code, Some(4))?;
+        let mut resp = ResponseHeader::build(status_code, Some(8))?;
         resp.insert_header("content-length", body_len.to_string())?;
         resp.insert_header("content-type", "application/json; charset=utf-8")?;
 
-        // Server 头：根据配置决定是否添加
-        if !self.config.proxy_hide_server_header {
-            resp.insert_header("server", "kong-rust/0.1.0")?;
+        // Server 头：仅当配置中包含 server_tokens 或 Server 时添加
+        // Server header: only add when server_tokens or Server is in headers config
+        if self.should_include_server() {
+            resp.insert_header("server", "kong/3.10.0")?;
+        }
+
+        // X-Kong-Response-Latency：非代理响应中添加
+        // X-Kong-Response-Latency: add in non-proxied responses
+        if self.should_include_response_latency() {
+            resp.insert_header("x-kong-response-latency", "0")?;
         }
 
         // 注入自定义响应头
@@ -469,11 +507,13 @@ impl KongProxy {
     }
 
     /// Send short-circuit response (supports custom status + headers + body) — 发送短路响应（支持自定义 status + headers + body）
+    /// Also runs header_filter phase so response-transformer and other plugins can modify headers — 同时运行 header_filter 阶段，使 response-transformer 等插件可以修改响应头
     async fn send_short_circuit_response(
         &self,
         session: &mut Session,
         ctx: &mut RequestCtx,
         request_id: &str,
+        resolved_plugins: &[kong_plugin_system::ResolvedPlugin],
     ) -> pingora_core::Result<bool> {
         let status_code = ctx.exit_status.unwrap_or(200);
         let body = ctx.exit_body.take();
@@ -487,14 +527,42 @@ impl KongProxy {
             let _ = resp.insert_header("x-kong-request-id", request_id);
         }
 
-        // 应用插件设置的自定义响应头
+        // Apply exit_headers from the short-circuiting plugin — 应用短路插件设置的自定义响应头
+        // Use insert_header with HeaderName to maintain Pingora's internal tracking — 使用 insert_header + HeaderName 维护 Pingora 内部跟踪
         if let Some(hdrs) = headers {
             for (name, value) in hdrs {
-                if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                    if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
-                        resp.headers.insert(header_name, header_value);
+                if let Ok(hn) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                    if let Ok(hv) = http::header::HeaderValue::from_str(&value) {
+                        let _ = resp.insert_header(hn, hv);
                     }
                 }
+            }
+        }
+
+        // Run header_filter phase on short-circuited response (Kong compatibility) — 在短路响应上运行 header_filter 阶段（Kong 兼容）
+        // Populate response context so header_filter plugins can inspect/modify — 填充响应上下文供 header_filter 插件检查/修改
+        ctx.response_status = Some(status_code);
+        ctx.response_headers.clear();
+        for (name, value) in resp.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                ctx.response_headers.insert(name.as_str().to_lowercase(), v.to_string());
+            }
+        }
+        if let Err(e) = PhaseRunner::run_header_filter(resolved_plugins, ctx).await {
+            tracing::warn!("Short-circuit header_filter 阶段执行失败: {}", e);
+        }
+        // Apply header modifications from header_filter plugins — 应用 header_filter 插件的头修改
+        // Use insert_header/remove_header with HeaderName to maintain Pingora's internal tracking — 使用 insert_header/remove_header + HeaderName 维护 Pingora 内部跟踪
+        for (name, value) in ctx.response_headers_to_set.drain(..) {
+            if let Ok(hn) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                if let Ok(hv) = http::header::HeaderValue::from_str(&value) {
+                    let _ = resp.insert_header(hn, hv);
+                }
+            }
+        }
+        for name in ctx.response_headers_to_remove.drain(..) {
+            if let Ok(hn) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                let _ = resp.remove_header(&hn);
             }
         }
 
@@ -644,8 +712,9 @@ impl ProxyHttp for KongProxy {
         if ctx.plugin_ctx.is_short_circuited() {
             // Save plugin chain for log phase — 保存插件链供 log 阶段使用
             ctx.resolved_plugins = resolved_plugins;
+            let plugins_ref = Arc::clone(&ctx.resolved_plugins);
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id, &plugins_ref)
                 .await;
         }
 
@@ -660,8 +729,9 @@ impl ProxyHttp for KongProxy {
         // 11. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
             ctx.resolved_plugins = resolved_plugins;
+            let plugins_ref = Arc::clone(&ctx.resolved_plugins);
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id, &plugins_ref)
                 .await;
         }
 
@@ -1179,36 +1249,35 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // Add Kong standard response headers (only if headers config enables them) — 添加 Kong 标准响应头（仅当 headers 配置启用时）
-        let has_latency = self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("latency_tokens"));
-        if has_latency {
-            let now = std::time::Instant::now();
-            let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
-            let upstream_latency = ctx
-                .upstream_response_time
-                .map(|t| t.duration_since(ctx.request_start_time).as_millis())
-                .unwrap_or(0);
+        // Add Kong standard response headers for proxied responses — 添加代理响应的 Kong 标准响应头
+        // Latency headers: X-Kong-Proxy-Latency and X-Kong-Upstream-Latency — 延迟头
+        let now = std::time::Instant::now();
+        let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+        let upstream_latency = ctx
+            .upstream_response_time
+            .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+            .unwrap_or(0);
+        if self.should_include_proxy_latency() {
             let _ =
                 upstream_response.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
+        }
+        if self.should_include_upstream_latency() {
             let _ = upstream_response
                 .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
         }
-        let has_server_tokens = self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("server_tokens"));
-        if has_server_tokens {
-            let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
+
+        // Via header: only for proxied responses (server_tokens or Via) — Via 头：仅代理响应
+        if self.should_include_via() {
+            let _ = upstream_response.insert_header("via", "1.1 kong/3.10.0");
         }
+
         // Use per-request X-Kong-Request-Id in downstream response (only if headers config includes it) — 在下游响应中使用每请求的 X-Kong-Request-Id（仅当 headers 配置包含时）
-        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+        if self.has_header_feature("x-kong-request-id") {
             let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
         }
 
-        // Server 头处理：隐藏上游 Server 头并注入 Kong 标识
-        if self.config.proxy_hide_server_header {
-            upstream_response.remove_header("server");
-        }
-        if has_server_tokens {
-            let _ = upstream_response.insert_header("server", "kong-rust/0.1.0");
-        }
+        // For proxied responses: do NOT set Kong's Server header — 代理响应：不要设置 Kong 的 Server 头
+        // The upstream's Server header is preserved as-is — 保留上游的 Server 头原样
 
         // 注入自定义响应头
         for header_str in &self.config.proxy_response_headers {
@@ -1355,10 +1424,32 @@ impl ProxyHttp for KongProxy {
         };
 
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
-        if let Ok(mut resp) = ResponseHeader::build(status, Some(4)) {
+        if let Ok(mut resp) = ResponseHeader::build(status, Some(8)) {
             let _ = resp.insert_header("content-type", "application/json; charset=utf-8");
             let _ = resp.insert_header("content-length", body_bytes.len().to_string());
-            let _ = resp.insert_header("server", "kong-rust/0.1.0");
+            // 502/504 是代理失败，按代理响应处理头 — 502/504 are proxy failures, treat as proxied response headers
+            if self.should_include_server() {
+                let _ = resp.insert_header("server", "kong/3.10.0");
+            }
+            if self.should_include_via() {
+                let _ = resp.insert_header("via", "1.1 kong/3.10.0");
+            }
+            // Latency headers for proxy failures — 代理失败的延迟头
+            let now = std::time::Instant::now();
+            let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+            let upstream_latency = ctx
+                .upstream_response_time
+                .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+                .unwrap_or(0);
+            if self.should_include_proxy_latency() {
+                let _ = resp.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
+            }
+            if self.should_include_upstream_latency() {
+                let _ = resp.insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
+            }
+            if self.has_header_feature("x-kong-request-id") {
+                let _ = resp.insert_header("x-kong-request-id", &ctx.request_id);
+            }
             let _ = session.write_response_header(Box::new(resp), false).await;
             let _ = session
                 .write_response_body(Some(bytes::Bytes::from(body_bytes)), true)

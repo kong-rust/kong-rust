@@ -64,11 +64,12 @@ async fn test_access_short_circuit_skips_header_filter() {
     assert!(ctx.is_short_circuited());
     assert_eq!(ctx.exit_status, Some(403));
 
-    // Execute header_filter — should be skipped due to short-circuit — 执行 header_filter — 应该因为短路而跳过
+    // Execute header_filter — should still run after short-circuit (Kong compatibility) — 短路后仍应执行 header_filter（Kong 兼容）
+    // In Kong, response phases (header_filter, body_filter, log) always execute — 在 Kong 中，响应阶段总是执行
     let _ = PhaseRunner::run_header_filter(&resolved, &mut ctx).await;
     assert!(
-        !hf_plugin.header_filter_called.load(Ordering::SeqCst),
-        "短路后 header_filter 不应被调用"
+        hf_plugin.header_filter_called.load(Ordering::SeqCst),
+        "短路后 header_filter 应被调用（Kong 兼容行为）"
     );
 }
 

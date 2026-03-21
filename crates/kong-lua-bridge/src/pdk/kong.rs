@@ -286,8 +286,13 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
                         )
                         .map_err(LuaError::external)?,
                         LuaValue::Nil => String::new(),
-                        other => lua.coerce_string(other)?.map(|value| value.to_string_lossy().to_string()).ok_or_else(|| {
-                            LuaError::external("unsupported kong.response.exit body type")
+                        // LightUserData(0x0) = cjson.null / ngx.null — treat as nil — 视为 nil
+                        LuaValue::LightUserData(ud) if ud.0.is_null() => String::new(),
+                        LuaValue::Boolean(b) => if b { "true" } else { "false" }.to_string(),
+                        LuaValue::Integer(n) => n.to_string(),
+                        LuaValue::Number(n) => n.to_string(),
+                        other => lua.coerce_string(other.clone())?.map(|value| value.to_string_lossy().to_string()).ok_or_else(|| {
+                            LuaError::external(format!("unsupported kong.response.exit body type: {:?}", other))
                         })?,
                     };
                     globals.set("__kong_exit_body", body)?;

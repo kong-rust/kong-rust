@@ -89,17 +89,40 @@ pub async fn run_cache_refresher(
     }
 }
 
-/// Admin latency middleware — inject X-Kong-Admin-Latency header into responses — 注入 X-Kong-Admin-Latency 响应头
-async fn admin_latency_middleware(
+/// Admin headers middleware — inject X-Kong-Admin-Latency and Server headers based on config — 根据配置注入 X-Kong-Admin-Latency 和 Server 响应头
+async fn admin_headers_middleware(
+    axum::extract::State(state): axum::extract::State<AdminState>,
     req: axum::extract::Request,
     next: middleware::Next,
 ) -> axum::response::Response {
     let start = std::time::Instant::now();
     let mut response = next.run(req).await;
-    let latency_ms = start.elapsed().as_millis();
-    if let Ok(val) = axum::http::HeaderValue::from_str(&latency_ms.to_string()) {
-        response.headers_mut().insert("X-Kong-Admin-Latency", val);
+    let headers_config = &state.config.headers;
+
+    // Check if admin latency should be included — 检查是否应包含 admin 延迟头
+    let has_latency = headers_config.iter().any(|h| {
+        h.eq_ignore_ascii_case("latency_tokens") || h.eq_ignore_ascii_case("x-kong-admin-latency")
+    });
+    if has_latency {
+        let latency_ms = start.elapsed().as_millis();
+        if let Ok(val) = axum::http::HeaderValue::from_str(&latency_ms.to_string()) {
+            response.headers_mut().insert("X-Kong-Admin-Latency", val);
+        }
     }
+
+    // Check if Server header should be included — 检查是否应包含 Server 头
+    let has_server = headers_config.iter().any(|h| {
+        h.eq_ignore_ascii_case("server_tokens") || h.eq_ignore_ascii_case("server")
+    });
+    if has_server {
+        response.headers_mut().insert(
+            axum::http::header::SERVER,
+            axum::http::HeaderValue::from_static("kong/3.10.0"),
+        );
+    } else {
+        response.headers_mut().remove(axum::http::header::SERVER);
+    }
+
     response
 }
 
@@ -348,8 +371,8 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .method_not_allowed_fallback(method_not_allowed_handler)
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
         .layer(middleware::from_fn(options_middleware))
-        // Admin latency header — Admin 延迟响应头（最外层，确保所有请求都包含此头）
-        .layer(middleware::from_fn(admin_latency_middleware))
+        // Admin headers — Server + Admin 延迟响应头（最外层，确保所有请求都包含此头）
+        .layer(middleware::from_fn_with_state(state.clone(), admin_headers_middleware))
         .with_state(state)
 }
 

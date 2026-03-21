@@ -345,9 +345,25 @@ local function build_env_str(conf)
     env.KONG_LOG_LEVEL = conf.log_level or _M.test_conf.log_level
 
     if conf.plugins then
-        env.KONG_PLUGINS = type(conf.plugins) == "table"
+        local plugins_str = type(conf.plugins) == "table"
             and table.concat(conf.plugins, ",")
             or tostring(conf.plugins)
+        -- Append extra plugins from get_db_utils — 追加 get_db_utils 中指定的额外插件
+        if _M._extra_plugins then
+            for _, ep in ipairs(_M._extra_plugins) do
+                if not plugins_str:find(ep, 1, true) then
+                    plugins_str = plugins_str .. "," .. ep
+                end
+            end
+        end
+        env.KONG_PLUGINS = plugins_str
+    elseif _M._extra_plugins then
+        -- No explicit plugins config but extra plugins specified — 没有显式插件配置但指定了额外插件
+        local parts = { "bundled" }
+        for _, ep in ipairs(_M._extra_plugins) do
+            parts[#parts + 1] = ep
+        end
+        env.KONG_PLUGINS = table.concat(parts, ",")
     end
 
     -- pass through any KONG_* keys from conf — 透传 conf 中的 KONG_* 键
@@ -543,7 +559,55 @@ local function next_seq()
 end
 
 function Blueprint:new(admin_client)
-    local bp = { admin = admin_client }
+    -- ensure_admin: auto-start kong if needed and return a working admin client — 确保 admin 客户端可用，必要时自动启动 kong
+    local last_check_time = 0
+    local function ensure_admin()
+        -- Rate-limit connectivity checks to at most once per second — 限制连通性检查频率，最多每秒一次
+        local now = os.time()
+        if admin_client and (now - last_check_time) < 1 then
+            return admin_client
+        end
+        -- Try existing client first — 先尝试现有客户端
+        if admin_client then
+            local ok, res = pcall(function() return admin_client:get("/status") end)
+            if ok and res and res.status == 200 then
+                last_check_time = now
+                return admin_client
+            end
+            pcall(function() admin_client:close() end)
+            admin_client = nil
+        end
+        -- Try a fresh client (kong might have restarted) — 尝试新客户端（kong 可能已重启）
+        admin_client = _M.admin_client()
+        if admin_client then
+            local ok, res = pcall(function() return admin_client:get("/status") end)
+            if ok and res and res.status == 200 then
+                last_check_time = now
+                return admin_client
+            end
+            pcall(function() admin_client:close() end)
+            admin_client = nil
+        end
+        -- Kong not running, auto-start — Kong 未运行，自动启动
+        _M.start_kong()
+        admin_client = _M.admin_client()
+        last_check_time = os.time()
+        return admin_client
+    end
+
+    -- Create a proxy that auto-reconnects the admin client — 创建自动重连的 admin 客户端代理
+    local admin_proxy = setmetatable({}, {
+        __index = function(_, key)
+            return function(_, ...)
+                local client = ensure_admin()
+                if not client then
+                    return nil, "connection refused"
+                end
+                return client[key](client, ...)
+            end
+        end,
+    })
+    local bp = { admin = admin_proxy }
 
     local entity_endpoints = {
         services     = "/services",
@@ -1028,6 +1092,13 @@ function _M.get_db_utils(strategy, tables, plugins)
     if strategy and strategy ~= "postgres" and strategy ~= "off" then
         -- skip strategies we don't support — 跳过不支持的策略
         return nil, "strategy '" .. strategy .. "' not supported"
+    end
+
+    -- Store extra plugins for subsequent start_kong calls — 存储额外插件供后续 start_kong 调用使用
+    if plugins and type(plugins) == "table" and #plugins > 0 then
+        _M._extra_plugins = plugins
+    else
+        _M._extra_plugins = nil
     end
 
     -- Ensure Kong is running (auto-start if not) — 确保 Kong 正在运行（如果没有则自动启动）
