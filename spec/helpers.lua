@@ -13,6 +13,25 @@ local _M = {}
 -- Configuration — 配置
 ---------------------------------------------------------------------------
 
+-- 自动检测 docker 容器端口映射 — auto-detect docker container port mapping
+local function detect_pg_port()
+    local env_port = os.getenv("KONG_SPEC_TEST_PG_PORT")
+    if env_port then return tonumber(env_port) end
+
+    -- 尝试从 docker 获取实际映射端口
+    local handle = io.popen("docker port kong-rust-dev-postgres-1 5432 2>/dev/null | cut -d: -f2")
+    if handle then
+        local result = handle:read("*l")
+        handle:close()
+        if result and result ~= "" then
+            local port = tonumber(result)
+            if port then return port end
+        end
+    end
+
+    return 5432
+end
+
 _M.test_conf = {
     proxy_port       = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_PORT")) or 9000,
     proxy_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_SSL_PORT")) or 9443,
@@ -20,7 +39,7 @@ _M.test_conf = {
     proxy_host       = os.getenv("KONG_SPEC_TEST_PROXY_HOST") or "127.0.0.1",
     admin_host       = os.getenv("KONG_SPEC_TEST_ADMIN_HOST") or "127.0.0.1",
     pg_host          = os.getenv("KONG_SPEC_TEST_PG_HOST") or "127.0.0.1",
-    pg_port          = tonumber(os.getenv("KONG_SPEC_TEST_PG_PORT")) or 5432,
+    pg_port          = detect_pg_port(),
     pg_user          = os.getenv("KONG_SPEC_TEST_PG_USER") or "kong",
     pg_password      = os.getenv("KONG_SPEC_TEST_PG_PASSWORD") or "kong",
     pg_database      = os.getenv("KONG_SPEC_TEST_PG_DATABASE") or "kong_tests",
