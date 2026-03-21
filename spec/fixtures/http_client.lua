@@ -25,14 +25,26 @@ function Client:_url(path)
     return string.format("%s://%s:%d%s", self.scheme, self.host, self.port, path or "/")
 end
 
+-- check if value is cjson.null — 检查值是否为 cjson.null
+local cjson_null
+do
+    local ok, cj = pcall(require, "cjson")
+    if ok then cjson_null = cj.null end
+end
+
 -- encode_args: encode table to application/x-www-form-urlencoded — 编码表为 form-urlencoded 格式
 local function encode_args(args)
     local parts = {}
     for k, v in pairs(args) do
-        if type(v) == "table" then
+        -- skip cjson.null values (cannot represent null in form encoding) — 跳过 cjson.null 值
+        if v == cjson_null then
+            -- skip null values — 跳过 null 值
+        elseif type(v) == "table" then
             -- multi-value: key=v1&key=v2 — 多值
             for _, item in ipairs(v) do
-                parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
+                if item ~= cjson_null then
+                    parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
+                end
             end
         else
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(v))
@@ -50,9 +62,23 @@ end
 local function encode_multipart(body, boundary)
     local parts = {}
     for k, v in pairs(body) do
-        parts[#parts + 1] = string.format(
-            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
-            boundary, k, tostring(v))
+        -- skip cjson.null values — 跳过 cjson.null 值
+        if v ~= cjson_null then
+            if type(v) == "table" then
+                -- multi-value array — 多值数组
+                for _, item in ipairs(v) do
+                    if item ~= cjson_null then
+                        parts[#parts + 1] = string.format(
+                            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
+                            boundary, k, tostring(item))
+                    end
+                end
+            else
+                parts[#parts + 1] = string.format(
+                    "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
+                    boundary, k, tostring(v))
+            end
+        end
     end
     parts[#parts + 1] = "--" .. boundary .. "--"
     return table.concat(parts, "\r\n") .. "\r\n"

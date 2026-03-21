@@ -7,6 +7,7 @@
 //! - Nested endpoints (e.g. /services/{service}/routes) — 嵌套端点（如 /services/{service}/routes）
 //! - Special endpoints (/, /status, /config) — 特殊端点（/, /status, /config）
 
+pub mod extractors;
 pub mod handlers;
 
 use std::sync::Arc;

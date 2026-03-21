@@ -14,14 +14,11 @@ pub struct Vault {
     /// Vault type name, required — Vault 类型名称，必填
     pub name: String,
     /// Vault description — Vault 描述
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Vault configuration (dynamic JSON structure, defined by each vault type's schema) — Vault 配置（动态 JSON 结构，由各 vault 类型的 schema 定义）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
     pub created_at: i64,
     pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
     #[serde(skip_serializing_if = "Option::is_none")]

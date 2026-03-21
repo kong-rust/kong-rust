@@ -361,6 +361,13 @@ end
 
 local Blueprint = {}
 
+-- sequence counter for generating unique names — 生成唯一名称的序列计数器
+local seq_counter = 0
+local function next_seq()
+    seq_counter = seq_counter + 1
+    return seq_counter
+end
+
 function Blueprint:new(admin_client)
     local bp = { admin = admin_client }
 
@@ -374,62 +381,345 @@ function Blueprint:new(admin_client)
         certificates = "/certificates",
         snis         = "/snis",
         ca_certificates = "/ca-certificates",
+        vaults       = "/vaults",
     }
+
+    -- default data generators for "named_*" entities — "named_*" 实体的默认数据生成器
+    local defaults_generators = {
+        named_services = function(overrides)
+            local n = next_seq()
+            local defaults = {
+                protocol = "http",
+                name = "service-" .. n,
+                host = "service" .. n .. ".test",
+                port = 15555,
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/services"
+        end,
+        named_routes = function(overrides)
+            local n = next_seq()
+            local defaults = {
+                name = "route-" .. n,
+                hosts = { "route" .. n .. ".test" },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            -- auto-create a service if not specified — 如果未指定则自动创建 service
+            if not defaults.service then
+                local gen, ep = defaults_generators.named_services()
+                local res = bp.admin:post(ep, {
+                    body = gen,
+                    headers = { ["Content-Type"] = "application/json" },
+                })
+                if res and res.status >= 200 and res.status < 300 then
+                    local svc = cjson.decode(res.body)
+                    defaults.service = { id = svc.id }
+                end
+            end
+            return defaults, "/routes"
+        end,
+        key_auth_plugins = function(overrides)
+            local defaults = {
+                name = "key-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        acl_plugins = function(overrides)
+            local defaults = {
+                name = "acl",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        hmac_auth_plugins = function(overrides)
+            local defaults = {
+                name = "hmac-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        basic_auth_plugins = function(overrides)
+            local defaults = {
+                name = "basic-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        rate_limiting_plugins = function(overrides)
+            local defaults = {
+                name = "rate-limiting",
+                config = { minute = 100 },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        cors_plugins = function(overrides)
+            local defaults = {
+                name = "cors",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+    }
+
+    -- make_entity_inserter: create insert/truncate/remove for an endpoint — 为 endpoint 创建 insert/truncate/remove
+    local function make_entity_ops(key, endpoint, defaults_fn)
+        return {
+            insert = function(_, data, opts)
+                -- if defaults_fn exists, merge defaults with data — 如果有 defaults_fn，将默认值与 data 合并
+                if defaults_fn then
+                    local defaults, ep = defaults_fn(data)
+                    endpoint = ep or endpoint
+                    data = defaults
+                end
+                data = data or {}
+
+                local actual_endpoint = endpoint
+                if key == "targets" and data.upstream then
+                    local uid = type(data.upstream) == "table"
+                        and (data.upstream.id or data.upstream.name)
+                        or data.upstream
+                    actual_endpoint = string.format(endpoint, uid)
+                    data.upstream = nil
+                end
+                local res, err = bp.admin:post(actual_endpoint, {
+                    body = data,
+                    headers = { ["Content-Type"] = "application/json" },
+                })
+                if not res then
+                    error("Failed to create entity at " .. actual_endpoint
+                        .. ": " .. tostring(err))
+                end
+                if res.status < 200 or res.status >= 300 then
+                    error(string.format(
+                        "Failed to create entity at %s: HTTP %d - %s",
+                        actual_endpoint, res.status, res.body))
+                end
+                return cjson.decode(res.body)
+            end,
+
+            truncate = function(_)
+                local res = bp.admin:get(endpoint)
+                if res and res.status == 200 then
+                    local body = cjson.decode(res.body)
+                    if body and body.data then
+                        for _, entity in ipairs(body.data) do
+                            bp.admin:delete(endpoint .. "/" .. entity.id)
+                        end
+                    end
+                end
+            end,
+
+            -- remove: alias for delete by id — remove: 按 id 删除的别名
+            remove = function(_, data)
+                if data and data.id then
+                    bp.admin:delete(endpoint .. "/" .. data.id)
+                end
+            end,
+        }
+    end
 
     setmetatable(bp, {
         __index = function(_, key)
+            -- check named entity generators first — 先检查命名实体生成器
+            local gen = defaults_generators[key]
+            if gen then
+                return make_entity_ops(key, nil, gen)
+            end
+
             local endpoint = entity_endpoints[key]
             if not endpoint then return nil end
 
-            return {
-                insert = function(_, data)
-                    local actual_endpoint = endpoint
-                    if key == "targets" and data and data.upstream then
-                        local uid = type(data.upstream) == "table"
-                            and (data.upstream.id or data.upstream.name)
-                            or data.upstream
-                        actual_endpoint = string.format(endpoint, uid)
-                        data.upstream = nil
-                    end
-                    local res, err = bp.admin:post(actual_endpoint, {
-                        body = data,
-                        headers = { ["Content-Type"] = "application/json" },
-                    })
-                    if not res then
-                        error("Failed to create entity at " .. actual_endpoint
-                            .. ": " .. tostring(err))
-                    end
-                    if res.status < 200 or res.status >= 300 then
-                        error(string.format(
-                            "Failed to create entity at %s: HTTP %d - %s",
-                            actual_endpoint, res.status, res.body))
-                    end
-                    return cjson.decode(res.body)
-                end,
-
-                truncate = function(_)
-                    local res = bp.admin:get(endpoint)
-                    if res and res.status == 200 then
-                        local body = cjson.decode(res.body)
-                        if body and body.data then
-                            for _, entity in ipairs(body.data) do
-                                bp.admin:delete(endpoint .. "/" .. entity.id)
-                            end
-                        end
-                    end
-                end,
-
-                -- remove: alias for delete by id — remove: 按 id 删除的别名
-                remove = function(_, data)
-                    if data and data.id then
-                        bp.admin:delete(endpoint .. "/" .. data.id)
-                    end
-                end,
-            }
+            return make_entity_ops(key, endpoint, nil)
         end,
     })
 
     return bp
+end
+
+---------------------------------------------------------------------------
+-- DB proxy — 数据库代理对象（通过 Admin API 模拟直接 DB 访问）
+---------------------------------------------------------------------------
+local DbProxy = {}
+
+function DbProxy:new(admin_client_fn)
+    local db = {}
+
+    local entity_endpoints = {
+        services     = "/services",
+        routes       = "/routes",
+        consumers    = "/consumers",
+        plugins      = "/plugins",
+        upstreams    = "/upstreams",
+        targets      = "/upstreams/%s/targets",
+        certificates = "/certificates",
+        snis         = "/snis",
+        ca_certificates = "/ca-certificates",
+        vaults       = "/vaults",
+    }
+
+    -- truncate: delete all entities of a type — 清空某类型的所有实体
+    function db:truncate(entity_name)
+        local endpoint = entity_endpoints[entity_name]
+        if not endpoint then
+            endpoint = "/" .. entity_name:gsub("_", "-")
+        end
+        if endpoint:find("%%s") then return true end
+
+        local admin = admin_client_fn()
+        if not admin then return true end
+
+        -- paginate through all and delete — 分页遍历并删除
+        local deleted = true
+        while deleted do
+            deleted = false
+            local res = admin:get(endpoint)
+            if res and res.status == 200 then
+                local ok, body = pcall(cjson.decode, res.body)
+                if ok and body and body.data and #body.data > 0 then
+                    for _, item in ipairs(body.data) do
+                        admin:delete(endpoint .. "/" .. item.id)
+                        deleted = true
+                    end
+                end
+            end
+        end
+        return true
+    end
+
+    -- entity proxy maker — 实体代理构造器
+    local function make_entity_proxy(entity_name, endpoint)
+        local proxy = {}
+
+        function proxy:insert(data)
+            local admin = admin_client_fn()
+            local actual_endpoint = endpoint
+            if entity_name == "targets" and data and data.upstream then
+                local uid = type(data.upstream) == "table"
+                    and (data.upstream.id or data.upstream.name)
+                    or data.upstream
+                actual_endpoint = string.format(endpoint, uid)
+                data.upstream = nil
+            end
+            local res = admin:post(actual_endpoint, {
+                body = data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if not res then
+                return nil, "failed to connect to Admin API"
+            end
+            if res.status >= 200 and res.status < 300 then
+                return cjson.decode(res.body)
+            end
+            return nil, cjson.decode(res.body) or res.body
+        end
+
+        function proxy:select(pk_or_filter, opts)
+            local admin = admin_client_fn()
+            local id
+            if type(pk_or_filter) == "table" then
+                id = pk_or_filter.id
+            else
+                id = pk_or_filter
+            end
+            if not id then return nil, "primary key required" end
+            local res = admin:get(endpoint .. "/" .. id)
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil
+        end
+
+        function proxy:select_by_name(name, opts)
+            local admin = admin_client_fn()
+            local res = admin:get(endpoint .. "/" .. name)
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil
+        end
+
+        function proxy:update(pk, data, opts)
+            local admin = admin_client_fn()
+            local id = type(pk) == "table" and pk.id or pk
+            local res = admin:patch(endpoint .. "/" .. id, {
+                body = data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil, res and res.body or "update failed"
+        end
+
+        function proxy:delete(pk)
+            local admin = admin_client_fn()
+            local id = type(pk) == "table" and pk.id or pk
+            admin:delete(endpoint .. "/" .. id)
+            return true
+        end
+
+        function proxy:truncate()
+            return db:truncate(entity_name)
+        end
+
+        function proxy:page(size, offset, opts)
+            local admin = admin_client_fn()
+            local query = {}
+            if size then query.size = size end
+            if offset then query.offset = offset end
+            local path = endpoint
+            if next(query) then
+                local parts = {}
+                for k, v in pairs(query) do
+                    parts[#parts + 1] = k .. "=" .. tostring(v)
+                end
+                path = path .. "?" .. table.concat(parts, "&")
+            end
+            local res = admin:get(path)
+            if res and res.status == 200 then
+                local body = cjson.decode(res.body)
+                return body.data, nil, body.offset
+            end
+            return {}, nil, nil
+        end
+
+        return proxy
+    end
+
+    setmetatable(db, {
+        __index = function(_, key)
+            local endpoint = entity_endpoints[key]
+            if endpoint then
+                return make_entity_proxy(key, endpoint)
+            end
+            return nil
+        end,
+    })
+
+    return db
 end
 
 function _M.get_db_utils(strategy, tables, plugins)
@@ -462,7 +752,8 @@ function _M.get_db_utils(strategy, tables, plugins)
     end
 
     local bp = Blueprint:new(admin)
-    return bp, nil
+    local db = DbProxy:new(function() return _M.admin_client() end)
+    return bp, db
 end
 
 ---------------------------------------------------------------------------

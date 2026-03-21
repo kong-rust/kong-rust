@@ -12,7 +12,6 @@ pub struct Route {
     pub id: Uuid,
     pub created_at: i64,
     pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Supported protocol set, default ["http", "https"] — 支持的协议集合，默认 ["http", "https"]
     pub protocols: Vec<Protocol>,
@@ -26,41 +25,30 @@ pub struct Route {
     pub request_buffering: bool,
     /// Whether to enable response buffering, default true — 是否启用响应缓冲，默认 true
     pub response_buffering: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Associated Service — 关联的 Service
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ForeignKey>,
     /// SNI list (TLS/HTTPS route matching) — SNI 列表（TLS/HTTPS 路由匹配）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub snis: Option<Vec<String>>,
     /// Source IP/port (stream mode routing) — 源 IP/端口（流模式路由）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<CidrPort>>,
     /// Destination IP/port (stream mode routing) — 目标 IP/端口（流模式路由）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub destinations: Option<Vec<CidrPort>>,
     /// Matched HTTP method list — 匹配的 HTTP 方法列表
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub methods: Option<Vec<String>>,
     /// Matched hostname list (supports wildcards like *.example.com) — 匹配的主机名列表（支持通配符 *.example.com）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
     /// Matched path list (supports prefix matching and regex) — 匹配的路径列表（支持前缀匹配和正则）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
     /// Matched request headers — 匹配的请求头
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, Vec<String>>>,
     /// Regex priority, default 0 — 正则优先级，默认 0
     pub regex_priority: i32,
     /// Path handling mode, default v0 — 路径处理方式，默认 v0
     pub path_handling: PathHandling,
     /// Expression route (expressions routing style) — 表达式路由（expressions 路由风格）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
     /// Expression route priority — 表达式路由优先级
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
     #[serde(skip_serializing_if = "Option::is_none")]

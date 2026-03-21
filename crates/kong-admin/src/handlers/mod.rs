@@ -21,6 +21,7 @@ use kong_core::error::KongError;
 use kong_core::models::*;
 use kong_core::traits::{Dao, Entity, PageParams, PrimaryKey};
 
+use crate::extractors::FlexibleBody;
 use crate::AdminState;
 
 // ============ Cache refresh — 缓存刷新 ============
@@ -394,7 +395,7 @@ fn expand_url_shorthand(body: &Value) -> Value {
                         }
                     }
                     let path = parsed.path();
-                    if !obj.contains_key("path") && path != "/" && !path.is_empty() {
+                    if !obj.contains_key("path") && !path.is_empty() {
                         obj.insert("path".to_string(), json!(path));
                     }
                 }
@@ -440,7 +441,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         }
                     }
                     let path = parsed.path();
-                    if !obj.contains_key("path") && path != "/" && !path.is_empty() {
+                    if !obj.contains_key("path") && !path.is_empty() {
                         obj.insert("path".to_string(), json!(path));
                     }
                 }
@@ -621,7 +622,7 @@ macro_rules! entity_handlers {
 
         pub async fn $create(
             State(state): State<AdminState>,
-            Json(body): Json<Value>,
+            FlexibleBody(body): FlexibleBody,
         ) -> impl IntoResponse {
             let result = do_create::<$entity>(&state.$dao_field, body).await;
             if result.0.is_success() && !$entity_name.is_empty() {
@@ -633,7 +634,7 @@ macro_rules! entity_handlers {
         pub async fn $update(
             State(state): State<AdminState>,
             Path(id_or_name): Path<String>,
-            Json(body): Json<Value>,
+            FlexibleBody(body): FlexibleBody,
         ) -> impl IntoResponse {
             let result = do_update::<$entity>(&state.$dao_field, &id_or_name, &body).await;
             if result.0.is_success() && !$entity_name.is_empty() {
@@ -645,7 +646,7 @@ macro_rules! entity_handlers {
         pub async fn $upsert(
             State(state): State<AdminState>,
             Path(id_or_name): Path<String>,
-            Json(body): Json<Value>,
+            FlexibleBody(body): FlexibleBody,
         ) -> impl IntoResponse {
             let result = do_upsert::<$entity>(&state.$dao_field, &id_or_name, body).await;
             if result.0.is_success() && !$entity_name.is_empty() {
@@ -951,7 +952,7 @@ async fn delete_scoped_plugin(
 pub async fn create_service_plugin(
     State(state): State<AdminState>,
     Path(service_id_or_name): Path<String>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
@@ -1004,7 +1005,7 @@ pub async fn get_service_plugin(
 pub async fn update_service_plugin(
     State(state): State<AdminState>,
     Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
@@ -1040,7 +1041,7 @@ pub async fn update_service_plugin(
 pub async fn upsert_service_plugin(
     State(state): State<AdminState>,
     Path((service_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
@@ -1142,7 +1143,7 @@ pub async fn list_route_plugins(
 pub async fn create_route_plugin(
     State(state): State<AdminState>,
     Path(route_id_or_name): Path<String>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
     let route = match state.routes.select(&route_pk).await {
@@ -1192,7 +1193,7 @@ pub async fn get_route_plugin(
 pub async fn update_route_plugin(
     State(state): State<AdminState>,
     Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
     let route = match state.routes.select(&route_pk).await {
@@ -1226,7 +1227,7 @@ pub async fn update_route_plugin(
 pub async fn upsert_route_plugin(
     State(state): State<AdminState>,
     Path((route_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
     let route = match state.routes.select(&route_pk).await {
@@ -1325,7 +1326,7 @@ pub async fn list_consumer_plugins(
 pub async fn create_consumer_plugin(
     State(state): State<AdminState>,
     Path(consumer_id_or_name): Path<String>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
     let consumer = match state.consumers.select(&consumer_pk).await {
@@ -1375,7 +1376,7 @@ pub async fn get_consumer_plugin(
 pub async fn update_consumer_plugin(
     State(state): State<AdminState>,
     Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
     let consumer = match state.consumers.select(&consumer_pk).await {
@@ -1409,7 +1410,7 @@ pub async fn update_consumer_plugin(
 pub async fn upsert_consumer_plugin(
     State(state): State<AdminState>,
     Path((consumer_id_or_name, plugin_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
     let consumer = match state.consumers.select(&consumer_pk).await {
@@ -1470,7 +1471,7 @@ pub async fn delete_consumer_plugin(
 pub async fn create_nested_route(
     State(state): State<AdminState>,
     Path(service_id_or_name): Path<String>,
-    Json(mut body): Json<Value>,
+    FlexibleBody(mut body): FlexibleBody,
 ) -> impl IntoResponse {
     // Resolve service — 解析 service
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
@@ -1549,7 +1550,7 @@ pub async fn list_nested_targets(
 pub async fn create_nested_target(
     State(state): State<AdminState>,
     Path(upstream_id_or_name): Path<String>,
-    Json(mut body): Json<Value>,
+    FlexibleBody(mut body): FlexibleBody,
 ) -> impl IntoResponse {
     // Resolve upstream — 解析 upstream
     let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
@@ -1637,7 +1638,7 @@ pub async fn get_nested_target(
 pub async fn update_nested_target(
     State(state): State<AdminState>,
     Path((_upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
     match state.targets.update(&pk, &body).await {

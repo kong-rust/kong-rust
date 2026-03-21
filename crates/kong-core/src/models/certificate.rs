@@ -15,12 +15,9 @@ pub struct Certificate {
     /// Private key (PEM format), required — 私钥（PEM 格式），必填
     pub key: String,
     /// Alternative certificate (PEM format, for different key types e.g. RSA + ECDSA) — 备选证书（PEM 格式，用于不同密钥类型如 RSA + ECDSA）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_alt: Option<String>,
     /// Alternative private key (PEM format) — 备选私钥（PEM 格式）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub key_alt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
     #[serde(skip_serializing_if = "Option::is_none")]
