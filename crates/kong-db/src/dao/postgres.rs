@@ -717,7 +717,16 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{entity}?offset={o}", entity = T::table_name())),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let entity = T::table_name();
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{entity}?offset={o}&size={}", params.size)
+                } else {
+                    format!("/{entity}?offset={o}")
+                }
+            }),
         })
     }
 
@@ -978,7 +987,16 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{entity}?offset={o}", entity = T::table_name())),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let entity = T::table_name();
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{entity}?offset={o}&size={}", params.size)
+                } else {
+                    format!("/{entity}?offset={o}")
+                }
+            }),
         })
     }
 }

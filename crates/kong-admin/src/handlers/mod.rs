@@ -384,34 +384,60 @@ async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
 }
 
 /// Expand `url` shorthand field into protocol/host/port/path — 将 `url` 快捷字段展开为 protocol/host/port/path
-fn expand_url_shorthand(body: &Value) -> Value {
+fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let mut body = body.clone();
     if let Some(obj) = body.as_object_mut() {
         if let Some(url_val) = obj.remove("url") {
             if let Some(url_str) = url_val.as_str() {
-                if let Ok(parsed) = url::Url::parse(url_str) {
-                    if !obj.contains_key("protocol") {
-                        obj.insert("protocol".to_string(), json!(parsed.scheme()));
+                if url_str.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (url: missing host in url)",
+                            "name": "schema violation",
+                            "code": 2,
+                        })),
+                    ));
+                }
+                let parsed = url::Url::parse(url_str).map_err(|_| (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (url: missing host in url)",
+                        "name": "schema violation",
+                        "code": 2,
+                    })),
+                ))?;
+                if parsed.host_str().map_or(true, |h| h.is_empty()) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (url: missing host in url)",
+                            "name": "schema violation",
+                            "code": 2,
+                        })),
+                    ));
+                }
+                if !obj.contains_key("protocol") {
+                    obj.insert("protocol".to_string(), json!(parsed.scheme()));
+                }
+                if !obj.contains_key("host") {
+                    if let Some(host) = parsed.host_str() {
+                        obj.insert("host".to_string(), json!(host));
                     }
-                    if !obj.contains_key("host") {
-                        if let Some(host) = parsed.host_str() {
-                            obj.insert("host".to_string(), json!(host));
-                        }
+                }
+                if !obj.contains_key("port") {
+                    if let Some(port) = parsed.port_or_known_default() {
+                        obj.insert("port".to_string(), json!(port));
                     }
-                    if !obj.contains_key("port") {
-                        if let Some(port) = parsed.port_or_known_default() {
-                            obj.insert("port".to_string(), json!(port));
-                        }
-                    }
-                    let path = parsed.path();
-                    if !obj.contains_key("path") && !path.is_empty() {
-                        obj.insert("path".to_string(), json!(path));
-                    }
+                }
+                let path = parsed.path();
+                if !obj.contains_key("path") && !path.is_empty() {
+                    obj.insert("path".to_string(), json!(path));
                 }
             }
         }
     }
-    body
+    Ok(body)
 }
 
 /// Generic create handler — 通用创建处理
@@ -435,23 +461,57 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         // Kong-compatible: url field is a shorthand for protocol + host + port + path — Kong 兼容：url 字段是 protocol + host + port + path 的快捷方式
         if let Some(url_val) = obj.remove("url") {
             if let Some(url_str) = url_val.as_str() {
-                if let Ok(parsed) = url::Url::parse(url_str) {
-                    if !obj.contains_key("protocol") {
-                        obj.insert("protocol".to_string(), json!(parsed.scheme()));
-                    }
-                    if !obj.contains_key("host") {
-                        if let Some(host) = parsed.host_str() {
-                            obj.insert("host".to_string(), json!(host));
+                // Validate URL is not empty or invalid — 验证 URL 不为空或无效
+                if url_str.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (url: missing host in url)",
+                            "name": "schema violation",
+                            "code": 2,
+                        })),
+                    );
+                }
+                match url::Url::parse(url_str) {
+                    Ok(parsed) => {
+                        // Validate host is not empty — 验证 host 不为空
+                        if parsed.host_str().map_or(true, |h| h.is_empty()) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": "schema violation (url: missing host in url)",
+                                    "name": "schema violation",
+                                    "code": 2,
+                                })),
+                            );
+                        }
+                        if !obj.contains_key("protocol") {
+                            obj.insert("protocol".to_string(), json!(parsed.scheme()));
+                        }
+                        if !obj.contains_key("host") {
+                            if let Some(host) = parsed.host_str() {
+                                obj.insert("host".to_string(), json!(host));
+                            }
+                        }
+                        if !obj.contains_key("port") {
+                            if let Some(port) = parsed.port_or_known_default() {
+                                obj.insert("port".to_string(), json!(port));
+                            }
+                        }
+                        let path = parsed.path();
+                        if !obj.contains_key("path") && !path.is_empty() {
+                            obj.insert("path".to_string(), json!(path));
                         }
                     }
-                    if !obj.contains_key("port") {
-                        if let Some(port) = parsed.port_or_known_default() {
-                            obj.insert("port".to_string(), json!(port));
-                        }
-                    }
-                    let path = parsed.path();
-                    if !obj.contains_key("path") && !path.is_empty() {
-                        obj.insert("path".to_string(), json!(path));
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": "schema violation (url: missing host in url)",
+                                "name": "schema violation",
+                                "code": 2,
+                            })),
+                        );
                     }
                 }
             }
@@ -515,7 +575,10 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     body: &Value,
 ) -> (StatusCode, Json<Value>) {
     // Parse url shorthand for Service updates — Service 更新时解析 url 快捷方式
-    let body = expand_url_shorthand(body);
+    let body = match expand_url_shorthand(body) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
     let pk = PrimaryKey::from_str_or_uuid(id_or_name);
     match dao.update(&pk, &body).await {
         Ok(updated) => {
@@ -544,7 +607,10 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     body: Value,
 ) -> (StatusCode, Json<Value>) {
     // Parse url shorthand + inject timestamps — 解析 url 快捷方式 + 注入时间戳
-    let mut body = expand_url_shorthand(&body);
+    let mut body = match expand_url_shorthand(&body) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
     if let Some(obj) = body.as_object_mut() {
         let now = chrono::Utc::now().timestamp();
         if !obj.contains_key("created_at") {

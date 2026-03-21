@@ -373,7 +373,15 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{}?offset={}", table_name, o)),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{}?offset={}&size={}", table_name, o, params.size)
+                } else {
+                    format!("/{}?offset={}", table_name, o)
+                }
+            }),
         })
     }
 
@@ -425,7 +433,15 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{}?offset={}", table_name, o)),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{}?offset={}&size={}", table_name, o, params.size)
+                } else {
+                    format!("/{}?offset={}", table_name, o)
+                }
+            }),
         })
     }
 }
