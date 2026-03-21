@@ -168,6 +168,12 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
         available_on_server.insert(name, json!(true));
     }
 
+    // Build loaded_plugins map: {plugin_name: true} — 构建 loaded_plugins 映射
+    let mut loaded_plugins = serde_json::Map::new();
+    for name in config.loaded_plugins() {
+        loaded_plugins.insert(name, json!(true));
+    }
+
     // Convert listen addresses to the [{port, ssl}] format expected by frontend — 将监听地址转为前端期望的 [{port, ssl}] 格式
     let to_listeners = |addrs: &[kong_config::ListenAddr]| -> Vec<Value> {
         addrs
@@ -228,6 +234,7 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
             "real_ip_header": &config.real_ip_header,
             "proxy_listeners": to_listeners(&config.proxy_listen),
             "admin_gui_listeners": to_listeners(&config.admin_gui_listen),
+            "loaded_plugins": loaded_plugins,
         },
         "plugins": {
             "available_on_server": available_on_server,
@@ -263,8 +270,10 @@ pub async fn list_enabled_plugins(State(state): State<AdminState>) -> impl IntoR
 }
 
 /// GET /status — Service status — GET /status — 服务状态
-pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse {
-    Json(json!({
+pub async fn status_info(State(state): State<AdminState>) -> impl IntoResponse {
+    let is_dbless = state.config.database == "off";
+
+    let mut body = json!({
         "server": {
             "connections_accepted": 0,
             "connections_active": 0,
@@ -273,9 +282,6 @@ pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse 
             "connections_writing": 0,
             "connections_waiting": 0,
             "total_requests": 0,
-        },
-        "database": {
-            "reachable": true,
         },
         "memory": {
             "lua_shared_dicts": {
@@ -293,8 +299,113 @@ pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse 
                 "pid": std::process::id(),
             }],
         },
-        "configuration_hash": "00000000000000000000000000000000",
-    }))
+    });
+
+    if is_dbless {
+        // In dbless mode, include configuration_hash — dbless 模式下包含 configuration_hash
+        body["configuration_hash"] = json!("00000000000000000000000000000000");
+    } else {
+        // In DB mode, include database reachable status (no configuration_hash) — DB 模式下包含数据库可达状态（不含 configuration_hash）
+        body["database"] = json!({ "reachable": true });
+    }
+
+    Json(body)
+}
+
+/// GET /endpoints — List all registered Admin API endpoints — GET /endpoints — 列出所有已注册的 Admin API 端点
+pub async fn list_endpoints() -> impl IntoResponse {
+    let endpoints = vec![
+        "/",
+        "/endpoints",
+        "/status",
+        "/services",
+        "/services/{services}",
+        "/services/{services}/plugins",
+        "/services/{services}/plugins/{plugins}",
+        "/services/{services}/routes",
+        "/routes",
+        "/routes/{routes}",
+        "/routes/{routes}/plugins",
+        "/routes/{routes}/plugins/{plugins}",
+        "/consumers",
+        "/consumers/{consumers}",
+        "/consumers/{consumers}/plugins",
+        "/consumers/{consumers}/plugins/{plugins}",
+        "/plugins",
+        "/plugins/{plugins}",
+        "/plugins/enabled",
+        "/upstreams",
+        "/upstreams/{upstreams}",
+        "/upstreams/{upstreams}/targets",
+        "/upstreams/{upstreams}/targets/{targets}",
+        "/certificates",
+        "/certificates/{certificates}",
+        "/snis",
+        "/snis/{snis}",
+        "/ca_certificates",
+        "/ca_certificates/{ca_certificates}",
+        "/vaults",
+        "/vaults/{vaults}",
+        "/schemas/{entity}",
+        "/schemas/plugins/{name}",
+        "/schemas/{entity}/validate",
+        "/tags",
+        "/tags/{tags}",
+    ];
+
+    Json(json!({ "data": endpoints }))
+}
+
+/// POST /schemas/{entity}/validate — Validate an entity schema — POST /schemas/{entity}/validate — 验证实体 schema
+pub async fn validate_entity_schema(
+    Path(entity_name): Path<String>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    let known_entities = [
+        "services", "routes", "consumers", "plugins", "upstreams",
+        "targets", "certificates", "snis", "ca_certificates", "vaults",
+    ];
+
+    if !known_entities.contains(&entity_name.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": format!("No entity named '{}'", entity_name) })),
+        ).into_response();
+    }
+
+    // Check if body is provided — 检查请求体是否存在
+    let body = match body {
+        Some(Json(v)) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation",
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {},
+                })),
+            ).into_response();
+        }
+    };
+
+    // Simple validation: if body is an empty object, return 400 — 简单验证：空对象返回 400
+    if body.as_object().map_or(true, |o| o.is_empty()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "schema violation",
+                "name": "schema violation",
+                "code": 2,
+                "fields": {},
+            })),
+        ).into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({ "message": "schema validation successful" })),
+    ).into_response()
 }
 
 /// GET /metrics — Prometheus metrics from the status port — GET /metrics — 从状态端口暴露的 Prometheus 指标
@@ -698,6 +809,33 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
             obj.insert("updated_at".to_string(), json!(now));
         }
     }
+    // Consumer validation: at least one of username or custom_id — Consumer 验证：至少需要 username 或 custom_id 之一
+    if T::table_name() == "consumers" {
+        if let Some(obj) = body.as_object() {
+            let has_username = obj
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| !s.is_empty());
+            let has_custom_id = obj
+                .get("custom_id")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| !s.is_empty());
+            if !has_username && !has_custom_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (at least one of these fields must be non-empty: 'custom_id', 'username')",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "@entity": ["at least one of these fields must be non-empty: 'custom_id', 'username'"]
+                        },
+                    })),
+                );
+            }
+        }
+    }
+
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -1016,6 +1154,25 @@ async fn create_scoped_plugin(
             })),
         );
     };
+
+    // Validate plugin name is required — 验证插件 name 字段必填
+    let has_name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map_or(false, |s| !s.is_empty());
+    if !has_name {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "schema violation (name: required field missing)",
+                "name": "schema violation",
+                "code": 2,
+                "fields": {
+                    "name": "required field missing"
+                },
+            })),
+        );
+    }
 
     obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
     do_create::<Plugin>(&state.plugins, body).await

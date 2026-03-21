@@ -1058,8 +1058,26 @@ fn map_sqlx_error(err: sqlx::Error, entity_type: &str) -> KongError {
             let message = db_err.message();
 
             match code.as_ref() {
-                // 23505: unique_violation
-                "23505" => KongError::UniqueViolation(format!("{}: {}", entity_type, message)),
+                // 23505: unique_violation — parse constraint name to extract field
+                "23505" => {
+                    // PostgreSQL constraint name format: {table}_{field}_key
+                    // e.g. "consumers_username_key" → field = "username"
+                    let constraint = db_err
+                        .constraint()
+                        .unwrap_or("");
+                    let field = if !constraint.is_empty() {
+                        // Strip table prefix and "_key" suffix
+                        let without_prefix = constraint
+                            .strip_prefix(&format!("{}_", entity_type))
+                            .unwrap_or(constraint);
+                        without_prefix
+                            .strip_suffix("_key")
+                            .unwrap_or(without_prefix)
+                    } else {
+                        entity_type
+                    };
+                    KongError::UniqueViolation(format!("{{{field}=\"...\"}}"))
+                }
                 // 23503: foreign_key_violation
                 "23503" => KongError::ForeignKeyViolation(format!("{}: {}", entity_type, message)),
                 // 23502: not_null_violation

@@ -108,13 +108,17 @@ async fn options_middleware(
     next: middleware::Next,
 ) -> axum::response::Response {
     if req.method() == Method::OPTIONS {
+        // Read-only endpoints only support GET/HEAD — 只读端点只支持 GET/HEAD
+        let path = req.uri().path();
+        let allow = match path {
+            "/" | "/status" | "/endpoints" | "/plugins/enabled" => "GET, HEAD, OPTIONS",
+            _ => "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
+        };
+
         return axum::http::Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header("Allow", "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS")
-            .header(
-                "Access-Control-Allow-Methods",
-                "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
-            )
+            .header("Allow", allow)
+            .header("Access-Control-Allow-Methods", allow)
             .header("Access-Control-Allow-Headers", "Content-Type")
             .header("Access-Control-Allow-Origin", "*")
             .body(axum::body::Body::empty())
@@ -132,8 +136,10 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Root info endpoint — 根信息端点
         .route("/", get(root_info))
         .route("/status", get(status_info))
+        .route("/endpoints", get(list_endpoints))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
         .route("/schemas/{entity_name}", get(get_entity_schema))
+        .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))
         // Tags — 标签 API
         .route("/tags", get(list_all_tags))
         .route("/tags/{tag}", get(list_by_tag))

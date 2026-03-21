@@ -63,8 +63,15 @@ where
             Some(ct) if ct.contains("multipart/form-data") => {
                 parse_multipart(req, state).await
             }
+            // Explicit unsupported Content-Type → 415 — 明确的不支持 Content-Type → 415
+            Some(_) => {
+                Err(FlexibleBodyRejection {
+                    status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    message: "Unsupported Content-Type".to_string(),
+                })
+            }
             // No Content-Type: try JSON first — 无 Content-Type：优先尝试 JSON
-            None | Some(_) => {
+            None => {
                 parse_json(req, state).await
             }
         }
@@ -78,9 +85,9 @@ async fn parse_json<S: Send + Sync>(
 ) -> Result<FlexibleBody, FlexibleBodyRejection> {
     match Json::<Value>::from_request(req, state).await {
         Ok(Json(value)) => Ok(FlexibleBody(value)),
-        Err(e) => Err(FlexibleBodyRejection {
+        Err(_) => Err(FlexibleBodyRejection {
             status: StatusCode::BAD_REQUEST,
-            message: format!("invalid JSON body: {}", e),
+            message: "Cannot parse JSON body".to_string(),
         }),
     }
 }
