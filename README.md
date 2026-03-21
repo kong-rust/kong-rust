@@ -83,7 +83,10 @@ kong-server (binary entry point)
  ├── kong-plugin-system — Plugin registry and execution framework
  ├── kong-lua-bridge    — Lua compatibility layer + PDK + ngx.*
  ├── kong-admin         — Admin API (axum)
- └── kong-cluster       — CP/DP cluster communication (planned)
+ ├── kong-cluster       — CP/DP cluster communication (planned)
+ ├── kong-ai            — LLM Gateway engine: rate limiter, OpenAI/Anthropic protocol, token counting (planned)
+ ├── kong-mcp           — MCP/Skill Gateway: MCP protocol, tool registry & routing (planned)
+ └── kong-agent         — Agent Gateway: A2A protocol, agent registry & routing (planned)
 ```
 
 ## Quick Start
@@ -228,15 +231,19 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 | 8. Integration | Done | End-to-end testing, access logs, L4 stream proxy |
 | 9. Hybrid Mode | Planned | CP/DP cluster communication |
 
-### AI Gateway Roadmap
+### AI Gateway Roadmap (Dual-Track Parallel)
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| Phase 0 | In Progress | Stability hardening — Kong official spec test alignment |
-| Phase 1 | Planned | Hybrid CP/DP mode (traditional gateway completion) |
-| Phase 2 | Planned | LLM Proxy — Token rate limiting, multi-model LB & fallback, virtual API keys, cost tracking, semantic caching, prompt guard |
-| Phase 3 | Planned | MCP Gateway — Server registration, discovery, routing, auth, observability |
-| Phase 4 | Planned | Skill / Agent Gateway — Skill orchestration, agent routing, identity management |
+| Phase | Track | Status | Description |
+|-------|-------|--------|-------------|
+| Phase 0 | A | In Progress | Stability hardening — Kong official spec test alignment |
+| Phase 2a-MVP | B | Planned | LLM Gateway MVP — OpenAI protocol proxy, token counting |
+| Phase 1 | A | Planned | Hybrid CP/DP mode (traditional gateway completion) |
+| Phase 2a-Full | B | Planned | Multi-model LB & fallback (Anthropic, Gemini) |
+| Phase 2b | B | Planned | Virtual API keys, token cost tracking |
+| Phase 2c | B | Planned | Semantic caching |
+| Phase 2d | B | Planned | Prompt guard |
+| Phase 3 | B | Planned | MCP Gateway — Server registration, discovery, routing |
+| Phase 4 | B | Planned | Agent Gateway — A2A protocol, agent routing, identity management |
 
 **All AI capabilities will be implemented in Rust-native code** — no Lua plugins. This is Kong-Rust's core performance advantage over Kong (Lua) and LiteLLM (Python).
 
@@ -246,7 +253,8 @@ See [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md) for t
 
 | Document | Description |
 |----------|-------------|
-| [Roadmap](docs/designs/kong-rust-roadmap.md) | Product roadmap & technical strategy |
+| [AI Gateway Strategy](docs/designs/ai-gateway-strategy.md) | AI gateway positioning & dual-track execution plan |
+| [Roadmap](docs/designs/kong-rust-roadmap.md) | Hybrid mode detailed design & legacy roadmap |
 | [Design](docs/design.md) | Architecture & component design |
 | [Requirements](docs/requirements.md) | Functional & non-functional requirements |
 | [Tasks](docs/tasks.md) | Task tracking & progress |

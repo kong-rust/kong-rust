@@ -198,6 +198,8 @@ Lua 插件仅用于向后兼容已有 Kong 部署。新 AI 能力全部 Rust 实
 
 ## Review Status
 
-- CEO Review: CLEAN (2026-03-21)
+- CEO Review: SUPERSEDED by [ai-gateway-strategy.md](ai-gateway-strategy.md) (2026-03-21)
 - Eng Review: PENDING
 - Design Review: SKIPPED (no UI scope)
+
+> **注意：** 本文档已被 `ai-gateway-strategy.md` 部分替代。新的四子网关定位和双轨并行执行路径以新文档为准。本文档中 Phase 1 Hybrid 模式的详细设计仍然有效。

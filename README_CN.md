@@ -83,7 +83,10 @@ kong-server（主入口二进制）
  ├── kong-plugin-system — 插件注册/执行框架
  ├── kong-lua-bridge    — Lua 兼容层 + PDK + ngx.*
  ├── kong-admin         — Admin API（axum）
- └── kong-cluster       — CP/DP 集群通信（规划中）
+ ├── kong-cluster       — CP/DP 集群通信（规划中）
+ ├── kong-ai            — LLM 网关引擎：通用限流器、OpenAI/Anthropic 协议、Token 计数（规划中）
+ ├── kong-mcp           — MCP/Skill 网关：MCP 协议、工具注册/路由（规划中）
+ └── kong-agent         — Agent 网关：A2A 协议、Agent 注册/路由（规划中）
 ```
 
 ## 快速开始
@@ -228,15 +231,19 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 | 8. 集成测试 | 已完成 | 端到端测试、访问日志、L4 Stream 代理 |
 | 9. Hybrid 模式 | 规划中 | CP/DP 集群通信 |
 
-### AI 网关路线图
+### AI 网关路线图（双轨并行）
 
-| 阶段 | 状态 | 说明 |
-|------|------|------|
-| Phase 0 | 进行中 | 稳定性加固 — Kong 官方 spec 测试对齐 |
-| Phase 1 | 规划中 | Hybrid CP/DP 模式（传统网关封顶） |
-| Phase 2 | 规划中 | LLM Proxy — Token 限流、多模型负载均衡与 Fallback、虚拟 API Key、成本追踪、语义缓存、Prompt Guard |
-| Phase 3 | 规划中 | MCP Gateway — Server 注册、发现、路由、认证、可观测性 |
-| Phase 4 | 规划中 | Skill / Agent Gateway — Skill 编排、Agent 路由、身份管理 |
+| 阶段 | 轨道 | 状态 | 说明 |
+|------|------|------|------|
+| Phase 0 | A | 进行中 | 稳定性加固 — Kong 官方 spec 测试对齐 |
+| Phase 2a-MVP | B | 规划中 | LLM 网关 MVP — OpenAI 协议代理、Token 计数 |
+| Phase 1 | A | 规划中 | Hybrid CP/DP 模式（传统网关封顶） |
+| Phase 2a-Full | B | 规划中 | 多模型负载均衡与 Fallback（Anthropic、Gemini） |
+| Phase 2b | B | 规划中 | 虚拟 API Key、Token 成本追踪 |
+| Phase 2c | B | 规划中 | 语义缓存 |
+| Phase 2d | B | 规划中 | Prompt Guard |
+| Phase 3 | B | 规划中 | MCP 网关 — Server 注册、发现、路由 |
+| Phase 4 | B | 规划中 | Agent 网关 — A2A 协议、Agent 路由、身份管理 |
 
 **所有 AI 能力将以 Rust 原生代码实现** —— 不依赖 Lua 插件。这是 Kong-Rust 相对于 Kong（Lua）和 LiteLLM（Python）的核心性能优势。
 
@@ -246,7 +253,8 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 | 文档 | 说明 |
 |------|------|
-| [产品路线图](docs/designs/kong-rust-roadmap.md) | 产品路线图与技术战略 |
+| [AI 网关战略](docs/designs/ai-gateway-strategy.md) | AI 网关定位与双轨并行执行计划 |
+| [产品路线图](docs/designs/kong-rust-roadmap.md) | Hybrid 模式详细设计与历史路线图 |
 | [设计文档](docs/design.md) | 架构与组件设计 |
 | [需求文档](docs/requirements.md) | 功能与非功能需求 |
 | [任务跟踪](docs/tasks.md) | 任务进度 |
