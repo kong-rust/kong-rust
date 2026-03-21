@@ -401,7 +401,12 @@ impl KongProxy {
 
         let body_bytes = body_buf.finish();
         plugin_ctx.request_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
-        *request_body_buf = None;
+        // Retain the fully-read body so that request_body_filter can release it in one shot
+        // instead of re-buffering from scratch (which would trigger the chunk-interval timeout).
+        // 保留已完整读取的 body，让 request_body_filter 一次性释放，而非从头重新缓冲（那样会触发 chunk 间隔超时）。
+        let mut retained = SpillableBuffer::new();
+        retained.extend(&body_bytes);
+        *request_body_buf = Some(retained);
 
         Ok(())
     }
@@ -1068,11 +1073,15 @@ impl ProxyHttp for KongProxy {
             return Ok(());
         }
 
-        // Check chunk interval timeout (60s, similar to nginx client_body_timeout) — 检查 chunk 间隔超时（60 秒，类似 nginx 的 client_body_timeout）
+        // Check chunk interval timeout (use service read_timeout, default 60s) — 检查 chunk 间隔超时（使用 service read_timeout，默认 60s）
+        let timeout_secs = ctx.service.as_ref()
+            .map(|s| s.read_timeout as u64 / 1000)
+            .unwrap_or(60)
+            .max(60); // minimum 60s to avoid premature timeout — 最少 60s 避免过早超时
         let now = std::time::Instant::now();
         if let Some(last_at) = ctx.last_body_chunk_at {
-            if now.duration_since(last_at).as_secs() > 60 {
-                tracing::warn!("请求体 chunk 间隔超时 (>60s)，终止请求");
+            if now.duration_since(last_at).as_secs() > timeout_secs {
+                tracing::warn!("请求体 chunk 间隔超时 (>{}s)，终止请求", timeout_secs);
                 return Err(pingora_core::Error::new_str("client body timeout"));
             }
         }
@@ -1459,6 +1468,24 @@ impl ProxyHttp for KongProxy {
         // Populate log_serialize for Lua plugins (prometheus plugin expects this) — 填充 log_serialize 供 Lua 插件使用（prometheus 插件依赖此数据）
         let service_name = ctx.service.as_ref().and_then(|s| s.name.clone()).unwrap_or_default();
         let route_id = ctx.route_match.as_ref().map(|rm| rm.route_id.to_string()).unwrap_or_default();
+        let route_name = ctx.route_match.as_ref().and_then(|rm| rm.route_name.as_ref().map(|n| n.to_string())).unwrap_or_else(|| route_id.clone());
+
+        // Calculate request size: header line + headers + body — 计算请求大小：请求行 + 头 + 体
+        let req_header_size: usize = session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum();
+        let req_body_size = ctx.plugin_ctx.request_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let request_size = (req_header_size + req_body_size) as i64;
+
+        // Calculate response size: headers + body — 计算响应大小：头 + 体
+        let resp_header_size: usize = session.response_written()
+            .map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum::<usize>())
+            .unwrap_or(0);
+        let resp_body_size = ctx.plugin_ctx.service_response_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let response_size = (resp_header_size + resp_body_size) as i64;
+
+        // Extract consumer username from authenticated_consumer — 从 authenticated_consumer 提取消费者用户名
+        let consumer_value = ctx.plugin_ctx.authenticated_consumer.as_ref()
+            .and_then(|c| c.get("username").and_then(|u| u.as_str()))
+            .unwrap_or("");
 
         ctx.plugin_ctx.log_serialize = Some(serde_json::json!({
             "service": {
@@ -1468,20 +1495,20 @@ impl ProxyHttp for KongProxy {
             },
             "route": {
                 "id": route_id.clone(),
-                "name": route_id
+                "name": route_name
             },
             "request": {
                 "method": method,
                 "path": uri,
-                "size": session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>() as i64
+                "size": request_size
             },
             "response": {
                 "status": status,
-                "size": session.response_written().map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>()).unwrap_or(0) as i64
+                "size": response_size
             },
             "latencies": latencies,
-            "consumer": null,
-            "workspace_name": ""
+            "consumer": consumer_value,
+            "workspace_name": "default"
         }));
 
         // Execute plugin log phase (always executes, even after short-circuit) — 执行插件 log 阶段（总是执行，即使之前短路）

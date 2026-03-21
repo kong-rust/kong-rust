@@ -151,32 +151,57 @@ impl LoadBalancer {
         self.weighted_round_robin(&indices)
     }
 
-    /// Weighted round-robin selection (among healthy targets only) — 加权 Round-Robin 选择（仅在健康目标中选择）
+    /// Smooth weighted round-robin selection (interleaved distribution among healthy targets)
+    /// 平滑加权 Round-Robin 选择（在健康目标间交错分配，避免连续命中同一 target）
+    ///
+    /// Uses GCD-reduced weight wheel for even distribution with small request counts.
+    /// 使用 GCD 约简的权重轮盘实现均匀分配，即使请求数较少也能体现权重比例。
     fn weighted_round_robin(&self, healthy_indices: &[usize]) -> Option<String> {
         if healthy_indices.is_empty() {
             return None;
         }
 
-        let total_weight: i32 = healthy_indices
+        // Single target shortcut — 单目标快速路径
+        if healthy_indices.len() == 1 {
+            return Some(self.targets[healthy_indices[0]].address.clone());
+        }
+
+        let weights: Vec<i32> = healthy_indices
             .iter()
             .map(|&i| self.targets[i].weight)
-            .sum();
+            .collect();
+        let total_weight: i32 = weights.iter().sum();
         if total_weight == 0 {
             return None;
         }
 
-        let idx = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        let pos = (idx as i32) % total_weight;
+        // Compute GCD of all weights to reduce wheel size — 计算所有权重的 GCD 以缩小轮盘
+        let g = weights.iter().copied().fold(0i32, gcd);
+        let g = if g > 0 { g } else { 1 };
 
-        let mut cumulative = 0;
-        for &target_idx in healthy_indices {
-            cumulative += self.targets[target_idx].weight;
-            if pos < cumulative {
-                return Some(self.targets[target_idx].address.clone());
-            }
+        // Build interleaved weight wheel: [t0, t1, t0, t1, t0, ...] for weights 3:2
+        // 构建交错权重轮盘：权重 3:2 → [t0, t1, t0, t1, t0, ...]
+        let wheel_size: i32 = total_weight / g;
+        let mut wheel: Vec<usize> = Vec::with_capacity(wheel_size as usize);
+        let reduced: Vec<i32> = weights.iter().map(|w| w / g).collect();
+        let mut remaining = reduced.clone();
+
+        // Distribute slots round-robin style to interleave targets — 以 round-robin 方式分配槽位来交错目标
+        for _ in 0..wheel_size {
+            // Pick the target with the highest remaining slots — 选择剩余槽位最多的目标
+            let best = remaining
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, &r)| r)
+                .map(|(i, _)| i)
+                .unwrap();
+            wheel.push(healthy_indices[best]);
+            remaining[best] -= 1;
         }
 
-        Some(self.targets[healthy_indices[0]].address.clone())
+        let idx = self.rr_index.fetch_add(1, Ordering::Relaxed);
+        let pos = idx % wheel.len();
+        Some(self.targets[wheel[pos]].address.clone())
     }
 
     /// Consistent hash selection — 一致性哈希选择
@@ -342,6 +367,17 @@ impl LoadBalancer {
             self.hash_ring = build_hash_ring(&self.targets, 10000);
         }
     }
+}
+
+/// Compute greatest common divisor — 计算最大公约数
+fn gcd(a: i32, b: i32) -> i32 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
 }
 
 /// Compute ketama-style hash value — 计算 ketama 风格的哈希值
