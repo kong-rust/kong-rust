@@ -214,16 +214,75 @@ fn error_response(err: KongError) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Enrich UNIQUE violation error message with actual field values from the request body
+/// Enrich UNIQUE violation error with actual field values from the request body
 /// 用请求体中的实际字段值丰富 UNIQUE 冲突错误消息
-fn enrich_unique_violation_message(err: &KongError, body: &Value) -> String {
+/// Returns (message, optional fields object) — 返回 (消息, 可选的 fields 对象)
+fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Value>) {
     let msg = err.to_string();
-    // Pattern: UNIQUE violation detected on '{field_name="..."}'
-    // Replace "..." with actual value from body — 用请求体中的实际值替换 "..."
-    if let KongError::UniqueViolation(_) = err {
+    if let KongError::UniqueViolation(inner) = err {
         if let Some(obj) = body.as_object() {
+            // Check if this is a plugin cache_key violation — 检查是否是插件 cache_key 冲突
+            // cache_key field pattern: {cache_key="..."} — cache_key 字段模式
+            if inner.contains("cache_key") {
+                // Parse cache_key from body: format is "name:route_id:service_id:consumer_id:"
+                // 从请求体解析 cache_key：格式为 "name:route_id:service_id:consumer_id:"
+                if let Some(cache_key) = obj.get("cache_key").and_then(|v| v.as_str()) {
+                    let parts: Vec<&str> = cache_key.splitn(5, ':').collect();
+                    if parts.len() >= 4 {
+                        let name = parts[0];
+                        let route_id = parts[1];
+                        let service_id = parts[2];
+                        let consumer_id = parts[3];
+
+                        // Build fields object — 构建 fields 对象
+                        let consumer_field = if consumer_id.is_empty() {
+                            Value::Null
+                        } else {
+                            json!({"id": consumer_id})
+                        };
+                        let route_field = if route_id.is_empty() {
+                            Value::Null
+                        } else {
+                            json!({"id": route_id})
+                        };
+                        let service_field = if service_id.is_empty() {
+                            Value::Null
+                        } else {
+                            json!({"id": service_id})
+                        };
+
+                        let fields = json!({
+                            "consumer": consumer_field,
+                            "name": name,
+                            "route": route_field,
+                            "service": service_field,
+                        });
+
+                        // Build message in Kong format: '{consumer=null,name="basic-auth",route=null,service={id="xxx"}}'
+                        // 构建 Kong 格式的消息
+                        let fmt_fk = |v: &Value| -> String {
+                            if v.is_null() {
+                                "null".to_string()
+                            } else if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
+                                format!("{{id=\"{}\"}}", id)
+                            } else {
+                                "null".to_string()
+                            }
+                        };
+                        let message = format!(
+                            "UNIQUE violation detected on '{{consumer={},name=\"{}\",route={},service={}}}'",
+                            fmt_fk(&consumer_field),
+                            name,
+                            fmt_fk(&route_field),
+                            fmt_fk(&service_field),
+                        );
+                        return (message, Some(fields));
+                    }
+                }
+            }
+
+            // Standard field violation — 标准字段冲突
             // Extract field name from the error message pattern {field="..."} — 从错误消息中提取字段名
-            // e.g. '{name="..."}' → field = "name"
             if let Some(start) = msg.find('{') {
                 if let Some(eq_pos) = msg[start..].find('=') {
                     let field_name = &msg[start + 1..start + eq_pos];
@@ -232,15 +291,16 @@ fn enrich_unique_violation_message(err: &KongError, body: &Value) -> String {
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
-                        return format!(
-                            "UNIQUE violation detected on '{{{field_name}=\"{val_str}\"}}'",
+                        return (
+                            format!("UNIQUE violation detected on '{{{field_name}=\"{val_str}\"}}'"),
+                            None,
                         );
                     }
                 }
             }
         }
     }
-    msg
+    (msg, None)
 }
 
 // ============ Special endpoints — 特殊端点 ============
@@ -413,9 +473,22 @@ fn format_memory(bytes: u64, unit: Option<&str>, scale: usize) -> Value {
 pub async fn status_info(
     State(state): State<AdminState>,
     Query(status_params): Query<StatusParams>,
-) -> impl IntoResponse {
+) -> Response {
     let is_dbless = state.config.database == "off";
     let unit = status_params.unit.as_deref();
+
+    // Validate unit parameter — 验证 unit 查询参数
+    if let Some(u) = unit {
+        if !matches!(u.to_lowercase().as_str(), "m" | "k" | "g" | "b") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": format!("invalid value '{}' for parameter 'unit'", u),
+                })),
+            ).into_response();
+        }
+    }
+
     let scale = status_params.scale.unwrap_or(2);
 
     // Simulated memory values in bytes (Kong-compatible) — 模拟内存值（字节，Kong 兼容）
@@ -461,7 +534,7 @@ pub async fn status_info(
         body["database"] = json!({ "reachable": true });
     }
 
-    Json(body)
+    Json(body).into_response()
 }
 
 /// GET /endpoints — List all registered Admin API endpoints — GET /endpoints — 列出所有已注册的 Admin API 端点
@@ -958,17 +1031,18 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
             (StatusCode::CREATED, Json(body))
         }
         Err(e) => {
-            let message = enrich_unique_violation_message(&e, &body_for_err);
+            let (message, fields) = enrich_unique_violation(&e, &body_for_err);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (
-                status,
-                Json(json!({
-                    "message": message,
-                    "name": e.error_name(),
-                    "code": e.error_code(),
-                })),
-            )
+            let mut resp = json!({
+                "message": message,
+                "name": e.error_name(),
+                "code": e.error_code(),
+            });
+            if let Some(f) = fields {
+                resp.as_object_mut().unwrap().insert("fields".to_string(), f);
+            }
+            (status, Json(resp))
         }
     }
 }
@@ -992,11 +1066,11 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "message": format!("schema violation (plugin '{}' not found)", name),
+                        "message": format!("schema violation (plugin '{}' not enabled; add it to the 'plugins' configuration property)", name),
                         "name": "schema violation",
                         "code": 2,
                         "fields": {
-                            "name": format!("plugin '{}' not found", name)
+                            "name": format!("plugin '{}' not enabled; add it to the 'plugins' configuration property", name)
                         },
                     })),
                 );
@@ -1032,6 +1106,11 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
             ) {
                 if let Some(existing_obj) = existing_json.as_object_mut() {
                     for (key, value) in patch_obj {
+                        // If the patch value is null, always override (clear the field) — 如果 patch 值为 null，始终覆盖（清除该字段）
+                        if value.is_null() {
+                            existing_obj.insert(key.clone(), Value::Null);
+                            continue;
+                        }
                         // Deep merge for nested objects (e.g., plugin config) — 嵌套对象深度合并（如插件 config）
                         if key == "config" || key == "headers" {
                             if let (Some(existing_sub), Some(patch_sub)) = (
@@ -1076,17 +1155,18 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
-            let message = enrich_unique_violation_message(&e, &merged_body);
+            let (message, fields) = enrich_unique_violation(&e, &merged_body);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (
-                status,
-                Json(json!({
-                    "message": message,
-                    "name": e.error_name(),
-                    "code": e.error_code(),
-                })),
-            )
+            let mut resp = json!({
+                "message": message,
+                "name": e.error_name(),
+                "code": e.error_code(),
+            });
+            if let Some(f) = fields {
+                resp.as_object_mut().unwrap().insert("fields".to_string(), f);
+            }
+            (status, Json(resp))
         }
     }
 }
@@ -1158,11 +1238,11 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "message": format!("schema violation (plugin '{}' not found)", name),
+                        "message": format!("schema violation (plugin '{}' not enabled; add it to the 'plugins' configuration property)", name),
                         "name": "schema violation",
                         "code": 2,
                         "fields": {
-                            "name": format!("plugin '{}' not found", name)
+                            "name": format!("plugin '{}' not enabled; add it to the 'plugins' configuration property", name)
                         },
                     })),
                 );
@@ -1211,17 +1291,18 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
-            let message = enrich_unique_violation_message(&e, &body_for_err);
+            let (message, fields) = enrich_unique_violation(&e, &body_for_err);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (
-                status,
-                Json(json!({
-                    "message": message,
-                    "name": e.error_name(),
-                    "code": e.error_code(),
-                })),
-            )
+            let mut resp = json!({
+                "message": message,
+                "name": e.error_name(),
+                "code": e.error_code(),
+            });
+            if let Some(f) = fields {
+                resp.as_object_mut().unwrap().insert("fields".to_string(), f);
+            }
+            (status, Json(resp))
         }
     }
 }
@@ -1489,6 +1570,11 @@ pub async fn list_nested_routes(
     Path(service_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
     // Resolve service ID first — 先解析 service ID
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
@@ -1529,6 +1615,11 @@ pub async fn list_service_plugins(
     Path(service_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
     let service_pk = PrimaryKey::from_str_or_uuid(&service_id_or_name);
     let service = match state.services.select(&service_pk).await {
         Ok(Some(s)) => s,
@@ -1897,6 +1988,11 @@ pub async fn list_route_plugins(
     Path(route_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
     let route_pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
     let route = match state.routes.select(&route_pk).await {
         Ok(Some(r)) => r,
@@ -2080,6 +2176,11 @@ pub async fn list_consumer_plugins(
     Path(consumer_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
     let consumer_pk = PrimaryKey::from_str_or_uuid(&consumer_id_or_name);
     let consumer = match state.consumers.select(&consumer_pk).await {
         Ok(Some(c)) => c,
@@ -2299,6 +2400,11 @@ pub async fn list_nested_targets(
     Path(upstream_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
     let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
     let upstream = match state.upstreams.select(&upstream_pk).await {
         Ok(Some(u)) => u,

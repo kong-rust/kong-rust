@@ -175,13 +175,34 @@ function Client:send(opts)
         return nil, status_code
     end
 
-    -- normalize response headers (lowercase keys) — 标准化响应头（小写键）
-    local norm_headers = {}
+    -- normalize response headers (lowercase keys, case-insensitive lookup)
+    -- 标准化响应头（小写键，大小写无关查找）
+    local norm_headers_raw = {}
     if response_headers then
         for k, v in pairs(response_headers) do
-            norm_headers[k:lower()] = v
+            norm_headers_raw[k:lower()] = v
         end
     end
+    -- Case-insensitive header access: res.headers["Allow"] → lookup "allow"
+    -- 大小写无关的头部访问：res.headers["Allow"] → 查找 "allow"
+    local norm_headers = setmetatable({}, {
+        __index = function(_, key)
+            if type(key) == "string" then
+                return norm_headers_raw[key:lower()]
+            end
+            return norm_headers_raw[key]
+        end,
+        __newindex = function(_, key, value)
+            if type(key) == "string" then
+                norm_headers_raw[key:lower()] = value
+            else
+                norm_headers_raw[key] = value
+            end
+        end,
+        __pairs = function(_)
+            return pairs(norm_headers_raw)
+        end,
+    })
 
     -- build response object — 构建响应对象
     local body_str = table.concat(response_body)

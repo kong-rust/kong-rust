@@ -94,6 +94,16 @@ async fn parse_json<S: Send + Sync>(
     req: Request,
     state: &S,
 ) -> Result<FlexibleBody, FlexibleBodyRejection> {
+    // Check content length: if body is empty, return empty JSON object — 检查 content-length：空请求体返回空 JSON 对象
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    if content_length == Some(0) {
+        // Empty body → treat as empty JSON object so validation logic can run — 空请求体 → 当作空 JSON 对象以便验证逻辑可以执行
+        return Ok(FlexibleBody(Value::Object(serde_json::Map::new())));
+    }
     match Json::<Value>::from_request(req, state).await {
         Ok(Json(value)) => Ok(FlexibleBody(value)),
         Err(_) => Err(FlexibleBodyRejection {

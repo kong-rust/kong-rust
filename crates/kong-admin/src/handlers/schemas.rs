@@ -225,6 +225,79 @@ pub async fn get_vault_schema(
     }
 }
 
+/// POST /schemas/vaults/validate — Validate a vault config — POST /schemas/vaults/validate — 验证 vault 配置
+pub async fn validate_vault_schema(
+    body: Option<axum::Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    let body = match body {
+        Some(axum::Json(v)) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation (name: required field missing)",
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {"name": "required field missing"},
+                })),
+            ).into_response();
+        }
+    };
+
+    // Validate vault name is present — 验证 vault name 字段是否存在
+    let vault_name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation (name: required field missing)",
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {"name": "required field missing"},
+                })),
+            ).into_response();
+        }
+    };
+
+    // Check known vault types — 检查已知的 vault 类型
+    match vault_name.as_str() {
+        "env" => {
+            // Validate prefix is present — 验证 prefix 字段
+            match body.get("prefix").and_then(|v| v.as_str()) {
+                Some(p) if !p.is_empty() => {
+                    (
+                        StatusCode::OK,
+                        Json(json!({"message": "schema validation successful"})),
+                    ).into_response()
+                }
+                _ => {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (prefix: required field missing)",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {"prefix": "required field missing"},
+                        })),
+                    ).into_response()
+                }
+            }
+        }
+        _ => {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": format!("No vault named '{}'", vault_name),
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {"name": format!("No vault named '{}'", vault_name)},
+                })),
+            ).into_response()
+        }
+    }
+}
+
 /// POST /schemas/plugins/validate — Validate a plugin schema definition — POST /schemas/plugins/validate — 验证插件 schema 定义
 pub async fn validate_plugin_schema(
     State(state): State<AdminState>,

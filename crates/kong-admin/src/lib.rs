@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 /// Admin API application state — Admin API 应用状态
@@ -194,6 +193,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/endpoints", get(list_endpoints))
         .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
+        .route("/schemas/vaults/validate", axum::routing::post(validate_vault_schema))
         .route("/schemas/vaults/{name}", get(get_vault_schema))
         .route("/schemas/{entity_name}", get(get_entity_schema))
         .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))
@@ -344,19 +344,8 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .method_not_allowed_fallback(method_not_allowed_handler)
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
         .layer(middleware::from_fn(options_middleware))
-        // Admin latency header — Admin 延迟响应头
+        // Admin latency header — Admin 延迟响应头（最外层，确保所有请求都包含此头）
         .layer(middleware::from_fn(admin_latency_middleware))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::mirror_request())
-                .allow_methods(AllowMethods::mirror_request())
-                .allow_headers(AllowHeaders::mirror_request())
-                .allow_credentials(true)
-                .expose_headers(tower_http::cors::ExposeHeaders::list([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::CONTENT_LENGTH,
-                ])),
-        )
         .with_state(state)
 }
 
