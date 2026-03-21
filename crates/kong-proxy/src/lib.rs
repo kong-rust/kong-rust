@@ -516,7 +516,7 @@ impl ProxyHttp for KongProxy {
             injected_real_ip_headers: Vec::new(),
             request_start_time: std::time::Instant::now(),
             upstream_response_time: None,
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::new_v4().simple().to_string(),
         }
     }
 
@@ -1034,8 +1034,10 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // 8. Inject X-Kong-Request-Id into upstream request — 向上游请求注入 X-Kong-Request-Id
-        let _ = upstream_request.insert_header("x-kong-request-id", &ctx.request_id);
+        // 8. Inject X-Kong-Request-Id into upstream request (only if headers_upstream config includes it) — 向上游请求注入 X-Kong-Request-Id（仅当 headers_upstream 配置包含时）
+        if self.config.headers_upstream.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+            let _ = upstream_request.insert_header("x-kong-request-id", &ctx.request_id);
+        }
 
         Ok(())
     }
@@ -1174,8 +1176,10 @@ impl ProxyHttp for KongProxy {
         let _ = upstream_response
             .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
         let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
-        // Use per-request X-Kong-Request-Id (same ID as sent to upstream) — 使用每请求的 X-Kong-Request-Id（与发给上游的相同）
-        let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
+        // Use per-request X-Kong-Request-Id in downstream response (only if headers config includes it) — 在下游响应中使用每请求的 X-Kong-Request-Id（仅当 headers 配置包含时）
+        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+            let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
+        }
 
         // Server 头处理：隐藏上游 Server 头并注入 Kong 标识
         if self.config.proxy_hide_server_header {

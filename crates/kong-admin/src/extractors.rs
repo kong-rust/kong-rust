@@ -28,8 +28,6 @@ impl IntoResponse for FlexibleBodyRejection {
             self.status,
             Json(json!({
                 "message": self.message,
-                "name": "bad request",
-                "code": 2,
             })),
         )
             .into_response()
@@ -70,8 +68,21 @@ where
                     message: "Unsupported Content-Type".to_string(),
                 })
             }
-            // No Content-Type: try JSON first — 无 Content-Type：优先尝试 JSON
+            // No Content-Type: if body is present, return 415; otherwise treat as empty JSON — 无 Content-Type：有请求体返回 415；否则当空 JSON 处理
             None => {
+                // Check if the request has a non-empty body — 检查请求是否有非空请求体
+                let content_length = req
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let has_transfer_encoding = req.headers().contains_key(header::TRANSFER_ENCODING);
+                if content_length.unwrap_or(0) > 0 || has_transfer_encoding {
+                    return Err(FlexibleBodyRejection {
+                        status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        message: "Unsupported Content-Type".to_string(),
+                    });
+                }
                 parse_json(req, state).await
             }
         }

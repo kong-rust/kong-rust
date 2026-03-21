@@ -176,6 +176,56 @@ _M.test_conf = {
     log_level        = "warn",
     -- plugins
     plugins          = "bundled",
+    -- loaded_plugins — 已加载的插件列表（用于 test_conf.loaded_plugins 查询）
+    loaded_plugins   = {
+        ["key-auth"] = true,
+        ["basic-auth"] = true,
+        ["rate-limiting"] = true,
+        ["cors"] = true,
+        ["tcp-log"] = true,
+        ["file-log"] = true,
+        ["http-log"] = true,
+        ["ip-restriction"] = true,
+        ["request-transformer"] = true,
+        ["response-transformer"] = true,
+        ["pre-function"] = true,
+        ["post-function"] = true,
+        ["acl"] = true,
+        ["bot-detection"] = true,
+        ["correlation-id"] = true,
+        ["jwt"] = true,
+        ["hmac-auth"] = true,
+        ["oauth2"] = true,
+        ["ldap-auth"] = true,
+        ["session"] = true,
+        ["request-size-limiting"] = true,
+        ["request-termination"] = true,
+        ["response-ratelimiting"] = true,
+        ["syslog"] = true,
+        ["loggly"] = true,
+        ["datadog"] = true,
+        ["udp-log"] = true,
+        ["statsd"] = true,
+        ["prometheus"] = true,
+    },
+}
+
+---------------------------------------------------------------------------
+-- db shim — 数据库对象兼容层（供 helpers.db.daos 使用）
+---------------------------------------------------------------------------
+_M.db = {
+    daos = {
+        services = true,
+        routes = true,
+        consumers = true,
+        plugins = true,
+        upstreams = true,
+        targets = true,
+        certificates = true,
+        snis = true,
+        ca_certificates = true,
+        vaults = true,
+    }
 }
 
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"

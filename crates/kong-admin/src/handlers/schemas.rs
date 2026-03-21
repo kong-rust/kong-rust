@@ -158,17 +158,96 @@ pub async fn get_plugin_schema(
     match kong_lua_bridge::loader::load_plugin_schema(&plugin_dirs, &name) {
         Ok(schema) => (StatusCode::OK, Json(schema)).into_response(),
         Err(err) => {
+            // Fix 5: Use Kong-compatible "No plugin named 'xxx'" format — 使用 Kong 兼容的错误消息格式
+            let message = if matches!(&err, kong_core::error::KongError::NotFound { .. }) {
+                format!("No plugin named '{}'", name)
+            } else {
+                err.to_string()
+            };
             let status = StatusCode::from_u16(err.status_code())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 status,
                 Json(json!({
-                    "message": err.to_string(),
+                    "message": message,
                     "name": err.error_name(),
                     "code": err.error_code(),
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+/// POST /schemas/plugins/validate — Validate a plugin schema definition — POST /schemas/plugins/validate — 验证插件 schema 定义
+pub async fn validate_plugin_schema(
+    State(state): State<AdminState>,
+    body: Option<axum::Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    let body = match body {
+        Some(axum::Json(v)) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation (name: required field missing)",
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {"name": "required field missing"},
+                })),
+            ).into_response();
+        }
+    };
+
+    // Validate plugin name is present — 验证插件 name 字段是否存在
+    let plugin_name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation (name: required field missing)",
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": {"name": "required field missing"},
+                })),
+            ).into_response();
+        }
+    };
+
+    // Check if plugin schema exists — 检查插件 schema 是否存在
+    let plugin_dirs = kong_lua_bridge::loader::resolve_plugin_dirs(&state.config.prefix);
+    match kong_lua_bridge::loader::load_plugin_schema(&plugin_dirs, &plugin_name) {
+        Ok(_schema) => {
+            // Plugin found and schema is valid — 插件已找到且 schema 有效
+            (
+                StatusCode::OK,
+                Json(json!({"message": "schema validation successful"})),
+            ).into_response()
+        }
+        Err(err) => {
+            if matches!(&err, kong_core::error::KongError::NotFound { .. }) {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": format!("No plugin named '{}'", plugin_name),
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {"name": format!("No plugin named '{}'", plugin_name)},
+                    })),
+                ).into_response()
+            } else {
+                let status = StatusCode::from_u16(err.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                (
+                    status,
+                    Json(json!({
+                        "message": err.to_string(),
+                        "name": err.error_name(),
+                        "code": err.error_code(),
+                    })),
+                ).into_response()
+            }
         }
     }
 }

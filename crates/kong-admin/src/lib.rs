@@ -101,16 +101,71 @@ async fn admin_latency_middleware(
     response
 }
 
-/// Issue 4: OPTIONS middleware — return 204 with CORS headers for OPTIONS requests (Kong-compatible)
-/// OPTIONS 中间件 — 对 OPTIONS 请求返回 204 并带 CORS 头（兼容 Kong）
+/// Check if a request path matches a known Admin API route pattern — 检查请求路径是否匹配已知的 Admin API 路由模式
+fn is_known_route(path: &str) -> bool {
+    // Static routes — 静态路由
+    let static_routes = [
+        "/", "/status", "/endpoints", "/plugins/enabled", "/plugins",
+        "/services", "/routes", "/consumers", "/upstreams",
+        "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
+    ];
+    if static_routes.contains(&path) {
+        return true;
+    }
+
+    // Dynamic route patterns: split path segments and match — 动态路由模式：按路径段匹配
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        // /entity/{id}
+        [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
+            | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags") => true,
+        // /schemas/{entity}
+        ["schemas", _] => true,
+        // /schemas/{entity}/validate or /schemas/plugins/validate
+        ["schemas", _, "validate"] => true,
+        // /services/{id}/routes, /services/{id}/plugins
+        ["services", _, sub] if matches!(*sub, "routes" | "plugins") => true,
+        // /services/{id}/plugins/{id}
+        ["services", _, "plugins", _] => true,
+        // /routes/{id}/plugins
+        ["routes", _, "plugins"] => true,
+        // /routes/{id}/plugins/{id}
+        ["routes", _, "plugins", _] => true,
+        // /consumers/{id}/plugins
+        ["consumers", _, "plugins"] => true,
+        // /consumers/{id}/plugins/{id}
+        ["consumers", _, "plugins", _] => true,
+        // /upstreams/{id}/targets
+        ["upstreams", _, "targets"] => true,
+        // /upstreams/{id}/targets/{id}
+        ["upstreams", _, "targets", _] => true,
+        _ => false,
+    }
+}
+
+/// Issue 4: OPTIONS middleware — return 204 for known routes, 404 for unknown (Kong-compatible)
+/// OPTIONS 中间件 — 已知路由返回 204，未知路由返回 404（兼容 Kong）
 async fn options_middleware(
     req: axum::extract::Request,
     next: middleware::Next,
 ) -> axum::response::Response {
     if req.method() == Method::OPTIONS {
+        let path = req.uri().path().to_string();
+
+        // Unknown routes return 404 — 未知路由返回 404
+        if !is_known_route(&path) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": "Not found",
+                    "name": "not found",
+                    "code": 3,
+                })),
+            ).into_response();
+        }
+
         // Read-only endpoints only support GET/HEAD — 只读端点只支持 GET/HEAD
-        let path = req.uri().path();
-        let allow = match path {
+        let allow = match path.as_str() {
             "/" | "/status" | "/endpoints" | "/plugins/enabled" => "GET, HEAD, OPTIONS",
             _ => "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
         };
@@ -137,6 +192,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/", get(root_info))
         .route("/status", get(status_info))
         .route("/endpoints", get(list_endpoints))
+        .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
         .route("/schemas/{entity_name}", get(get_entity_schema))
         .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))

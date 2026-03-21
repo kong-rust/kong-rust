@@ -101,14 +101,49 @@ pub struct ListParams {
 }
 
 impl ListParams {
+    /// Validate tags query parameter — 验证 tags 查询参数
+    /// Returns Err with 400 response if invalid — 无效时返回 400 错误响应
+    fn validate_tags(&self) -> Result<(), (StatusCode, Json<Value>)> {
+        if let Some(ref tags_str) = self.tags {
+            // Empty tag value — 空标签值
+            if tags_str.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "invalid filter syntax",
+                        "name": "invalid filter syntax",
+                        "code": 2,
+                    })),
+                ));
+            }
+            // Mixed AND (/) and OR (,) operators — 混合使用 AND (/) 和 OR (,) 操作符
+            if tags_str.contains('/') && tags_str.contains(',') {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "filter with both AND and OR is not allowed",
+                        "name": "invalid filter syntax",
+                        "code": 2,
+                    })),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn to_page_params(&self) -> PageParams {
+        let tags = self.tags.as_ref().map(|t| {
+            // Support both OR (comma) and AND (slash) separator — 支持 OR（逗号）和 AND（斜杠）分隔符
+            if t.contains('/') {
+                t.split('/').map(|s| s.trim().to_string()).collect()
+            } else {
+                t.split(',').map(|s| s.trim().to_string()).collect()
+            }
+        });
         PageParams {
             size: self.size.unwrap_or(100).min(1000),
             offset: self.offset.clone(),
-            tags: self
-                .tags
-                .as_ref()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect()),
+            tags,
         }
     }
 }
@@ -126,6 +161,35 @@ fn error_response(err: KongError) -> Response {
         "code": err.error_code(),
     });
     (status, Json(body)).into_response()
+}
+
+/// Enrich UNIQUE violation error message with actual field values from the request body
+/// 用请求体中的实际字段值丰富 UNIQUE 冲突错误消息
+fn enrich_unique_violation_message(err: &KongError, body: &Value) -> String {
+    let msg = err.to_string();
+    // Pattern: UNIQUE violation detected on '{field_name="..."}'
+    // Replace "..." with actual value from body — 用请求体中的实际值替换 "..."
+    if let KongError::UniqueViolation(_) = err {
+        if let Some(obj) = body.as_object() {
+            // Extract field name from the error message pattern {field="..."} — 从错误消息中提取字段名
+            // e.g. '{name="..."}' → field = "name"
+            if let Some(start) = msg.find('{') {
+                if let Some(eq_pos) = msg[start..].find('=') {
+                    let field_name = &msg[start + 1..start + eq_pos];
+                    if let Some(val) = obj.get(field_name) {
+                        let val_str = match val {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        return format!(
+                            "UNIQUE violation detected on '{{{field_name}=\"{val_str}\"}}'",
+                        );
+                    }
+                }
+            }
+        }
+    }
+    msg
 }
 
 // ============ Special endpoints — 特殊端点 ============
@@ -269,9 +333,46 @@ pub async fn list_enabled_plugins(State(state): State<AdminState>) -> impl IntoR
     }))
 }
 
+/// Query parameters for /status endpoint — /status 端点查询参数
+#[derive(Debug, Deserialize)]
+pub struct StatusParams {
+    /// Memory unit: "k" for KiB, "b" for raw bytes, default MiB — 内存单位："k" 为 KiB，"b" 为原始字节，默认 MiB
+    pub unit: Option<String>,
+    /// Decimal scale (default 2) — 小数位数（默认 2）
+    pub scale: Option<usize>,
+}
+
+/// Format a byte count into the requested unit/scale — 将字节数格式化为请求的单位/精度
+fn format_memory(bytes: u64, unit: Option<&str>, scale: usize) -> Value {
+    match unit {
+        Some("b") => json!(bytes),
+        Some("k") => {
+            let kib = bytes as f64 / 1024.0;
+            json!(format!("{:.prec$} KiB", kib, prec = scale))
+        }
+        _ => {
+            // Default: MiB — 默认 MiB
+            let mib = bytes as f64 / (1024.0 * 1024.0);
+            json!(format!("{:.prec$} MiB", mib, prec = scale))
+        }
+    }
+}
+
 /// GET /status — Service status — GET /status — 服务状态
-pub async fn status_info(State(state): State<AdminState>) -> impl IntoResponse {
+pub async fn status_info(
+    State(state): State<AdminState>,
+    Query(status_params): Query<StatusParams>,
+) -> impl IntoResponse {
     let is_dbless = state.config.database == "off";
+    let unit = status_params.unit.as_deref();
+    let scale = status_params.scale.unwrap_or(2);
+
+    // Simulated memory values in bytes (Kong-compatible) — 模拟内存值（字节，Kong 兼容）
+    let kong_capacity: u64 = 5242880;        // 5 MiB
+    let kong_alloc: u64 = 40960;             // 0.04 MiB
+    let db_cache_capacity: u64 = 134217728;  // 128 MiB
+    let db_cache_alloc: u64 = 81920;         // 0.08 MiB
+    let worker_gc: u64 = 1069056;            // ~1.02 MiB
 
     let mut body = json!({
         "server": {
@@ -286,16 +387,16 @@ pub async fn status_info(State(state): State<AdminState>) -> impl IntoResponse {
         "memory": {
             "lua_shared_dicts": {
                 "kong": {
-                    "allocated_slabs": 1048576,
-                    "capacity": 5242880,
+                    "allocated_slabs": format_memory(kong_alloc, unit, scale),
+                    "capacity": format_memory(kong_capacity, unit, scale),
                 },
                 "kong_db_cache": {
-                    "allocated_slabs": 1048576,
-                    "capacity": 134217728,
+                    "allocated_slabs": format_memory(db_cache_alloc, unit, scale),
+                    "capacity": format_memory(db_cache_capacity, unit, scale),
                 },
             },
             "workers_lua_vms": [{
-                "http_allocated_gc": "0 bytes",
+                "http_allocated_gc": format_memory(worker_gc, unit, scale),
                 "pid": std::process::id(),
             }],
         },
@@ -349,6 +450,7 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/schemas/{entity}",
         "/schemas/plugins/{name}",
         "/schemas/{entity}/validate",
+        "/schemas/plugins/validate",
         "/tags",
         "/tags/{tags}",
     ];
@@ -460,11 +562,27 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
 /// Always includes `next` (null when no more pages), only includes `offset` when present —
 /// 始终包含 `next`（无更多页时为 null），仅在存在时包含 `offset`
 fn build_page_response<T: Serialize>(page: &Page<T>) -> Value {
+    build_page_response_with_tags(page, None)
+}
+
+/// Build paginated response, optionally preserving tags filter in the next URL — 构建分页响应，可选在 next URL 中保留 tags 过滤参数
+fn build_page_response_with_tags<T: Serialize>(page: &Page<T>, tags: Option<&str>) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("data".to_string(), json!(page.data));
     // Always include next (null when no more pages) — 始终包含 next（无更多页时为 null）
     body.insert("next".to_string(), match &page.next {
-        Some(n) => json!(n),
+        Some(n) => {
+            // Append tags param to next URL if present — 如果有 tags 参数则追加到 next URL
+            if let Some(tags_str) = tags {
+                if !tags_str.is_empty() {
+                    json!(format!("{}&tags={}", n, tags_str))
+                } else {
+                    json!(n)
+                }
+            } else {
+                json!(n)
+            }
+        }
         None => Value::Null,
     });
     // Only include offset when present — 仅在存在时包含 offset
@@ -483,9 +601,14 @@ async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     params: &ListParams,
 ) -> (StatusCode, Json<Value>) {
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
     match dao.page(&params.to_page_params()).await {
         Ok(page) => {
-            (StatusCode::OK, Json(build_page_response(&page)))
+            let resp = build_page_response_with_tags(&page, params.tags.as_deref());
+            (StatusCode::OK, Json(resp))
         }
         Err(e) => {
             let status =
@@ -672,6 +795,13 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
+    // Generate cache_key for plugins — 为插件生成 cache_key
+    if T::table_name() == "plugins" {
+        if let Some(obj) = body.as_object_mut() {
+            generate_plugin_cache_key(obj);
+        }
+    }
+
     // Entity-specific validation before deserialization — 实体类型特定的前置验证
     if let Some(obj) = body.as_object() {
         // Issue 1: Service.host is required and must be non-empty — Service.host 必填且不能为空
@@ -722,6 +852,9 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
+    // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
+    let body_for_err = body.clone();
+
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -743,12 +876,13 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
             (StatusCode::CREATED, Json(body))
         }
         Err(e) => {
+            let message = enrich_unique_violation_message(&e, &body_for_err);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 status,
                 Json(json!({
-                    "message": e.to_string(),
+                    "message": message,
                     "name": e.error_name(),
                     "code": e.error_code(),
                 })),
@@ -768,19 +902,93 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Plugin name validation: if body contains "name", it must be a known plugin — 插件名称验证：如果 body 包含 "name"，必须是已知插件
+    if T::table_name() == "plugins" {
+        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
+            let valid_plugins = [
+                "key-auth", "basic-auth", "rate-limiting", "cors", "tcp-log", "file-log",
+                "http-log", "ip-restriction", "request-transformer", "response-transformer",
+                "pre-function", "post-function", "acl", "bot-detection", "correlation-id",
+                "jwt", "hmac-auth", "oauth2", "ldap-auth", "session", "request-size-limiting",
+                "request-termination", "response-ratelimiting", "syslog", "loggly", "datadog",
+                "udp-log", "statsd", "prometheus",
+            ];
+            if !valid_plugins.contains(&name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "code": 2,
+                        "name": "schema violation",
+                        "message": format!("schema violation (name: plugin '{}' not enabled; add it to the 'plugins' configuration property)", name),
+                        "fields": {"name": format!("plugin '{}' not enabled; add it to the 'plugins' configuration property", name)}
+                    })),
+                );
+            }
+        }
+    }
+
+    // PATCH merge: fetch existing entity and merge with request body — PATCH 合并：获取已有实体并与请求体合并
+    // For fields explicitly set to null in the request, keep them as null (clear the field) — 请求中显式设置为 null 的字段保留为 null（清除该字段）
+    // For fields not present in the request, keep existing values — 请求中不存在的字段保留已有值
     let pk = PrimaryKey::from_str_or_uuid(id_or_name);
-    match dao.update(&pk, &body).await {
+    let merged_body = match dao.select(&pk).await {
+        Ok(Some(existing)) => {
+            if let (Ok(mut existing_json), Some(patch_obj)) = (
+                serde_json::to_value(&existing),
+                body.as_object(),
+            ) {
+                if let Some(existing_obj) = existing_json.as_object_mut() {
+                    for (key, value) in patch_obj {
+                        // Deep merge for nested objects (e.g., plugin config) — 嵌套对象深度合并（如插件 config）
+                        if key == "config" || key == "headers" {
+                            if let (Some(existing_sub), Some(patch_sub)) = (
+                                existing_obj.get(key).and_then(|v| v.as_object()).cloned(),
+                                value.as_object(),
+                            ) {
+                                let mut merged = existing_sub;
+                                for (sk, sv) in patch_sub {
+                                    merged.insert(sk.clone(), sv.clone());
+                                }
+                                existing_obj.insert(key.clone(), json!(merged));
+                                continue;
+                            }
+                        }
+                        // 显式设置的字段（包括 null）覆盖已有值
+                        existing_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                existing_json
+            } else {
+                body
+            }
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": format!("{} not found", T::table_name()),
+                    "name": "not found",
+                    "code": 3,
+                })),
+            );
+        }
+        Err(_) => body,
+    };
+
+    match dao.update(&pk, &merged_body).await {
         Ok(updated) => {
             let body = serde_json::to_value(&updated).unwrap_or(json!(null));
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
+            let message = enrich_unique_violation_message(&e, &merged_body);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 status,
                 Json(json!({
-                    "message": e.to_string(),
+                    "message": message,
                     "name": e.error_name(),
                     "code": e.error_code(),
                 })),
@@ -836,6 +1044,9 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
+    // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
+    let body_for_err = body.clone();
+
     let entity: T = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -858,12 +1069,13 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
+            let message = enrich_unique_violation_message(&e, &body_for_err);
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 status,
                 Json(json!({
-                    "message": e.to_string(),
+                    "message": message,
                     "name": e.error_name(),
                     "code": e.error_code(),
                 })),
@@ -1175,7 +1387,36 @@ async fn create_scoped_plugin(
     }
 
     obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
+
+    // Generate cache_key for plugin uniqueness — 生成 cache_key 用于插件唯一性检查
+    generate_plugin_cache_key(obj);
+
     do_create::<Plugin>(&state.plugins, body).await
+}
+
+/// Generate plugin cache_key from (name, route_id, service_id, consumer_id) — 从 (name, route_id, service_id, consumer_id) 生成插件 cache_key
+fn generate_plugin_cache_key(obj: &mut serde_json::Map<String, Value>) {
+    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let route_id = obj
+        .get("route")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let service_id = obj
+        .get("service")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let consumer_id = obj
+        .get("consumer")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cache_key = format!("{}:{}:{}:{}:", name, route_id, service_id, consumer_id);
+    obj.insert("cache_key".to_string(), json!(cache_key));
 }
 
 fn plugin_scope_matches(plugin: &Plugin, scope_field: &str, scope_id: uuid::Uuid) -> bool {
