@@ -36,9 +36,9 @@ end
 local function encode_args(args)
     local parts = {}
     for k, v in pairs(args) do
-        -- skip cjson.null values (cannot represent null in form encoding) — 跳过 cjson.null 值
+        -- cjson.null values → encode as key= (empty value) so server receives empty string — cjson.null 值 → 编码为 key=（空值）以便服务端收到空字符串
         if v == cjson_null then
-            -- skip null values — 跳过 null 值
+            parts[#parts + 1] = url_mod.escape(tostring(k)) .. "="
         elseif type(v) == "table" then
             -- multi-value: key=v1&key=v2 — 多值
             for _, item in ipairs(v) do

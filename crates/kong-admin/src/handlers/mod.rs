@@ -604,6 +604,7 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/acls",
         "/acls/{acls}",
         "/consumers/{consumers}/acls",
+        "/reports/send-ping",
     ];
 
     Json(json!({ "data": endpoints }))
@@ -1060,10 +1061,36 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
-    // Generate cache_key for plugins — 为插件生成 cache_key
+    // Generate cache_key and apply config defaults for plugins — 为插件生成 cache_key 并填充默认 config
     if T::table_name() == "plugins" {
         if let Some(obj) = body.as_object_mut() {
             generate_plugin_cache_key(obj);
+
+            // Apply plugin config defaults — 填充插件 config 默认值
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                // Validate plugin name — 验证插件名称
+                if !is_valid_plugin_name(&name) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": format!("schema violation (plugin '{}' not enabled; add it to the 'plugins' configuration property)", name),
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "name": format!("plugin '{}' not enabled; add it to the 'plugins' configuration property", name)
+                            },
+                        })),
+                    );
+                }
+
+                // Ensure config object exists — 确保 config 对象存在
+                if !obj.contains_key("config") || obj.get("config").map_or(false, |v| v.is_null()) {
+                    obj.insert("config".to_string(), json!({}));
+                }
+                if let Some(config) = obj.get_mut("config").and_then(|v| v.as_object_mut()) {
+                    apply_plugin_config_defaults(&name, config);
+                }
+            }
         }
     }
 
@@ -1357,10 +1384,10 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
         }
     }
 
-    // Plugin name validation — 插件名称验证
+    // Plugin name validation and config defaults — 插件名称验证与 config 默认值
     if T::table_name() == "plugins" {
-        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
-            if !is_valid_plugin_name(name) {
+        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            if !is_valid_plugin_name(&name) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
@@ -1372,6 +1399,15 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         },
                     })),
                 );
+            }
+            // Apply config defaults for upsert — upsert 时填充 config 默认值
+            if let Some(obj) = body.as_object_mut() {
+                if !obj.contains_key("config") || obj.get("config").map_or(false, |v| v.is_null()) {
+                    obj.insert("config".to_string(), json!({}));
+                }
+                if let Some(config) = obj.get_mut("config").and_then(|v| v.as_object_mut()) {
+                    apply_plugin_config_defaults(&name, config);
+                }
             }
         }
         // Validate config type — 验证 config 字段类型
@@ -1820,6 +1856,164 @@ async fn create_scoped_plugin(
     generate_plugin_cache_key(obj);
 
     do_create::<Plugin>(&state.plugins, body).await
+}
+
+/// Apply default config values for known plugins — 为已知插件填充默认 config 值
+///
+/// When a plugin is created, if the config doesn't contain expected default fields,
+/// fill them in based on the plugin's schema definition. — 创建插件时，如果 config 不含预期默认字段，根据插件 schema 定义填充。
+fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String, Value>) {
+    match name {
+        "key-auth" => {
+            config.entry("key_names".to_string()).or_insert_with(|| json!(["apikey"]));
+            config.entry("key_in_body".to_string()).or_insert(json!(false));
+            config.entry("key_in_header".to_string()).or_insert(json!(true));
+            config.entry("key_in_query".to_string()).or_insert(json!(true));
+            config.entry("hide_credentials".to_string()).or_insert(json!(false));
+            config.entry("run_on_preflight".to_string()).or_insert(json!(true));
+        }
+        "basic-auth" => {
+            config.entry("hide_credentials".to_string()).or_insert(json!(false));
+        }
+        "rate-limiting" => {
+            config.entry("second".to_string()).or_insert(Value::Null);
+            config.entry("minute".to_string()).or_insert(Value::Null);
+            config.entry("hour".to_string()).or_insert(Value::Null);
+            config.entry("day".to_string()).or_insert(Value::Null);
+            config.entry("month".to_string()).or_insert(Value::Null);
+            config.entry("year".to_string()).or_insert(Value::Null);
+            config.entry("limit_by".to_string()).or_insert(json!("consumer"));
+            config.entry("policy".to_string()).or_insert(json!("local"));
+            config.entry("fault_tolerant".to_string()).or_insert(json!(true));
+            config.entry("hide_client_headers".to_string()).or_insert(json!(false));
+            config.entry("redis_host".to_string()).or_insert(Value::Null);
+            config.entry("redis_port".to_string()).or_insert(json!(6379));
+            config.entry("redis_password".to_string()).or_insert(Value::Null);
+            config.entry("redis_timeout".to_string()).or_insert(json!(2000));
+            config.entry("redis_database".to_string()).or_insert(json!(0));
+            config.entry("header_name".to_string()).or_insert(Value::Null);
+            config.entry("path".to_string()).or_insert(Value::Null);
+            config.entry("redis_ssl".to_string()).or_insert(json!(false));
+            config.entry("redis_ssl_verify".to_string()).or_insert(json!(false));
+            config.entry("redis_server_name".to_string()).or_insert(Value::Null);
+            config.entry("error_code".to_string()).or_insert(json!(429));
+            config.entry("error_message".to_string()).or_insert(json!("API rate limit exceeded"));
+            config.entry("sync_rate".to_string()).or_insert(json!(-1));
+        }
+        "cors" => {
+            config.entry("origins".to_string()).or_insert(Value::Null);
+            config.entry("methods".to_string()).or_insert_with(|| json!(["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS", "TRACE", "CONNECT"]));
+            config.entry("headers".to_string()).or_insert(Value::Null);
+            config.entry("exposed_headers".to_string()).or_insert(Value::Null);
+            config.entry("credentials".to_string()).or_insert(json!(false));
+            config.entry("max_age".to_string()).or_insert(Value::Null);
+            config.entry("preflight_continue".to_string()).or_insert(json!(false));
+            config.entry("private_network".to_string()).or_insert(json!(false));
+        }
+        "request-transformer" => {
+            let _empty_record = || json!({"remove": [], "rename": [], "replace": [], "add": [], "append": []});
+            config.entry("http_method".to_string()).or_insert(Value::Null);
+            config.entry("remove".to_string()).or_insert_with(|| json!({"headers": [], "querystring": [], "body": []}));
+            config.entry("rename".to_string()).or_insert_with(|| json!({"headers": [], "querystring": [], "body": []}));
+            config.entry("replace".to_string()).or_insert_with(|| json!({"headers": [], "querystring": [], "body": [], "uri": null}));
+            config.entry("add".to_string()).or_insert_with(|| json!({"headers": [], "querystring": [], "body": []}));
+            config.entry("append".to_string()).or_insert_with(|| json!({"headers": [], "querystring": [], "body": []}));
+        }
+        "tcp-log" => {
+            config.entry("host".to_string()).or_insert(Value::Null);
+            config.entry("port".to_string()).or_insert(Value::Null);
+            config.entry("timeout".to_string()).or_insert(json!(10000));
+            config.entry("keepalive".to_string()).or_insert(json!(60000));
+            config.entry("tls".to_string()).or_insert(json!(false));
+            config.entry("tls_sni".to_string()).or_insert(Value::Null);
+        }
+        "udp-log" => {
+            config.entry("host".to_string()).or_insert(Value::Null);
+            config.entry("port".to_string()).or_insert(Value::Null);
+            config.entry("timeout".to_string()).or_insert(json!(10000));
+        }
+        "http-log" => {
+            config.entry("http_endpoint".to_string()).or_insert(Value::Null);
+            config.entry("method".to_string()).or_insert(json!("POST"));
+            config.entry("content_type".to_string()).or_insert(json!("application/json"));
+            config.entry("timeout".to_string()).or_insert(json!(10000));
+            config.entry("keepalive".to_string()).or_insert(json!(60000));
+            config.entry("flush_timeout".to_string()).or_insert(json!(2));
+            config.entry("retry_count".to_string()).or_insert(json!(10));
+            config.entry("queue_size".to_string()).or_insert(json!(1));
+        }
+        "file-log" => {
+            config.entry("path".to_string()).or_insert(Value::Null);
+            config.entry("reopen".to_string()).or_insert(json!(false));
+        }
+        "ip-restriction" => {
+            config.entry("allow".to_string()).or_insert(Value::Null);
+            config.entry("deny".to_string()).or_insert(Value::Null);
+            config.entry("status".to_string()).or_insert(Value::Null);
+            config.entry("message".to_string()).or_insert(Value::Null);
+        }
+        "acl" => {
+            config.entry("allow".to_string()).or_insert(Value::Null);
+            config.entry("deny".to_string()).or_insert(Value::Null);
+            config.entry("hide_groups_header".to_string()).or_insert(json!(false));
+        }
+        "hmac-auth" => {
+            config.entry("hide_credentials".to_string()).or_insert(json!(false));
+            config.entry("clock_skew".to_string()).or_insert(json!(300));
+            config.entry("algorithms".to_string()).or_insert_with(|| json!(["hmac-sha1", "hmac-sha256", "hmac-sha384", "hmac-sha512"]));
+            config.entry("enforce_headers".to_string()).or_insert_with(|| json!([]));
+            config.entry("validate_request_body".to_string()).or_insert(json!(false));
+        }
+        "jwt" => {
+            config.entry("uri_param_names".to_string()).or_insert_with(|| json!(["jwt"]));
+            config.entry("cookie_names".to_string()).or_insert_with(|| json!([]));
+            config.entry("header_names".to_string()).or_insert_with(|| json!(["authorization"]));
+            config.entry("key_claim_name".to_string()).or_insert(json!("iss"));
+            config.entry("secret_is_base64".to_string()).or_insert(json!(false));
+            config.entry("claims_to_verify".to_string()).or_insert(Value::Null);
+            config.entry("anonymous".to_string()).or_insert(Value::Null);
+            config.entry("run_on_preflight".to_string()).or_insert(json!(true));
+            config.entry("maximum_expiration".to_string()).or_insert(json!(0));
+        }
+        "response-transformer" => {
+            config.entry("remove".to_string()).or_insert_with(|| json!({"headers": [], "json": []}));
+            config.entry("rename".to_string()).or_insert_with(|| json!({"headers": []}));
+            config.entry("replace".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
+            config.entry("add".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
+            config.entry("append".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
+        }
+        "request-size-limiting" => {
+            config.entry("allowed_payload_size".to_string()).or_insert(json!(128));
+            config.entry("size_unit".to_string()).or_insert(json!("megabytes"));
+            config.entry("require_content_length".to_string()).or_insert(json!(false));
+        }
+        "request-termination" => {
+            config.entry("status_code".to_string()).or_insert(json!(503));
+            config.entry("message".to_string()).or_insert(Value::Null);
+            config.entry("body".to_string()).or_insert(Value::Null);
+            config.entry("content_type".to_string()).or_insert(Value::Null);
+            config.entry("trigger".to_string()).or_insert(Value::Null);
+            config.entry("echo".to_string()).or_insert(json!(false));
+        }
+        "bot-detection" => {
+            config.entry("allow".to_string()).or_insert_with(|| json!([]));
+            config.entry("deny".to_string()).or_insert_with(|| json!([]));
+        }
+        "correlation-id" => {
+            config.entry("header_name".to_string()).or_insert(json!("Kong-Request-ID"));
+            config.entry("generator".to_string()).or_insert(json!("uuid#counter"));
+            config.entry("echo_downstream".to_string()).or_insert(json!(false));
+        }
+        "prometheus" => {
+            config.entry("per_consumer".to_string()).or_insert(json!(false));
+            config.entry("status_code_metrics".to_string()).or_insert(json!(false));
+            config.entry("latency_metrics".to_string()).or_insert(json!(false));
+            config.entry("bandwidth_metrics".to_string()).or_insert(json!(false));
+            config.entry("upstream_health_metrics".to_string()).or_insert(json!(false));
+        }
+        // Other plugins: leave config as-is — 其他插件：保持 config 不变
+        _ => {}
+    }
 }
 
 /// Check if a plugin name is valid (in bundled list or known test plugins) — 检查插件名称是否有效（在内置列表或测试插件中）
@@ -2758,7 +2952,21 @@ pub async fn list_all_tags(State(state): State<AdminState>) -> impl IntoResponse
 pub async fn list_by_tag(
     State(state): State<AdminState>,
     Path(tag): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    // Validate tag value: reject control characters (including null bytes) — 验证标签值：拒绝控制字符（包括空字节）
+    for ch in tag.chars() {
+        if ch.is_control() || ch == '\0' {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": format!("invalid tag value: '{}' - tags must not contain control characters", tag.replace('\0', "\\0")),
+                    "name": "invalid tag",
+                    "code": 2,
+                })),
+            ).into_response();
+        }
+    }
+
     let mut results = Vec::new();
     let tag_ref = tag.as_str();
 
@@ -2777,5 +2985,5 @@ pub async fn list_by_tag(
         "data": results,
         "offset": null,
         "next": null,
-    }))
+    })).into_response()
 }

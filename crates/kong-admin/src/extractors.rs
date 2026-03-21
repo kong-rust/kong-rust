@@ -100,9 +100,23 @@ async fn parse_json<S: Send + Sync>(
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    if content_length == Some(0) {
-        // Empty body → treat as empty JSON object so validation logic can run — 空请求体 → 当作空 JSON 对象以便验证逻辑可以执行
-        return Ok(FlexibleBody(Value::Object(serde_json::Map::new())));
+    if content_length == Some(0) || content_length.is_none() {
+        // Empty body or no Content-Length → try parsing, fall back to empty JSON object — 空请求体或无 Content-Length → 尝试解析，失败则当作空 JSON 对象
+        // Read body bytes first to check if actually empty — 先读取请求体字节检查是否真的为空
+        let body_bytes = Bytes::from_request(req, state)
+            .await
+            .unwrap_or_default();
+        if body_bytes.is_empty() {
+            return Ok(FlexibleBody(Value::Object(serde_json::Map::new())));
+        }
+        // Non-empty body without Content-Length: try parsing as JSON — 有内容但无 Content-Length：尝试按 JSON 解析
+        match serde_json::from_slice::<Value>(&body_bytes) {
+            Ok(value) => return Ok(FlexibleBody(value)),
+            Err(_) => return Err(FlexibleBodyRejection {
+                status: StatusCode::BAD_REQUEST,
+                message: "Cannot parse JSON body".to_string(),
+            }),
+        }
     }
     match Json::<Value>::from_request(req, state).await {
         Ok(Json(value)) => Ok(FlexibleBody(value)),

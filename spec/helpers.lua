@@ -361,6 +361,9 @@ end
 function _M.start_kong(conf)
     conf = conf or {}
 
+    -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
+    _M.stop_kong()
+
     local env_str, env = build_env_str(conf)
 
     if env.KONG_DATABASE ~= "off" then
