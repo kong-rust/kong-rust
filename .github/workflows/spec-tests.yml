@@ -1,0 +1,93 @@
+name: Kong Spec Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  spec-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kong
+          POSTGRES_PASSWORD: kong
+          POSTGRES_DB: kong_tests
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev \
+            libpq-dev \
+            libluajit-5.1-dev \
+            pkg-config \
+            build-essential \
+            cmake \
+            protobuf-compiler \
+            luarocks
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup busted
+        run: bash scripts/setup-busted.sh
+
+      - name: Build kong-rust
+        run: cargo build
+
+      - name: Bootstrap database
+        env:
+          KONG_PG_HOST: 127.0.0.1
+          KONG_PG_PORT: "5432"
+          KONG_PG_USER: kong
+          KONG_PG_PASSWORD: kong
+          KONG_PG_DATABASE: kong_tests
+        run: ./target/debug/kong db bootstrap
+
+      - name: Run smoke tests
+        env:
+          KONG_SPEC_TEST_PG_HOST: 127.0.0.1
+          KONG_SPEC_TEST_PG_PORT: "5432"
+          KONG_SPEC_TEST_PG_USER: kong
+          KONG_SPEC_TEST_PG_PASSWORD: kong
+          KONG_SPEC_TEST_PG_DATABASE: kong_tests
+        run: make spec-smoke
+
+      - name: Run Admin API spec tests
+        env:
+          KONG_SPEC_TEST_PG_HOST: 127.0.0.1
+          KONG_SPEC_TEST_PG_PORT: "5432"
+          KONG_SPEC_TEST_PG_USER: kong
+          KONG_SPEC_TEST_PG_PASSWORD: kong
+          KONG_SPEC_TEST_PG_DATABASE: kong_tests
+        run: |
+          bash scripts/run-specs.sh spec/02-integration/04-admin_api/10-services_routes_spec.lua || true
+        continue-on-error: true

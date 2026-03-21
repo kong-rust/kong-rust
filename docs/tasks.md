@@ -187,8 +187,11 @@
   - 文件：`crates/kong-proxy/tests/`, `scripts/run-cargo-test.sh`
 
 - [-] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
-  - Phase 0 Step 1 完成：busted CLI + spec.helpers shim + luasocket HTTP 客户端 + Blueprint (Admin API) + 烟雾测试通过
-  - 待完成：02-integration spec 对齐、03-plugins 核心插件 spec
+  - Phase 0 Step 1-3 完成：busted CLI + spec.helpers (1600+行) + mock upstream + 断言系统
+  - Phase 0 Task 4 进行中：Admin API spec 对齐（services_routes 44/75 通过）
+  - 已创建：Kong Lua shim 模块、FlexibleBody 提取器（多 Content-Type 支持）、ngx 全局 shim
+  - 已复制：31 个 Kong 官方 spec 文件（admin_api 11、proxy 8、db 3、status 5、dbless 4）
+  - 详见：`docs/implementation-logs/phase0-test-alignment.md`
 
 ### 8c：L4 Stream 代理
 
