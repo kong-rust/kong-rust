@@ -51,7 +51,7 @@ where
         match content_type.as_deref() {
             // JSON content type — JSON 类型
             Some(ct) if ct.contains("application/json") => {
-                parse_json(req, state).await
+                parse_json(req, state, true).await
             }
             // Form-urlencoded content type — 表单编码类型
             Some(ct) if ct.contains("application/x-www-form-urlencoded") => {
@@ -83,43 +83,43 @@ where
                         message: "Unsupported Content-Type".to_string(),
                     });
                 }
-                parse_json(req, state).await
+                parse_json(req, state, false).await
             }
         }
     }
 }
 
 /// Parse request body as JSON — 按 JSON 解析请求体
+///
+/// `explicit_json_ct`: true if Content-Type was explicitly set to application/json.
+/// When true, empty body returns 400 "Cannot parse JSON body".
+/// When false (no Content-Type), empty body returns empty JSON object `{}`.
+/// explicit_json_ct: 当 Content-Type 明确为 application/json 时为 true，空请求体返回 400；否则返回空 JSON 对象。
 async fn parse_json<S: Send + Sync>(
     req: Request,
     state: &S,
+    explicit_json_ct: bool,
 ) -> Result<FlexibleBody, FlexibleBodyRejection> {
-    // Check content length: if body is empty, return empty JSON object — 检查 content-length：空请求体返回空 JSON 对象
-    let content_length = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    if content_length == Some(0) || content_length.is_none() {
-        // Empty body or no Content-Length → try parsing, fall back to empty JSON object — 空请求体或无 Content-Length → 尝试解析，失败则当作空 JSON 对象
-        // Read body bytes first to check if actually empty — 先读取请求体字节检查是否真的为空
-        let body_bytes = Bytes::from_request(req, state)
-            .await
-            .unwrap_or_default();
-        if body_bytes.is_empty() {
-            return Ok(FlexibleBody(Value::Object(serde_json::Map::new())));
-        }
-        // Non-empty body without Content-Length: try parsing as JSON — 有内容但无 Content-Length：尝试按 JSON 解析
-        match serde_json::from_slice::<Value>(&body_bytes) {
-            Ok(value) => return Ok(FlexibleBody(value)),
-            Err(_) => return Err(FlexibleBodyRejection {
+    // Always read body bytes — 总是读取请求体字节
+    let body_bytes = Bytes::from_request(req, state)
+        .await
+        .unwrap_or_default();
+
+    if body_bytes.is_empty() {
+        if explicit_json_ct {
+            // Explicit JSON content-type with empty body → error — 明确 JSON content-type 加空请求体 → 错误
+            return Err(FlexibleBodyRejection {
                 status: StatusCode::BAD_REQUEST,
                 message: "Cannot parse JSON body".to_string(),
-            }),
+            });
         }
+        // No Content-Type with empty body → empty JSON object — 无 Content-Type 加空请求体 → 空 JSON 对象
+        return Ok(FlexibleBody(Value::Object(serde_json::Map::new())));
     }
-    match Json::<Value>::from_request(req, state).await {
-        Ok(Json(value)) => Ok(FlexibleBody(value)),
+
+    // Try parsing as JSON — 尝试按 JSON 解析
+    match serde_json::from_slice::<Value>(&body_bytes) {
+        Ok(value) => Ok(FlexibleBody(value)),
         Err(_) => Err(FlexibleBodyRejection {
             status: StatusCode::BAD_REQUEST,
             message: "Cannot parse JSON body".to_string(),
@@ -275,7 +275,14 @@ fn normalize_form_key(raw: &str) -> (String, Option<usize>) {
 }
 
 /// Try to parse string as number or boolean, otherwise keep as string — 尝试将字符串解析为数字或布尔值，否则保持为字符串
+///
+/// Empty strings are converted to null (form-urlencoded cannot represent null directly,
+/// so `key=` with empty value means null). — 空字符串转为 null（表单编码无法直接表示 null，`key=` 空值即 null）
 fn smart_parse_value(s: &str) -> Value {
+    // Empty string → null (form-urlencoded null representation) — 空字符串 → null（表单编码的 null 表示）
+    if s.is_empty() {
+        return Value::Null;
+    }
     // Try integer first — 优先尝试整数
     if let Ok(n) = s.parse::<i64>() {
         return Value::Number(n.into());

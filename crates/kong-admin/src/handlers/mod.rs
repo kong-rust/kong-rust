@@ -1865,7 +1865,7 @@ async fn create_scoped_plugin(
 fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String, Value>) {
     match name {
         "key-auth" => {
-            config.entry("key_names".to_string()).or_insert_with(|| json!(["apikey"]));
+            config.entry("key_names".to_string()).or_insert_with(|| json!(["apikey", "key"]));
             config.entry("key_in_body".to_string()).or_insert(json!(false));
             config.entry("key_in_header".to_string()).or_insert(json!(true));
             config.entry("key_in_query".to_string()).or_insert(json!(true));
