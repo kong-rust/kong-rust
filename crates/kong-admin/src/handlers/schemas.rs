@@ -222,6 +222,7 @@ fn minimal_plugin_schema(name: &str) -> serde_json::Value {
             {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp", "ws", "wss"]}, "default": ["grpc", "grpcs", "http", "https"]}},
             {"config": {"type": "record", "required": true, "fields": config_fields}},
         ],
+        "entity_checks": [],
         "name": name,
     })
 }

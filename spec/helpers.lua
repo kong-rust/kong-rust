@@ -364,6 +364,9 @@ function _M.start_kong(conf)
     -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
     _M.stop_kong()
 
+    -- Wait for port to be released — 等待端口释放
+    socket.sleep(1)
+
     local env_str, env = build_env_str(conf)
 
     if env.KONG_DATABASE ~= "off" then

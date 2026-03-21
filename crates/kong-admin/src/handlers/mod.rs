@@ -1212,6 +1212,32 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Err(e) => return e,
     };
 
+    // Plugin unknown field validation on PATCH — PATCH 时验证插件未知字段
+    if T::table_name() == "plugins" {
+        let known_fields = [
+            "id", "name", "enabled", "config", "service", "route", "consumer",
+            "protocols", "tags", "instance_name", "ordering",
+            "created_at", "updated_at", "cache_key", "ws_id",
+        ];
+        if let Some(obj) = body.as_object() {
+            for key in obj.keys() {
+                if !known_fields.contains(&key.as_str()) {
+                    let mut fields_map = serde_json::Map::new();
+                    fields_map.insert(key.clone(), json!("unknown field"));
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "code": 2,
+                            "name": "schema violation",
+                            "message": format!("schema violation ({}: unknown field)", key),
+                            "fields": fields_map,
+                        })),
+                    );
+                }
+            }
+        }
+    }
+
     // Plugin name validation on PATCH — PATCH 时验证插件名称
     if T::table_name() == "plugins" {
         if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
