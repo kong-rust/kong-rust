@@ -327,7 +327,13 @@ local function build_env_str(conf)
     env.KONG_PG_HOST = conf.pg_host or _M.test_conf.pg_host
     env.KONG_PG_PORT = tostring(conf.pg_port or _M.test_conf.pg_port)
     env.KONG_PG_USER = conf.pg_user or _M.test_conf.pg_user
-    env.KONG_PG_PASSWORD = conf.pg_password or _M.test_conf.pg_password
+    -- Always use test_conf pg_password for actual DB connection — 始终使用 test_conf 的密码连接数据库
+    -- conf.pg_password (e.g. "hide_me") is only for configuration display testing — conf.pg_password 仅用于配置展示测试
+    env.KONG_PG_PASSWORD = _M.test_conf.pg_password
+    -- Store display password separately if different — 存储展示用密码（如 "hide_me"）
+    if conf.pg_password and conf.pg_password ~= _M.test_conf.pg_password then
+        env.KONG_PG_PASSWORD_DISPLAY = conf.pg_password
+    end
     env.KONG_PG_DATABASE = conf.pg_database or _M.test_conf.pg_database
     env.KONG_PROXY_LISTEN = conf.proxy_listen
         or string.format("0.0.0.0:%d", _M.test_conf.proxy_port)
@@ -364,8 +370,25 @@ function _M.start_kong(conf)
     -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
     _M.stop_kong()
 
-    -- Wait for port to be released — 等待端口释放
-    socket.sleep(1)
+    -- Kill any orphaned kong processes not tracked by PID file — 清理所有未被 PID 文件跟踪的残留 kong 进程
+    os.execute("pkill -f 'target/debug/kong' 2>/dev/null || true")
+
+    -- Wait for ALL kong ports to be released — 等待所有 kong 端口释放
+    local ports_to_check = {
+        _M.test_conf.admin_port,      -- 8001
+        _M.test_conf.proxy_port,      -- 8000
+        8007,                          -- status API port
+    }
+    _M.wait_until(function()
+        for _, port in ipairs(ports_to_check) do
+            local s = socket.tcp()
+            local ok = s:connect("127.0.0.1", port)
+            s:close()
+            if ok then return false end
+        end
+        return true
+    end, 10)
+    socket.sleep(0.5)
 
     local env_str, env = build_env_str(conf)
 

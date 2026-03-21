@@ -527,14 +527,16 @@ pub async fn status_info(
         },
     });
 
-    if is_dbless {
-        // In dbless mode, include configuration_hash from shared state — dbless 模式下从共享状态获取 configuration_hash
-        let hash = state.configuration_hash.read()
-            .map(|h| h.clone())
-            .unwrap_or_else(|_| "00000000000000000000000000000000".to_string());
+    // Include configuration_hash if set (dbless mode or after POST /config) — 如果已设置则包含 configuration_hash
+    let hash = state.configuration_hash.read()
+        .map(|h| h.clone())
+        .unwrap_or_default();
+    if !hash.is_empty() {
         body["configuration_hash"] = json!(hash);
-    } else {
-        // In DB mode, include database reachable status (no configuration_hash) — DB 模式下包含数据库可达状态（不含 configuration_hash）
+    }
+
+    if !is_dbless {
+        // In DB mode, include database reachable status — DB 模式下包含数据库可达状态
         body["database"] = json!({ "reachable": true });
     }
 
@@ -549,14 +551,8 @@ pub async fn post_config(
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    if !state.config.is_dbless() {
-        return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            Json(json!({
-                "message": "this endpoint is only available when Kong is in DB-less mode",
-            })),
-        ).into_response();
-    }
+    // Accept POST /config in all modes — in DB mode it just updates the hash without loading config
+    // 在所有模式下接受 POST /config — DB 模式下只更新哈希，不加载配置
 
     // Compute hash of the config body using DefaultHasher — 使用 DefaultHasher 计算配置内容的哈希
     let mut hasher = DefaultHasher::new();
