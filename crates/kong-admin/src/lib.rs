@@ -87,6 +87,20 @@ pub async fn run_cache_refresher(
     }
 }
 
+/// Admin latency middleware — inject X-Kong-Admin-Latency header into responses — 注入 X-Kong-Admin-Latency 响应头
+async fn admin_latency_middleware(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let start = std::time::Instant::now();
+    let mut response = next.run(req).await;
+    let latency_ms = start.elapsed().as_millis();
+    if let Ok(val) = axum::http::HeaderValue::from_str(&latency_ms.to_string()) {
+        response.headers_mut().insert("X-Kong-Admin-Latency", val);
+    }
+    response
+}
+
 /// Issue 4: OPTIONS middleware — return 204 with CORS headers for OPTIONS requests (Kong-compatible)
 /// OPTIONS 中间件 — 对 OPTIONS 请求返回 204 并带 CORS 头（兼容 Kong）
 async fn options_middleware(
@@ -119,6 +133,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/", get(root_info))
         .route("/status", get(status_info))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
+        .route("/schemas/{entity_name}", get(get_entity_schema))
         // Tags — 标签 API
         .route("/tags", get(list_all_tags))
         .route("/tags/{tag}", get(list_by_tag))
@@ -266,6 +281,8 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .method_not_allowed_fallback(method_not_allowed_handler)
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
         .layer(middleware::from_fn(options_middleware))
+        // Admin latency header — Admin 延迟响应头
+        .layer(middleware::from_fn(admin_latency_middleware))
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::mirror_request())

@@ -456,9 +456,11 @@ function Blueprint:new(admin_client)
     standard_defaults.consumers = function(overrides)
         overrides = overrides or {}
         local n = next_seq()
+        -- Add random suffix to avoid unique constraint violations across test runs — 添加随机后缀避免跨测试运行的唯一约束冲突
+        local rand_suffix = math.random(100000, 999999)
         return {
-            custom_id = overrides.custom_id or ("consumer-cid-" .. n),
-            username = overrides.username or ("consumer-" .. n),
+            custom_id = overrides.custom_id or ("consumer-cid-" .. n .. "-" .. rand_suffix),
+            username = overrides.username or ("consumer-" .. n .. "-" .. rand_suffix),
             tags = overrides.tags,
         }
     end

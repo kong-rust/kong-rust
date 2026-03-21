@@ -278,8 +278,20 @@ pub async fn status_info(State(_state): State<AdminState>) -> impl IntoResponse 
             "reachable": true,
         },
         "memory": {
-            "lua_shared_dicts": {},
-            "workers_lua_vms": [],
+            "lua_shared_dicts": {
+                "kong": {
+                    "allocated_slabs": 1048576,
+                    "capacity": 5242880,
+                },
+                "kong_db_cache": {
+                    "allocated_slabs": 1048576,
+                    "capacity": 134217728,
+                },
+            },
+            "workers_lua_vms": [{
+                "http_allocated_gc": "0 bytes",
+                "pid": std::process::id(),
+            }],
         },
         "configuration_hash": "00000000000000000000000000000000",
     }))
@@ -412,6 +424,7 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                             "message": "schema violation (url: missing host in url)",
                             "name": "schema violation",
                             "code": 2,
+                            "fields": {"url": "missing host in url"},
                         })),
                     ));
                 }
@@ -421,6 +434,7 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                         "message": "schema violation (url: missing host in url)",
                         "name": "schema violation",
                         "code": 2,
+                        "fields": {"url": "missing host in url"},
                     })),
                 ))?;
                 if parsed.host_str().map_or(true, |h| h.is_empty()) {
@@ -430,6 +444,7 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                             "message": "schema violation (url: missing host in url)",
                             "name": "schema violation",
                             "code": 2,
+                            "fields": {"url": "missing host in url"},
                         })),
                     ));
                 }
@@ -490,6 +505,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                             "message": "schema violation (url: missing host in url)",
                             "name": "schema violation",
                             "code": 2,
+                            "fields": {"url": "missing host in url"},
                         })),
                     );
                 }
@@ -503,6 +519,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                                     "message": "schema violation (url: missing host in url)",
                                     "name": "schema violation",
                                     "code": 2,
+                                    "fields": {"url": "missing host in url"},
                                 })),
                             );
                         }
@@ -535,6 +552,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                                 "message": "schema violation (url: missing host in url)",
                                 "name": "schema violation",
                                 "code": 2,
+                                "fields": {"url": "missing host in url"},
                             })),
                         );
                     }
@@ -559,6 +577,9 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         "message": "schema violation (host: required field missing)",
                         "name": "schema violation",
                         "code": 2,
+                        "fields": {
+                            "host": "required field missing"
+                        },
                     })),
                 );
             }
@@ -581,6 +602,9 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         "message": "schema violation (at least one of these fields must be non-empty: 'custom_id', 'username')",
                         "name": "schema violation",
                         "code": 2,
+                        "fields": {
+                            "@entity": ["at least one of these fields must be non-empty: 'custom_id', 'username'"]
+                        },
                     })),
                 );
             }
@@ -596,6 +620,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                     "message": format!("schema violation: {}", e),
                     "name": "schema violation",
                     "code": 2,
+                    "fields": {},
                 })),
             );
         }
@@ -682,6 +707,7 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                     "message": format!("schema violation: {}", e),
                     "name": "schema violation",
                     "code": 2,
+                    "fields": {},
                 })),
             );
         }

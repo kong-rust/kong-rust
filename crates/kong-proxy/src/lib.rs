@@ -70,6 +70,8 @@ pub struct KongCtx {
     pub request_start_time: std::time::Instant,
     /// Upstream response received time (for latency tracking) — 上游响应接收时间（用于延迟统计）
     pub upstream_response_time: Option<std::time::Instant>,
+    /// Per-request unique ID (sent to both upstream and downstream) — 每请求唯一 ID（同时发送给上游和下游）
+    pub request_id: String,
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
@@ -514,6 +516,7 @@ impl ProxyHttp for KongProxy {
             injected_real_ip_headers: Vec::new(),
             request_start_time: std::time::Instant::now(),
             upstream_response_time: None,
+            request_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -1031,6 +1034,9 @@ impl ProxyHttp for KongProxy {
             }
         }
 
+        // 8. Inject X-Kong-Request-Id into upstream request — 向上游请求注入 X-Kong-Request-Id
+        let _ = upstream_request.insert_header("x-kong-request-id", &ctx.request_id);
+
         Ok(())
     }
 
@@ -1168,9 +1174,8 @@ impl ProxyHttp for KongProxy {
         let _ = upstream_response
             .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
         let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
-        // Generate X-Kong-Request-Id — 生成请求 ID
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let _ = upstream_response.insert_header("x-kong-request-id", &request_id);
+        // Use per-request X-Kong-Request-Id (same ID as sent to upstream) — 使用每请求的 X-Kong-Request-Id（与发给上游的相同）
+        let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
 
         // Server 头处理：隐藏上游 Server 头并注入 Kong 标识
         if self.config.proxy_hide_server_header {
