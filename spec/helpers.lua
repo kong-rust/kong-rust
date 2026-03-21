@@ -49,6 +49,59 @@ if not ngx then
         now = function() return socket.gettime() end,
         time = function() return math.floor(socket.gettime()) end,
         update_time = function() end,
+        sleep = function(seconds) socket.sleep(seconds) end,
+        say = function() end,
+        print = function() end,
+        exit = function() end,
+        var = {},
+        ctx = {},
+        header = {},
+        req = {
+            get_headers = function() return {} end,
+            read_body = function() end,
+            get_body_data = function() return "" end,
+        },
+        resp = {
+            get_headers = function() return {} end,
+        },
+        timer = {
+            at = function(delay, fn) return true end,
+            every = function(delay, fn) return true end,
+        },
+        worker = {
+            id = function() return 0 end,
+            count = function() return 1 end,
+            exiting = function() return false end,
+        },
+        encode_base64 = function(str)
+            -- simple base64 encoding — 简单 base64 编码
+            local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+            return ((str:gsub('.', function(x)
+                local r, b_val = '', x:byte()
+                for i = 8, 1, -1 do r = r .. (b_val % 2^i - b_val % 2^(i-1) > 0 and '1' or '0') end
+                return r
+            end) .. '0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+                if (#x < 6) then return '' end
+                local c = 0
+                for i = 1, 6 do c = c + (x:sub(i, i) == '1' and 2^(6-i) or 0) end
+                return b:sub(c + 1, c + 1)
+            end) .. ({ '', '==', '=' })[#str % 3 + 1])
+        end,
+        decode_base64 = function(str)
+            local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+            str = str:gsub('[^' .. b .. '=]', '')
+            return (str:gsub('.', function(x)
+                if x == '=' then return '' end
+                local r, f = '', (b:find(x) - 1)
+                for i = 6, 1, -1 do r = r .. (f % 2^i - f % 2^(i-1) > 0 and '1' or '0') end
+                return r
+            end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+                if #x ~= 8 then return '' end
+                local c = 0
+                for i = 1, 8 do c = c + (x:sub(i, i) == '1' and 2^(8-i) or 0) end
+                return string.char(c)
+            end))
+        end,
     }
 end
 
@@ -596,6 +649,46 @@ function Blueprint:new(admin_client)
             local defaults = {
                 name = "cors",
                 config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        rewriter_plugins = function(overrides)
+            local defaults = {
+                name = "pre-function",
+                config = { access = { "kong.response.exit(200, '{\"message\":\"rewrite\"}')" } },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        tcp_log_plugins = function(overrides)
+            local defaults = {
+                name = "tcp-log",
+                config = { host = "127.0.0.1", port = 35001 },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        file_log_plugins = function(overrides)
+            local defaults = {
+                name = "file-log",
+                config = { path = os.tmpname() },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        http_log_plugins = function(overrides)
+            local defaults = {
+                name = "http-log",
+                config = { http_endpoint = "http://127.0.0.1:35001" },
             }
             if overrides then
                 for k, v in pairs(overrides) do defaults[k] = v end
