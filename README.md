@@ -1,6 +1,6 @@
 # Kong-Rust
 
-A Rust-native **AI Gateway** — API Gateway, LLM Gateway, Agent Gateway, and MCP/Skill Gateway in a single binary. Fully compatible with [Kong Gateway](https://github.com/Kong/kong) as a drop-in replacement with zero migration cost.
+A Rust-native **AI Gateway** — API Gateway, LLM Gateway, Agent Gateway, and MCP/Skill Gateway in a single binary. 100% compatible with [Kong Gateway](https://github.com/Kong/kong) in API gateway scenarios — same features, better performance, drop-in replacement.
 
 ## Why Kong-Rust?
 
@@ -24,23 +24,26 @@ The AI era needs a new kind of gateway. Traditional API gateways handle HTTP tra
 
 | | Kong (Lua) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
-| **API Gateway** | Full | None | Full (100% Kong compatible) |
+| **API Gateway** | Full | None | **Full (100% Kong compatible, faster)** |
 | **LLM Gateway** | Lua plugins | Full (100+ providers) | Rust-native (roadmap) |
 | **Agent Gateway** | None | None | Rust-native (roadmap) |
 | **MCP / Skill Gateway** | Enterprise | Basic | Rust-native (roadmap) |
-| **Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, multi-threaded) |
-| **Language** | Lua | Python | Rust |
+| **Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | **Pingora (Rust, multi-threaded)** |
+| **Language** | Lua | Python | **Rust** |
 
 ## Features
 
-### API Gateway (Kong Compatible)
+### API Gateway (Kong Compatible — Faster & Stronger)
 
-- **Full Kong Compatibility** — Same data models, Admin API, `kong.conf` format, declarative config (YAML/JSON), and Lua plugin interface (PDK + `ngx.*`)
-- **High-Performance Proxy** — Pingora's multi-threaded architecture with shared connection pools
-- **Dual Routing Engine** — Both `traditional_compatible` and `expressions` router flavors
-- **Lua Plugin Support** — Run all 47 built-in Kong Lua plugins via mlua + LuaJIT
-- **Load Balancing & Health Checks** — Round-robin, consistent-hashing, active/passive health checks
-- **TLS Termination & SNI** — Certificate management with SNI-based routing
+Everything Kong does, Kong-Rust does — with Rust-level performance and memory safety on top.
+
+- **100% Kong Compatibility** — Same data models, Admin API, `kong.conf` format, declarative config (YAML/JSON), and Lua plugin interface (PDK + `ngx.*`). Existing Kong deployments can migrate with zero config changes.
+- **Superior Performance** — Pingora's multi-threaded architecture replaces OpenResty's single-threaded event loop. Shared connection pools, zero-copy proxying, no GC pauses. True multi-core utilization without worker process overhead.
+- **Memory Safety** — Rust ownership system eliminates use-after-free, buffer overflows, and data races that plague C/Lua FFI boundaries.
+- **Dual Routing Engine** — Both `traditional_compatible` and `expressions` router flavors, with LRU route cache for hot-path acceleration
+- **Full Lua Plugin Ecosystem** — Run all 47 built-in Kong Lua plugins via mlua + LuaJIT — no plugin rewrites needed
+- **Load Balancing & Health Checks** — Round-robin, consistent-hashing, least-connections, latency-based. Active/passive health checks with automatic recovery.
+- **TLS Termination & SNI** — Certificate management with SNI-based routing, HTTP/2 ALPN, upstream mTLS
 - **L4 Stream Proxy** — TCP/TLS passthrough proxy with SNI-based and source/destination CIDR routing
 - **Kong Manager UI** — Works with the official Kong Manager frontend
 - **Multiple Data Sources** — PostgreSQL or db-less (declarative config) modes
