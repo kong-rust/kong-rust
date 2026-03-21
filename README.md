@@ -1,12 +1,12 @@
 # Kong-Rust
 
-A high-performance **AI-Native API Gateway** written in Rust, fully compatible with [Kong Gateway](https://github.com/Kong/kong). Drop-in replacement for Kong — zero migration cost — with a Rust-native AI gateway engine on the roadmap.
+A high-performance **AI Gateway** written in Rust, fully compatible with [Kong Gateway](https://github.com/Kong/kong). Drop-in replacement for Kong — zero migration cost — with a Rust-native AI gateway engine on the roadmap.
 
 ## Why Kong-Rust?
 
 Kong is the world's most popular open-source API gateway, but it runs on LuaJIT + OpenResty. Kong-Rust rewrites the core engine in Rust using [Cloudflare Pingora](https://github.com/cloudflare/pingora), while maintaining **100% compatibility** with Kong's configuration, Admin API, database schema, and Lua plugin ecosystem.
 
-**Beyond traditional API gateway**, Kong-Rust is building a **Rust-native AI gateway engine** — LLM Proxy, MCP Gateway, and Skill/Agent Gateway — all implemented in Rust for maximum performance. This is the only project that combines full Kong compatibility with a full-stack AI gateway in a single Rust binary.
+**Kong-Rust is an AI Gateway** — beyond traditional API gateway compatibility, it is building a **Rust-native AI gateway engine** covering LLM Proxy, MCP Gateway, and Skill/Agent Gateway, all in Rust for maximum performance. The only project that combines full Kong compatibility with a full-stack AI gateway in a single Rust binary.
 
 | | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
@@ -19,7 +19,7 @@ Kong is the world's most popular open-source API gateway, but it runs on LuaJIT 
 
 ## Features
 
-### API Gateway (Kong Compatible)
+### Traditional Gateway (Kong Compatible)
 
 - **Full Kong Compatibility** — Same data models, Admin API, `kong.conf` format, declarative config (YAML/JSON), and Lua plugin interface (PDK + `ngx.*`)
 - **High-Performance Proxy** — Pingora's multi-threaded architecture with shared connection pools
@@ -181,7 +181,7 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 
 ## Project Status
 
-### Traditional API Gateway
+### Traditional Gateway
 
 | Phase | Status | Description |
 |-------|--------|-------------|

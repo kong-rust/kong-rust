@@ -1,12 +1,12 @@
 # Kong-Rust
 
-使用 Rust 完全重写的高性能 **AI 原生 API 网关**，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换 Kong，同时规划 Rust 原生 AI 网关引擎。
+使用 Rust 完全重写的高性能 **AI 网关**，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换 Kong，同时构建 Rust 原生 AI 网关引擎。
 
 ## 为什么选择 Kong-Rust？
 
 Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
 
-**不止于传统 API 网关**，Kong-Rust 正在构建 **Rust 原生 AI 网关引擎** —— LLM Proxy、MCP Gateway、Skill/Agent Gateway —— 全部 Rust 实现，追求极致性能。这是市场上唯一同时覆盖完整 Kong 兼容 + 全栈 AI 网关的 Rust 原生项目。
+**Kong-Rust 是一个 AI 网关** —— 在传统 API 网关兼容性之上，构建 **Rust 原生 AI 网关引擎**，覆盖 LLM Proxy、MCP Gateway、Skill/Agent Gateway，全部 Rust 实现，追求极致性能。市场上唯一同时覆盖完整 Kong 兼容 + 全栈 AI 网关的 Rust 原生项目。
 
 | | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
@@ -19,7 +19,7 @@ Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty
 
 ## 核心特性
 
-### API 网关（Kong 兼容）
+### 传统网关（Kong 兼容）
 
 - **完全兼容 Kong** — 数据模型、Admin API、`kong.conf` 配置格式、声明式配置（YAML/JSON）、Lua 插件接口（PDK + `ngx.*`）完全一致
 - **高性能代理** — Pingora 多线程架构，共享连接池
