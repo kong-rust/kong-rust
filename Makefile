@@ -239,18 +239,22 @@ members:
 # Kong Spec 测试 (busted)
 # ========================
 
-.PHONY: setup-busted spec spec-verbose
+.PHONY: setup-busted spec spec-file spec-smoke spec-verbose
 
 setup-busted: ## 安装 busted 测试框架
 	@bash scripts/setup-busted.sh
 
-spec: build ## 运行 Kong 官方 spec 测试
-	@eval "$$(luarocks path --bin)" && \
-	busted --helper=spec/helpers.lua spec/ -o TAP --no-auto-insulate
+spec: build ## 运行全部 Kong spec 测试
+	@bash scripts/run-specs.sh
+
+spec-file: build ## 运行指定 spec 文件 (SPEC=path/to/spec.lua)
+	@bash scripts/run-specs.sh $(SPEC)
+
+spec-smoke: build ## 运行烟雾测试
+	@bash scripts/run-specs.sh spec/00-smoke/
 
 spec-verbose: build ## 运行 Kong spec 测试 (详细输出)
-	@eval "$$(luarocks path --bin)" && \
-	busted --helper=spec/helpers.lua spec/ -o utfTerminal --no-auto-insulate -v
+	@bash scripts/run-specs.sh
 
 .PHONY: build release check build-crate \
         test test-crate test-name test-verbose test-integration \
@@ -261,4 +265,4 @@ spec-verbose: build ## 运行 Kong spec 测试 (详细输出)
         dev dev-dbless dev-full \
         docker-build docker-push docker-run docker-run-pg docker-stop \
         clean manager-clean clean-all deps members \
-        setup-busted spec spec-verbose
+        setup-busted spec spec-file spec-smoke spec-verbose
