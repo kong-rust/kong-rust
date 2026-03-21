@@ -49,6 +49,77 @@ _M.test_conf = {
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 
 local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
+local MOCK_UPSTREAM_PID_FILE = "/tmp/kong-rust-mock-upstream.pid"
+
+---------------------------------------------------------------------------
+-- Mock upstream constants — Mock 上游服务常量
+---------------------------------------------------------------------------
+
+_M.mock_upstream_protocol = "http"
+_M.mock_upstream_host = "127.0.0.1"
+_M.mock_upstream_hostname = "localhost"
+_M.mock_upstream_port = tonumber(os.getenv("KONG_SPEC_MOCK_UPSTREAM_PORT")) or 15555
+_M.mock_upstream_ssl_port = tonumber(os.getenv("KONG_SPEC_MOCK_UPSTREAM_SSL_PORT")) or 15556
+_M.mock_upstream_url = string.format("http://127.0.0.1:%d", _M.mock_upstream_port)
+_M.mock_upstream_ssl_url = string.format("https://127.0.0.1:%d", _M.mock_upstream_ssl_port)
+_M.mock_upstream_stream_port = 15557
+_M.mock_upstream_stream_ssl_port = 15558
+
+---------------------------------------------------------------------------
+-- Mock upstream lifecycle — Mock upstream 生命周期管理
+---------------------------------------------------------------------------
+
+function _M.start_mock_upstream()
+    -- Check if already running — 检查是否已运行
+    local f = io.open(MOCK_UPSTREAM_PID_FILE, "r")
+    if f then
+        local pid = f:read("*l")
+        f:close()
+        if pid and pid ~= "" then
+            local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
+            if ret == 0 or ret == true then
+                return true  -- already running — 已在运行
+            end
+        end
+    end
+
+    local cmd = string.format(
+        "nohup %s mock-upstream --port %d > /tmp/kong-rust-mock-upstream.log 2>&1 & echo $! > %s",
+        KONG_RUST_BIN, _M.mock_upstream_port, MOCK_UPSTREAM_PID_FILE)
+    os.execute(cmd)
+
+    -- Wait for mock upstream to be ready — 等待 mock upstream 就绪
+    local ok = _M.wait_until(function()
+        local client = http_client.new("127.0.0.1", _M.mock_upstream_port, { timeout = 2 })
+        if not client then return false end
+        local res = client:get("/")
+        return res and res.status == 200
+    end, 10)
+
+    if not ok then
+        _M.stop_mock_upstream()
+        error("Mock upstream failed to start. Check /tmp/kong-rust-mock-upstream.log")
+    end
+
+    return true
+end
+
+function _M.stop_mock_upstream()
+    local f = io.open(MOCK_UPSTREAM_PID_FILE, "r")
+    if f then
+        local pid = f:read("*l")
+        f:close()
+        if pid and pid ~= "" then
+            os.execute(string.format("kill -TERM %s 2>/dev/null || true", pid))
+            _M.wait_until(function()
+                local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
+                return ret ~= 0 and ret ~= true
+            end, 5)
+        end
+        os.remove(MOCK_UPSTREAM_PID_FILE)
+    end
+    return true
+end
 
 ---------------------------------------------------------------------------
 -- Kong lifecycle — Kong 生命周期管理
@@ -56,6 +127,9 @@ local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
 
 function _M.start_kong(conf)
     conf = conf or {}
+
+    -- Auto-start mock upstream — 自动启动 mock upstream
+    _M.start_mock_upstream()
 
     local env = {}
     env.KONG_DATABASE = conf.database or _M.test_conf.database
@@ -119,6 +193,9 @@ function _M.stop_kong()
         end
         os.remove(PID_FILE)
     end
+
+    -- Auto-stop mock upstream — 自动停止 mock upstream
+    _M.stop_mock_upstream()
 
     return true
 end
