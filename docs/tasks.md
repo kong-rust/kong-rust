@@ -186,9 +186,9 @@
   - 测试基础设施、10 个阶段链测试、20+ PDK 测试、run-cargo-test.sh 统一入口
   - 文件：`crates/kong-proxy/tests/`, `scripts/run-cargo-test.sh`
 
-- [ ] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
-  - 在不修改官方 Lua spec 源码前提下，运行 ai-proxy 官方测试
-  - 初期范围仅覆盖 ai-proxy 官方 spec
+- [-] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
+  - Phase 0 Step 1 完成：busted CLI + spec.helpers shim + luasocket HTTP 客户端 + Blueprint (Admin API) + 烟雾测试通过
+  - 待完成：02-integration spec 对齐、03-plugins 核心插件 spec
 
 ### 8c：L4 Stream 代理
 
