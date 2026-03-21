@@ -1,6 +1,6 @@
 # TODOS
 
-> 执行路径：双轨并行。轨道 A（传统网关加固）和轨道 B（AI 网关）无技术依赖，交替推进。
+> 执行路径：三轨并行。轨道 A（传统网关加固）、轨道 B（AI 网关引擎）、轨道 C（AI 网关控制台）。A/B 无技术依赖，C 依赖 B 的 Admin API。
 > 详细战略文档见 [docs/designs/ai-gateway-strategy.md](docs/designs/ai-gateway-strategy.md)
 
 ---
@@ -93,6 +93,34 @@ Agent 注册/发现、A2A 协议代理、Agent 身份管理、会话状态路由
 - **Why:** 差异化竞争力，超越 MCP 的更高层抽象
 - **Effort:** XL (human) → L (CC)
 - **Depends on:** Phase 3 MCP Gateway 完成
+
+---
+
+## 轨道 C：AI 网关控制台
+
+### P1: 企业版 Kong Manager — Phase 5a（基础框架）
+
+全新前端项目，替换 Kong Manager OSS。React 19 + Next.js 15 + shadcn/ui + Tailwind CSS 4。
+
+- **交付物:** 完整覆盖 Kong Manager OSS 全部 14 个实体 CRUD，现代化 UI + 四子网关统一仪表盘
+- **对标:** Kong Enterprise Manager (Konnect), Portkey Dashboard, Helicone Dashboard
+- **Why:** 现有 Kong Manager OSS 是纯 CRUD 表单，无 AI 能力、无仪表盘、无可观测性。企业版控制台是 AI 网关产品化的关键一环
+- **Effort:** XL (human) → L (CC)
+- **Depends on:** Phase 2a-MVP 完成（需要 AI 相关 Admin API 就绪）
+
+### P1: LLM 管理面板 — Phase 5b
+
+LLM Provider 配置、Virtual API Key 管理、Token 成本仪表盘、模型调用日志、Fallback 链可视化编辑、Prompt Guard 规则管理。
+
+- **Effort:** L (human) → M (CC)
+- **Depends on:** Phase 5a + Phase 2b 完成
+
+### P1: Agent/MCP 管理面板 — Phase 5c
+
+Agent 注册/拓扑图、MCP Server 管理、工具调用链路追踪、Skill 编排可视化画布。
+
+- **Effort:** L (human) → M (CC)
+- **Depends on:** Phase 5b + Phase 3/4 完成
 
 ---
 

@@ -13,13 +13,14 @@ Repo: kong-rust
 
 统一 AI 网关控制平面 — 不只是代理流量，而是编排 AI 工作流。开发者在一个控制台里看到：所有 LLM 调用的成本仪表盘、Agent 间的通信拓扑图、MCP 工具调用链路追踪。这不只是网关，是 AI 基础设施的可观测性中心。
 
-> **注意：** 控制台 UI 不在当前路线图范围内。Phase 0-4 聚焦网关引擎和 Admin API，可观测性数据通过 Prometheus 指标 + Admin API 暴露。控制台 UI 作为未来方向（可基于 Kong Manager 扩展）。
+> Phase 5 将重写 Kong Manager 为企业版 AI 网关控制台，实现上述愿景。
 
 ### 核心战略变更
 
 1. **产品定位重塑**：从"传统 API 网关 + AI 网关引擎"二分法 → "AI 网关"上位概念，下辖 API/LLM/Agent/MCP 四个子网关
 2. **执行路径变更**：从线性 Phase 0→1→2→3→4 → 双轨并行 Phase 0+2a 同时启动
-3. **Phase 2 拆分**：原始 6 个能力（2a Token 限流、2b 多模型 LB+Fallback、2c Virtual API Key、2d Token 成本追踪、2e 语义缓存、2f Prompt Guard）从一次性交付 → 重组为 4 个增量交付单元
+3. **Phase 2 拆分**：原始 6 个能力（2a Token 限流、2b 多模型 LB+Fallback、2c Virtual API Key、2d Token 成本追踪、2e 语义缓存、2f Prompt Guard）从一次性交付 → 重组为 5 个增量交付单元
+4. **Phase 5 新增**：重写 Kong Manager 为企业版 AI 网关控制台，替换现有 OSS 版本
 
 ## Scope Decisions
 
@@ -52,18 +53,22 @@ Repo: kong-rust
 ### 执行路径（双轨并行）
 
 ```
-时间线 ─────────────────────────────────────────────►
+时间线 ─────────────────────────────────────────────────────────────►
 
 轨道 A（传统网关加固）:
   Phase 0 ──────► Phase 1a ──► Phase 1b ──► Phase 1c
   (spec 对齐)     (V1 全量)   (V2 增量)   (运维增强)
 
-轨道 B（AI 网关）:
+轨道 B（AI 网关引擎）:
   Phase 2a-MVP ──► Phase 2a-Full ──► Phase 2b ──► Phase 2c ──► Phase 2d
   (OpenAI 代理)   (多 provider LB)  (Virtual Key) (语义缓存) (Prompt Guard)
 
                                     Phase 3 ──► Phase 4
                                     (MCP GW)   (Agent GW)
+
+轨道 C（AI 网关控制台）:
+                    Phase 5a ──────► Phase 5b ──────► Phase 5c
+                    (基础框架重写)    (LLM 管理面板)   (Agent/MCP 面板)
 ```
 
 **轨道依赖说明：**
@@ -71,6 +76,7 @@ Repo: kong-rust
 - Phase 3（MCP GW）依赖 Phase 2a-Full 的通用限流器基础设施
 - Phase 4（Agent GW）依赖 Phase 3 的 MCP 路由能力（Agent 调用 Tool 时走 MCP 网关）
 - Phase 0 的 busted spec 框架仅用于验证传统网关，不影响 AI 网关开发
+- 轨道 C（Phase 5）可在 Phase 2a-MVP 完成后启动，需要 AI 相关 Admin API 就绪
 
 ### 通用限流器基础设施设计
 
@@ -142,6 +148,64 @@ struct RateLimitResult {
 - MCP 可观测性 — 工具调用延迟、错误率、使用量 Prometheus 指标
 - Skill 编排 — Skill 注册、组合、执行（**Phase 4 范围，本文档不展开**）
 
+### Phase 5: AI 网关企业版控制台（Kong Manager 重写）
+
+**战略意图：** 现有 Kong Manager OSS 是纯 CRUD 管理界面（Vue 3 + Vite，14 个页面），只能管理传统 API 网关实体。重写为企业版 AI 网关控制台，作为四子网关的统一管理入口 + AI 可观测性中心。
+
+**现有 Kong Manager OSS 分析：**
+- 技术栈：Vue 3 + TypeScript + Vite + pnpm
+- 功能：Services/Routes/Consumers/Plugins/Upstreams/Certificates 等 14 个实体的 CRUD
+- 局限：无 AI 能力、无仪表盘、无可观测性、无成本分析、纯表单操作
+
+**对标产品：** Portkey Dashboard, Helicone Dashboard, LangSmith, Kong Enterprise Manager (Konnect)
+
+**技术方案：** 全新前端项目，不基于现有 Kong Manager OSS 代码重写（架构差异太大）。
+
+| 技术选型 | 选择 | 理由 |
+|---------|------|------|
+| 框架 | React 19 + Next.js 15 | SSR/ISR 支持、生态成熟、组件库丰富 |
+| UI 组件库 | shadcn/ui + Tailwind CSS 4 | 可定制性强、设计系统友好、零运行时开销 |
+| 图表 | Recharts + D3.js | 成本仪表盘、流量趋势、拓扑图 |
+| 实时数据 | SSE + React Query | Admin API SSE 订阅 + 自动缓存失效 |
+| 状态管理 | Zustand | 轻量、无样板代码 |
+
+**Phase 5 拆分：**
+
+| 子阶段 | 内容 | 交付物 |
+|--------|------|--------|
+| 5a | 基础框架 + 传统网关管理 | 替换 Kong Manager OSS：Services/Routes/Consumers/Plugins 等全部传统实体 CRUD，现代化 UI |
+| 5b | LLM 网关管理面板 | LLM Provider 配置、Virtual API Key 管理、Token 成本仪表盘（实时/历史）、模型调用日志、Fallback 链可视化编辑 |
+| 5c | Agent/MCP 管理面板 | Agent 注册/拓扑图、MCP Server 管理、工具调用链路追踪、Skill 编排可视化 |
+
+**Phase 5a 核心页面清单（替换 Kong Manager OSS）：**
+
+| 页面 | Kong Manager OSS | 企业版增强 |
+|------|-------------------|-----------|
+| Overview Dashboard | 简单统计 | 四子网关健康状态 + 流量趋势 + 成本概览 |
+| Services | 表格 CRUD | + 关联的 AI Provider 配置 |
+| Routes | 表格 CRUD | + LLM/MCP/Agent 路由类型标识 |
+| Plugins | 表格 + 表单 | + AI 插件专属配置界面 |
+| Upstreams | 表格 CRUD | + LLM Provider 健康面板 |
+| Certificates | 表格 CRUD | 保持一致 |
+| Consumers | 表格 CRUD | + Token 用量/成本统计 |
+| Cluster | 基础状态 | CP/DP 拓扑图、配置同步状态 |
+
+**Phase 5b LLM 管理面板（全新页面）：**
+
+- **LLM Provider 管理** — 注册/编辑 Provider（OpenAI/Anthropic/Gemini 等），配置 API Key、模型列表、价格表
+- **Virtual API Key 管理** — 发行虚拟 Key、绑定 Provider、设置预算/限额/过期时间
+- **Token 成本仪表盘** — 实时/历史 token 消耗趋势、按 Key/Team/Route 维度下钻、费用排行
+- **模型调用日志** — 请求/响应日志（可脱敏）、延迟分布、错误率、Token 用量
+- **Fallback 链编辑器** — 可视化拖拽配置多模型降级链
+- **Prompt Guard 规则管理** — 正则规则编辑、语义检测阈值配置、拦截日志
+
+**Phase 5c Agent/MCP 面板（全新页面）：**
+
+- **Agent 拓扑图** — 可视化 Agent 间通信关系、调用链路
+- **MCP Server 管理** — Server 注册、工具列表、健康状态
+- **工具调用追踪** — 端到端链路追踪（Agent → MCP → Tool）
+- **Skill 编排画布** — 可视化 Skill 组合和执行流程
+
 ### Crate 架构图
 
 ```
@@ -176,6 +240,8 @@ kong-server (binary entry point)
 | Token 计数准确性 | LLM 计费依赖精确 token 数 | Phase 2a-MVP 用 `tiktoken-rs` 支持 GPT 系列，其他 provider 用 char/4 近似；Phase 2a-Full 按 provider 接入准确 tokenizer |
 | 语义缓存 embedding 来源 | 需要额外网络调用和成本 | 优先调用外部 Embedding API（如 OpenAI text-embedding-3-small），后期支持本地 ONNX 模型减少依赖 |
 | usearch Rust binding 成熟度 | 向量索引 API 稳定性 | 备选方案：hora（纯 Rust HNSW）或退化为精确线性扫描（小规模场景足够） |
+| 前端全新技术栈 | Phase 5 开发效率 | React + Next.js 生态成熟，CC+gstack 前端代码生成效率高；shadcn/ui 组件可快速搭建 |
+| Kong Manager OSS 兼容性 | 用户迁移成本 | Phase 5a 完整覆盖 OSS 全部功能后再替换，渐进式迁移 |
 
 ### 竞品对比（更新版）
 
@@ -185,6 +251,7 @@ kong-server (binary entry point)
 | LLM 代理 | Lua | ✓ 100+ | ✓ 200+ | ✓ | ✓ | ✓ | ✗ | **Rust 原生** |
 | Agent 网关 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ A2A | **Rust 原生** |
 | MCP 网关 | Ent | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | **Rust 原生** |
+| 管理控制台 | OSS 基础 | 基础 | ✓ 强 | ✓ 强 | ✓ | ✗ | ✗ | **企业版（Phase 5）** |
 | 可观测性 | 中 | 基础 | ✓ 强 | ✓ 核心 | ✓ | 中 | 中 | **Rust 原生** |
 | 语言 | Lua | Python | TS | TS | Go | C++ | Rust | **Rust** |
 

@@ -71,6 +71,17 @@ Kong 能做的，Kong-Rust 都能做 —— 而且更快、更安全。
 - **Skill 编排** — Skill 注册、组合、执行
 - **认证与可观测性** — 按 tool/agent 的访问控制，调用指标
 
+### AI 网关控制台（规划中）
+
+企业级管理控制台，替换 Kong Manager OSS。基于 React 19 + Next.js 15 + shadcn/ui 构建。
+
+- **统一仪表盘** — 四子网关健康状态、流量趋势、成本概览
+- **LLM 成本仪表盘** — 实时/历史 Token 消耗、按 Key/Team/Route 下钻
+- **虚拟 API Key 管理** — 发行 Key、绑定 Provider、设置预算和限额
+- **Fallback 链编辑器** — 可视化拖拽配置多模型降级链
+- **Agent 拓扑图** — 可视化 Agent 间通信关系和调用链路
+- **MCP 工具调用追踪** — 端到端链路追踪（Agent → MCP → Tool）
+
 ## 架构
 
 ```
@@ -244,6 +255,9 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 | Phase 2d | B | 规划中 | Prompt Guard |
 | Phase 3 | B | 规划中 | MCP 网关 — Server 注册、发现、路由 |
 | Phase 4 | B | 规划中 | Agent 网关 — A2A 协议、Agent 路由、身份管理 |
+| Phase 5a | C | 规划中 | AI 网关控制台 — 替换 Kong Manager OSS，现代化 UI |
+| Phase 5b | C | 规划中 | LLM 管理面板 — Provider 配置、成本仪表盘、调用日志 |
+| Phase 5c | C | 规划中 | Agent/MCP 面板 — Agent 拓扑图、工具追踪、Skill 画布 |
 
 **所有 AI 能力将以 Rust 原生代码实现** —— 不依赖 Lua 插件。这是 Kong-Rust 相对于 Kong（Lua）和 LiteLLM（Python）的核心性能优势。
 

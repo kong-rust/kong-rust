@@ -71,6 +71,17 @@ Everything Kong does, Kong-Rust does — with Rust-level performance and memory 
 - **Skill Orchestration** — Skill registration, composition, and execution
 - **Auth & Observability** — Per-tool/per-agent access control, call metrics
 
+### AI Gateway Console (Roadmap)
+
+Enterprise-grade management console replacing Kong Manager OSS. Built with React 19 + Next.js 15 + shadcn/ui.
+
+- **Unified Dashboard** — Four sub-gateway health status, traffic trends, cost overview
+- **LLM Cost Dashboard** — Real-time/historical token spend, drill-down by key/team/route
+- **Virtual API Key Management** — Issue keys, bind providers, set budgets and quotas
+- **Fallback Chain Editor** — Visual drag-and-drop multi-model failover configuration
+- **Agent Topology** — Visualize inter-agent communication and call chains
+- **MCP Tool Tracing** — End-to-end trace from Agent → MCP → Tool
+
 ## Architecture
 
 ```
@@ -244,6 +255,9 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 | Phase 2d | B | Planned | Prompt guard |
 | Phase 3 | B | Planned | MCP Gateway — Server registration, discovery, routing |
 | Phase 4 | B | Planned | Agent Gateway — A2A protocol, agent routing, identity management |
+| Phase 5a | C | Planned | AI Gateway Console — Replace Kong Manager OSS with modern UI |
+| Phase 5b | C | Planned | LLM management panel — Provider config, cost dashboard, call logs |
+| Phase 5c | C | Planned | Agent/MCP panel — Agent topology, tool tracing, skill canvas |
 
 **All AI capabilities will be implemented in Rust-native code** — no Lua plugins. This is Kong-Rust's core performance advantage over Kong (Lua) and LiteLLM (Python).
 
