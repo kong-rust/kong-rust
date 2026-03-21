@@ -1,31 +1,86 @@
 # Kong-Rust
 
-使用 Rust 完全重写的高性能 API 网关，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换，无需修改任何现有配置。
+Rust 原生 **AI 网关** —— API 网关、LLM 网关、Agent 网关、MCP/Skill 网关，单一二进制文件。在 API 网关场景下 100% 兼容 [Kong Gateway](https://github.com/Kong/kong) —— 同样的功能，更强的性能，直接替换。
 
 ## 为什么选择 Kong-Rust？
 
-Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
+AI 时代需要新一代网关。传统 API 网关处理 HTTP 流量；LLM 代理处理模型调用；MCP 网关路由工具访问 —— 但没有一个能覆盖全局。Kong-Rust 将四种网关统一为 **一个 Rust 原生 AI 网关**，基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 构建。
 
-| | Kong (Lua/OpenResty) | Kong-Rust |
-|---|---|---|
-| **代理引擎** | OpenResty (Nginx + LuaJIT) | Pingora (Rust, 多线程) |
-| **Admin API** | Lapis (Lua) | axum (Rust) |
-| **数据库驱动** | pgmoon (Lua) | sqlx (Rust, 异步) |
-| **Lua 插件** | 原生运行 | mlua (LuaJIT 绑定) |
-| **内存安全** | 手动管理 (GC + FFI) | Rust 所有权系统 |
+```
+┌─────────────────────────────────────────────────┐
+│              Kong-Rust  AI 网关                  │
+│                                                 │
+│  ┌───────────┐ ┌───────────┐ ┌───────────────┐ │
+│  │ API 网关   │ │ LLM 网关   │ │  Agent 网关   │ │
+│  │(Kong 100%)│ │           │ │               │ │
+│  └───────────┘ └───────────┘ └───────────────┘ │
+│  ┌──────────────────────────────────────────┐   │
+│  │         MCP / Skill 网关                  │   │
+│  └──────────────────────────────────────────┘   │
+│                                                 │
+│  Rust · Pingora · 单一二进制                      │
+└─────────────────────────────────────────────────┘
+```
+
+| | Kong (Lua) | LiteLLM (Python) | Kong-Rust |
+|---|---|---|---|
+| **API 网关** | 完整 | 无 | **完整（100% Kong 兼容，性能更强）** |
+| **LLM 网关** | Lua 插件 | 完整（100+ provider） | Rust 原生（规划中） |
+| **Agent 网关** | 无 | 无 | Rust 原生（规划中） |
+| **MCP / Skill 网关** | 企业版 | 基础 | Rust 原生（规划中） |
+| **引擎** | OpenResty (Nginx + LuaJIT) | uvicorn | **Pingora (Rust, 多线程)** |
+| **语言** | Lua | Python | **Rust** |
 
 ## 核心特性
 
-- **完全兼容 Kong** — 数据模型、Admin API、`kong.conf` 配置格式、声明式配置（YAML/JSON）、Lua 插件接口（PDK + `ngx.*`）完全一致
-- **高性能代理** — Pingora 多线程架构，共享连接池
-- **双路由引擎** — 支持 `traditional_compatible` 和 `expressions` 两种路由模式
-- **Lua 插件支持** — 通过 mlua + LuaJIT 运行全部 47 个 Kong 内置 Lua 插件
-- **负载均衡与健康检查** — 轮询、一致性哈希、主动/被动健康检查
-- **TLS 终止与 SNI** — 证书管理和基于 SNI 的路由
+### API 网关（Kong 兼容 — 更快更强）
+
+Kong 能做的，Kong-Rust 都能做 —— 而且更快、更安全。
+
+- **100% Kong 兼容** — 数据模型、Admin API、`kong.conf` 配置格式、声明式配置（YAML/JSON）、Lua 插件接口（PDK + `ngx.*`）完全一致。现有 Kong 部署零配置修改即可迁移。
+- **性能更强** — Pingora 多线程架构取代 OpenResty 单线程事件循环。共享连接池、零拷贝代理、无 GC 停顿。真正的多核利用，无需 worker 进程开销。
+- **内存安全** — Rust 所有权系统消除 use-after-free、缓冲区溢出和数据竞争，这些是 C/Lua FFI 边界的常见隐患。
+- **双路由引擎** — 支持 `traditional_compatible` 和 `expressions` 两种路由模式，LRU 路由缓存加速热路径
+- **完整 Lua 插件生态** — 通过 mlua + LuaJIT 运行全部 47 个 Kong 内置 Lua 插件，无需重写任何插件
+- **负载均衡与健康检查** — 轮询、一致性哈希、最少连接、延迟优先。主动/被动健康检查，自动恢复。
+- **TLS 终止与 SNI** — 证书管理、基于 SNI 的路由、HTTP/2 ALPN、上游 mTLS
 - **L4 Stream 代理** — TCP/TLS Passthrough 四层代理，支持 SNI 和 source/dest CIDR 路由
 - **Kong Manager UI** — 兼容官方 Kong Manager 前端管理界面
 - **多数据源** — PostgreSQL 数据库模式或 db-less 声明式配置模式
 - **Hybrid 模式** — Control Plane / Data Plane 分离部署（规划中）
+
+### LLM 网关（规划中）
+
+- **Token 限流** — 按 key/route/consumer 的 TPM/RPM 限制
+- **多模型负载均衡与 Fallback** — 多个 LLM provider 作为上游，自动故障转移
+- **虚拟 API Key 管理** — 发行虚拟 key 映射到真实 provider key，设置预算/限额
+- **Token 成本追踪** — 按 key/team/route 的 token 用量和费用统计
+- **语义缓存** — 向量相似度缓存 LLM 响应
+- **Prompt Guard** — 正则 + 语义级提示词注入检测
+
+### Agent 网关（规划中）
+
+- **Agent 通信路由** — 路由和管理 Agent 间流量
+- **Agent 身份与访问控制** — 按 Agent 的认证和授权
+- **Agent 可观测性** — 延迟、错误率、使用量指标
+
+### MCP / Skill 网关（规划中）
+
+- **MCP Server 注册** — 通过 Admin API 注册、发现、版本管理 MCP Server
+- **MCP 路由与负载均衡** — 工具调用路由到 MCP Server，支持故障转移
+- **Skill 编排** — Skill 注册、组合、执行
+- **认证与可观测性** — 按 tool/agent 的访问控制，调用指标
+
+### AI 网关控制台（规划中）
+
+企业级管理控制台，替换 Kong Manager OSS。基于 React 19 + Next.js 15 + shadcn/ui 构建。
+
+- **统一仪表盘** — 四子网关健康状态、流量趋势、成本概览
+- **LLM 成本仪表盘** — 实时/历史 Token 消耗、按 Key/Team/Route 下钻
+- **虚拟 API Key 管理** — 发行 Key、绑定 Provider、设置预算和限额
+- **Fallback 链编辑器** — 可视化拖拽配置多模型降级链
+- **Agent 拓扑图** — 可视化 Agent 间通信关系和调用链路
+- **MCP 工具调用追踪** — 端到端链路追踪（Agent → MCP → Tool）
 
 ## 架构
 
@@ -39,14 +94,17 @@ kong-server（主入口二进制）
  ├── kong-plugin-system — 插件注册/执行框架
  ├── kong-lua-bridge    — Lua 兼容层 + PDK + ngx.*
  ├── kong-admin         — Admin API（axum）
- └── kong-cluster       — CP/DP 集群通信（规划中）
+ ├── kong-cluster       — CP/DP 集群通信（规划中）
+ ├── kong-ai            — LLM 网关引擎：通用限流器、OpenAI/Anthropic 协议、Token 计数（规划中）
+ ├── kong-mcp           — MCP/Skill 网关：MCP 协议、工具注册/路由（规划中）
+ └── kong-agent         — Agent 网关：A2A 协议、Agent 注册/路由（规划中）
 ```
 
 ## 快速开始
 
 ### 环境要求
 
-- Rust 1.84+（含 Cargo）
+- Rust 1.94.0+（含 Cargo）
 - PostgreSQL 15+（数据库模式），或无需数据库（db-less 模式）
 - Docker（可选，用于托管 PostgreSQL）
 
@@ -170,6 +228,8 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 ## 项目进度
 
+### 传统 API 网关
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | 1. 核心模型 | 已完成 | 数据模型、trait、配置解析 |
@@ -179,9 +239,40 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 | 5. 插件系统 | 已完成 | 插件注册、Lua Bridge、PDK |
 | 6. Admin API | 已完成 | 完整 CRUD、嵌套端点、Kong Manager 支持 |
 | 7. TLS | 已完成 | 证书管理、SNI 路由 |
-| 8. 集成测试 | 已完成 | 端到端测试、访问日志 |
-| 8c. Stream 代理 | 已完成 | L4 TCP/TLS Passthrough 代理、SNI/CIDR 路由 |
+| 8. 集成测试 | 已完成 | 端到端测试、访问日志、L4 Stream 代理 |
 | 9. Hybrid 模式 | 规划中 | CP/DP 集群通信 |
+
+### AI 网关路线图（双轨并行）
+
+| 阶段 | 轨道 | 状态 | 说明 |
+|------|------|------|------|
+| Phase 0 | A | 进行中 | 稳定性加固 — Kong 官方 spec 测试对齐 |
+| Phase 2a-MVP | B | 规划中 | LLM 网关 MVP — OpenAI 协议代理、Token 计数 |
+| Phase 1 | A | 规划中 | Hybrid CP/DP 模式（传统网关封顶） |
+| Phase 2a-Full | B | 规划中 | 多模型负载均衡与 Fallback（Anthropic、Gemini） |
+| Phase 2b | B | 规划中 | 虚拟 API Key、Token 成本追踪 |
+| Phase 2c | B | 规划中 | 语义缓存 |
+| Phase 2d | B | 规划中 | Prompt Guard |
+| Phase 3 | B | 规划中 | MCP 网关 — Server 注册、发现、路由 |
+| Phase 4 | B | 规划中 | Agent 网关 — A2A 协议、Agent 路由、身份管理 |
+| Phase 5a | C | 规划中 | AI 网关控制台 — 替换 Kong Manager OSS，现代化 UI |
+| Phase 5b | C | 规划中 | LLM 管理面板 — Provider 配置、成本仪表盘、调用日志 |
+| Phase 5c | C | 规划中 | Agent/MCP 面板 — Agent 拓扑图、工具追踪、Skill 画布 |
+
+**所有 AI 能力将以 Rust 原生代码实现** —— 不依赖 Lua 插件。这是 Kong-Rust 相对于 Kong（Lua）和 LiteLLM（Python）的核心性能优势。
+
+详细路线图请参阅 [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md)。
+
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [AI 网关战略](docs/designs/ai-gateway-strategy.md) | AI 网关定位与双轨并行执行计划 |
+| [产品路线图](docs/designs/kong-rust-roadmap.md) | Hybrid 模式详细设计与历史路线图 |
+| [设计文档](docs/design.md) | 架构与组件设计 |
+| [需求文档](docs/requirements.md) | 功能与非功能需求 |
+| [任务跟踪](docs/tasks.md) | 任务进度 |
+| [待办事项](TODOS.md) | 优先级排序的待办清单 |
 
 ## 许可证
 
