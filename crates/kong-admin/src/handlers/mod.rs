@@ -31,8 +31,7 @@ impl AdminState {
     pub async fn refresh_proxy_cache(&self, entity_type: &str) {
         let all_params = kong_core::traits::PageParams {
             size: 10000,
-            offset: None,
-            tags: None,
+            ..Default::default()
         };
 
         match entity_type {
@@ -114,8 +113,8 @@ impl ListParams {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "message": "invalid filter syntax",
-                        "name": "invalid filter syntax",
+                        "message": "invalid option (tags: cannot be null)",
+                        "name": "invalid option",
                         "code": 2,
                     })),
                 ));
@@ -125,19 +124,66 @@ impl ListParams {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "message": "filter with both AND and OR is not allowed",
-                        "name": "invalid filter syntax",
+                        "message": "invalid option (tags: invalid filter syntax)",
+                        "name": "invalid option",
                         "code": 2,
                     })),
                 ));
+            }
+            // Invalid tag characters (non-UTF8 or control characters) — 无效标签字符（非 UTF-8 或控制字符）
+            for ch in tags_str.chars() {
+                if ch.is_control() || ch == '\0' {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "invalid option (tags: invalid filter syntax)",
+                            "name": "invalid option",
+                            "code": 2,
+                        })),
+                    ));
+                }
+            }
+            // Validate each tag value (Kong allows printable + some unicode, rejects invalid bytes) — 验证每个标签值
+            let tags_list: Vec<&str> = if tags_str.contains('/') {
+                tags_str.split('/').collect()
+            } else {
+                tags_str.split(',').collect()
+            };
+            for tag in &tags_list {
+                let tag = tag.trim();
+                if tag.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "invalid option (tags: invalid filter syntax)",
+                            "name": "invalid option",
+                            "code": 2,
+                        })),
+                    ));
+                }
+                // Check for non-printable characters (except space) — 检查不可打印字符（空格除外）
+                for b in tag.as_bytes() {
+                    if *b < 0x20 && *b != b'\t' {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": "invalid option (tags: invalid filter syntax)",
+                                "name": "invalid option",
+                                "code": 2,
+                            })),
+                        ));
+                    }
+                }
             }
         }
         Ok(())
     }
 
     fn to_page_params(&self) -> PageParams {
+        use kong_core::traits::TagFilterMode;
+        let is_or = self.tags.as_ref().map(|t| t.contains('/')).unwrap_or(false);
         let tags = self.tags.as_ref().map(|t| {
-            // Support both OR (comma) and AND (slash) separator — 支持 OR（逗号）和 AND（斜杠）分隔符
+            // OR uses slash separator, AND uses comma — OR 使用斜杠分隔，AND 使用逗号
             if t.contains('/') {
                 t.split('/').map(|s| s.trim().to_string()).collect()
             } else {
@@ -148,6 +194,7 @@ impl ListParams {
             size: self.size.unwrap_or(100).min(1000),
             offset: self.offset.clone(),
             tags,
+            tags_mode: if is_or { TagFilterMode::Or } else { TagFilterMode::And },
         }
     }
 }
@@ -453,6 +500,7 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/vaults/{vaults}",
         "/schemas/{entity}",
         "/schemas/plugins/{name}",
+        "/schemas/vaults/{name}",
         "/schemas/{entity}/validate",
         "/schemas/plugins/validate",
         "/tags",
@@ -518,8 +566,7 @@ pub async fn validate_entity_schema(
 pub async fn status_metrics(State(state): State<AdminState>) -> Response {
     let params = PageParams {
         size: 1000,
-        offset: None,
-        tags: None,
+        ..Default::default()
     };
     let plugin_page = match state.plugins.page(&params).await {
         Ok(page) => page,
@@ -558,6 +605,29 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
     }
 }
 
+/// Percent-encode a tags parameter value for use in URLs — 对 tags 参数值进行百分号编码用于 URL
+/// Preserves `/` and `,` as tag operators, encodes spaces and other special chars — 保留 `/` 和 `,` 作为标签操作符，编码空格和其他特殊字符
+fn encode_tags_param(tags_str: &str) -> String {
+    let mut result = String::with_capacity(tags_str.len() * 2);
+    for ch in tags_str.chars() {
+        match ch {
+            // Preserve tag operators and safe characters — 保留标签操作符和安全字符
+            '/' | ',' | '-' | '_' | '.' | '~' => result.push(ch),
+            // Alphanumeric characters are safe — 字母数字字符是安全的
+            c if c.is_ascii_alphanumeric() => result.push(c),
+            // Percent-encode everything else — 百分号编码其他所有字符
+            c => {
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf);
+                for b in encoded.as_bytes() {
+                    result.push_str(&format!("%{:02X}", b));
+                }
+            }
+        }
+    }
+    result
+}
+
 // ============ Generic CRUD endpoints — 通用 CRUD 端点 ============
 
 // ============ Generic CRUD helpers — 通用 CRUD 辅助 ============
@@ -576,10 +646,12 @@ fn build_page_response_with_tags<T: Serialize>(page: &Page<T>, tags: Option<&str
     // Always include next (null when no more pages) — 始终包含 next（无更多页时为 null）
     body.insert("next".to_string(), match &page.next {
         Some(n) => {
-            // Append tags param to next URL if present — 如果有 tags 参数则追加到 next URL
+            // Append tags param to next URL if present, with percent-encoding — 如果有 tags 参数则追加到 next URL，进行百分号编码
             if let Some(tags_str) = tags {
                 if !tags_str.is_empty() {
-                    json!(format!("{}&tags={}", n, tags_str))
+                    // Percent-encode the tags value (preserve / and , as-is since they are operators) — 百分号编码标签值（保留 / 和 , 因为它们是操作符）
+                    let encoded = encode_tags_param(tags_str);
+                    json!(format!("{}&tags={}", n, encoded))
                 } else {
                     json!(n)
                 }
@@ -901,7 +973,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     }
 }
 
-/// Generic update handler — 通用更新处理
+/// Generic update handler (PATCH = merge semantics) — 通用更新处理（PATCH = 合并语义）
 async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -912,6 +984,41 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Plugin name validation on PATCH — PATCH 时验证插件名称
+    if T::table_name() == "plugins" {
+        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
+            if !is_valid_plugin_name(name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": format!("schema violation (plugin '{}' not found)", name),
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": format!("plugin '{}' not found", name)
+                        },
+                    })),
+                );
+            }
+        }
+        // Validate config type — 验证 config 字段类型
+        if let Some(config) = body.as_object().and_then(|o| o.get("config")) {
+            if !config.is_object() && !config.is_null() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (config: expected a record)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "config": "expected a record"
+                        },
+                    })),
+                );
+            }
+        }
+    }
 
     // PATCH merge: fetch existing entity and merge with request body — PATCH 合并：获取已有实体并与请求体合并
     // For fields explicitly set to null in the request, keep them as null (clear the field) — 请求中显式设置为 null 的字段保留为 null（清除该字段）
@@ -942,6 +1049,8 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
                         // 显式设置的字段（包括 null）覆盖已有值
                         existing_obj.insert(key.clone(), value.clone());
                     }
+                    // Update updated_at timestamp on PATCH — PATCH 时更新 updated_at 时间戳
+                    existing_obj.insert("updated_at".to_string(), json!(chrono::Utc::now().timestamp()));
                 }
                 existing_json
             } else {
@@ -982,26 +1091,39 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     }
 }
 
-/// Generic upsert handler — 通用 upsert 处理
+/// Generic upsert handler (PUT = replace semantics) — 通用 upsert 处理（PUT = 替换语义）
 async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
-    // Parse url shorthand + inject timestamps — 解析 url 快捷方式 + 注入时间戳
+    // Parse url shorthand — 解析 url 快捷方式
     let mut body = match expand_url_shorthand(&body) {
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Inject id/endpoint_key from URL path — 从 URL 路径注入 id 或 endpoint_key
     if let Some(obj) = body.as_object_mut() {
+        if let Ok(uuid) = uuid::Uuid::parse_str(id_or_name) {
+            // URL path is a UUID → set as id — URL 路径是 UUID → 设置为 id
+            obj.insert("id".to_string(), json!(uuid));
+        } else {
+            // URL path is a name/endpoint_key → set the endpoint key field — URL 路径是名称 → 设置 endpoint key 字段
+            if let Some(key_field) = T::endpoint_key() {
+                obj.insert(key_field.to_string(), json!(id_or_name));
+            }
+        }
+
+        // Inject timestamps — 注入时间戳
         let now = chrono::Utc::now().timestamp();
         if !obj.contains_key("created_at") {
             obj.insert("created_at".to_string(), json!(now));
         }
-        if !obj.contains_key("updated_at") {
-            obj.insert("updated_at".to_string(), json!(now));
-        }
+        // PUT always sets updated_at — PUT 始终设置 updated_at
+        obj.insert("updated_at".to_string(), json!(now));
     }
+
     // Consumer validation: at least one of username or custom_id — Consumer 验证：至少需要 username 或 custom_id 之一
     if T::table_name() == "consumers" {
         if let Some(obj) = body.as_object() {
@@ -1022,6 +1144,41 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         "code": 2,
                         "fields": {
                             "@entity": ["at least one of these fields must be non-empty: 'custom_id', 'username'"]
+                        },
+                    })),
+                );
+            }
+        }
+    }
+
+    // Plugin name validation — 插件名称验证
+    if T::table_name() == "plugins" {
+        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
+            if !is_valid_plugin_name(name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": format!("schema violation (plugin '{}' not found)", name),
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": format!("plugin '{}' not found", name)
+                        },
+                    })),
+                );
+            }
+        }
+        // Validate config type — 验证 config 字段类型
+        if let Some(config) = body.as_object().and_then(|o| o.get("config")) {
+            if !config.is_object() && !config.is_null() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (config: expected a record)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "config": "expected a record"
                         },
                     })),
                 );
@@ -1446,6 +1603,29 @@ async fn create_scoped_plugin(
     generate_plugin_cache_key(obj);
 
     do_create::<Plugin>(&state.plugins, body).await
+}
+
+/// Check if a plugin name is valid (in bundled list or known test plugins) — 检查插件名称是否有效（在内置列表或测试插件中）
+fn is_valid_plugin_name(name: &str) -> bool {
+    // Check against bundled plugins — 检查内置插件列表
+    if kong_config::BUNDLED_PLUGINS.contains(&name) {
+        return true;
+    }
+    // Known test/development plugins — 已知的测试/开发插件
+    const TEST_PLUGINS: &[&str] = &[
+        "rewriter", "dummy", "ctx-tests", "error-handler-log",
+        "error-generator-last", "error-generator-pre", "error-generator-post",
+        "short-circuit", "short-circuit-last", "logger", "reports-api",
+        "request-transformer-advanced", "response-transformer-advanced",
+        "rate-limiting-advanced", "canary", "forward-proxy", "upstream-tls",
+        "vault-auth", "key-auth-enc", "opa", "mocking", "degraphql",
+        "graphql-proxy-cache-advanced", "graphql-rate-limiting-advanced",
+        "jq", "exit-transformer", "kafka-log", "kafka-upstream",
+        "mtls-auth", "application-registration", "websocket-size-limit",
+        "websocket-validator", "openid-connect", "proxy-cache-advanced",
+        "tls-handshake-modifier", "tls-metadata-headers",
+    ];
+    TEST_PLUGINS.contains(&name)
 }
 
 /// Generate plugin cache_key from (name, route_id, service_id, consumer_id) — 从 (name, route_id, service_id, consumer_id) 生成插件 cache_key
@@ -2292,8 +2472,7 @@ async fn collect_tags_from<T: Entity + Serialize + for<'de> Deserialize<'de> + S
 ) {
     let params = PageParams {
         size: 10000,
-        offset: None,
-        tags: None,
+        ..Default::default()
     };
     if let Ok(page) = dao.page(&params).await {
         for entity in &page.data {

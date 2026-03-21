@@ -1219,6 +1219,21 @@ impl ProxyHttp for KongProxy {
         Ok(())
     }
 
+    /// Response filter — runs after caching, before sending to downstream — 响应过滤 — 在缓存后、发送到下游前执行
+    /// Ensures X-Kong-Request-Id and other critical headers are present in ALL responses — 确保所有响应中都包含 X-Kong-Request-Id 等关键头
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora_core::Result<()> {
+        // Ensure X-Kong-Request-Id is set in downstream response (defense in depth) — 确保下游响应中设置了 X-Kong-Request-Id（纵深防御）
+        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+            let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
+        }
+        Ok(())
+    }
+
     /// Response body filter — body_filter phase + response buffering — 响应体过滤 — body_filter 阶段 + 响应体缓冲
     fn response_body_filter(
         &self,

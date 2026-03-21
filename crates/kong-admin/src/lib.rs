@@ -194,6 +194,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/endpoints", get(list_endpoints))
         .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
+        .route("/schemas/vaults/{name}", get(get_vault_schema))
         .route("/schemas/{entity_name}", get(get_entity_schema))
         .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))
         // Tags — 标签 API

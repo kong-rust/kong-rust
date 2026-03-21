@@ -15,6 +15,21 @@ pub struct Page<T> {
     pub next: Option<String>,
 }
 
+/// Tag filter mode — AND (all must match) vs OR (any can match) — 标签过滤模式 — AND（全部匹配）vs OR（任一匹配）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagFilterMode {
+    /// All tags must match (PostgreSQL @> operator) — 所有标签必须匹配
+    And,
+    /// Any tag can match (PostgreSQL && operator) — 任一标签匹配即可
+    Or,
+}
+
+impl Default for TagFilterMode {
+    fn default() -> Self {
+        TagFilterMode::And
+    }
+}
+
 /// Pagination parameters — 分页参数
 #[derive(Debug, Clone)]
 pub struct PageParams {
@@ -24,6 +39,8 @@ pub struct PageParams {
     pub offset: Option<String>,
     /// Tag filter — 标签过滤
     pub tags: Option<Vec<String>>,
+    /// Tag filter mode (AND or OR) — 标签过滤模式（AND 或 OR）
+    pub tags_mode: TagFilterMode,
 }
 
 impl Default for PageParams {
@@ -32,6 +49,7 @@ impl Default for PageParams {
             size: 100,
             offset: None,
             tags: None,
+            tags_mode: TagFilterMode::And,
         }
     }
 }

@@ -462,8 +462,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
             use kong_core::traits::PageParams;
             let params = PageParams {
                 size: 10000,
-                offset: None,
-                tags: None,
+                ..Default::default()
             };
             match admin_state.routes.page(&params).await {
                 Ok(page) => page.data,
@@ -629,8 +628,7 @@ async fn init_proxy_and_admin(
         // Full data load from DB — 从 DB 全量加载初始数据
         let all_params = PageParams {
             size: 1000,
-            offset: None,
-            tags: None,
+            ..Default::default()
         };
 
         let routes_dao = PgDao::<Route>::new(db.clone(), route_schema());

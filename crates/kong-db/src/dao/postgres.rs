@@ -638,6 +638,13 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         let select_exprs = build_select_exprs(&self.schema);
         let limit = params.size + 1; // Fetch one extra to determine if there's a next page — 多取一条用于判断是否有下一页
 
+        // Choose SQL operator based on tag filter mode — 根据标签过滤模式选择 SQL 操作符
+        // AND mode: @> (contains all) / OR mode: && (overlap, any match) — AND 模式: @>（包含全部）/ OR 模式: &&（重叠，任一匹配）
+        let tag_op = match params.tags_mode {
+            kong_core::traits::TagFilterMode::And => "@>",
+            kong_core::traits::TagFilterMode::Or => "&&",
+        };
+
         let (sql, offset_uuid) = if let Some(ref offset_token) = params.offset {
             let offset_id = decode_offset(offset_token)?;
             let mut where_parts = vec!["\"id\" > $1".to_string()];
@@ -645,7 +652,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             // Tag filtering — 标签过滤
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push(format!("\"tags\" @> $2::text[]"));
+                    where_parts.push(format!("\"tags\" {} $2::text[]", tag_op));
                 }
             }
 
@@ -662,7 +669,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
 
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push("\"tags\" @> $1::text[]".to_string());
+                    where_parts.push(format!("\"tags\" {} $1::text[]", tag_op));
                 }
             }
 
