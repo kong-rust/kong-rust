@@ -235,6 +235,23 @@ members:
 	@cargo metadata --format-version 1 --no-deps | python3 -c \
 		"import sys,json; [print(p['name']) for p in json.load(sys.stdin)['packages']]"
 
+# ========================
+# Kong Spec 测试 (busted)
+# ========================
+
+.PHONY: setup-busted spec spec-verbose
+
+setup-busted: ## 安装 busted 测试框架
+	@bash scripts/setup-busted.sh
+
+spec: build ## 运行 Kong 官方 spec 测试
+	@eval "$$(luarocks path --bin)" && \
+	busted --helper=spec/helpers.lua spec/ -o TAP --no-auto-insulate
+
+spec-verbose: build ## 运行 Kong spec 测试 (详细输出)
+	@eval "$$(luarocks path --bin)" && \
+	busted --helper=spec/helpers.lua spec/ -o utfTerminal --no-auto-insulate -v
+
 .PHONY: build release check build-crate \
         test test-crate test-name test-verbose test-integration \
         run run-conf run-debug run-trace run-mod-debug \
@@ -243,4 +260,5 @@ members:
         services-up services-down services-logs \
         dev dev-dbless dev-full \
         docker-build docker-push docker-run docker-run-pg docker-stop \
-        clean manager-clean clean-all deps members
+        clean manager-clean clean-all deps members \
+        setup-busted spec spec-verbose
