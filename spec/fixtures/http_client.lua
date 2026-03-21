@@ -248,6 +248,11 @@ function Client:head(path, opts)
     return self:send(opts)
 end
 
+-- request: alias for send (Kong spec compatibility) — send 的别名（Kong spec 兼容）
+function Client:request(opts)
+    return self:send(opts)
+end
+
 function Client:close()
     -- no-op for luasocket (connection-per-request) — luasocket 无需关闭
 end

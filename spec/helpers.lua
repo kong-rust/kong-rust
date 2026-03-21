@@ -775,9 +775,22 @@ function _M.get_db_utils(strategy, tables, plugins)
         return nil, "strategy '" .. strategy .. "' not supported"
     end
 
+    -- Ensure Kong is running (auto-start if not) — 确保 Kong 正在运行（如果没有则自动启动）
     local admin = _M.admin_client()
     if not admin then
-        error("Failed to connect to Admin API, is Kong-Rust running?")
+        -- Kong not running yet, start it — Kong 尚未运行，启动它
+        _M.start_kong({ database = strategy or "postgres" })
+        admin = _M.admin_client()
+        if not admin then
+            error("Failed to connect to Admin API after starting Kong-Rust")
+        end
+    else
+        -- Check if connection works — 检查连接是否正常
+        local res = admin:get("/status")
+        if not res or res.status ~= 200 then
+            _M.start_kong({ database = strategy or "postgres" })
+            admin = _M.admin_client()
+        end
     end
 
     -- truncate specified tables or all — 清空指定表或所有表
