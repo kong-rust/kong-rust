@@ -153,6 +153,7 @@ _M.test_conf = {
     proxy_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_SSL_PORT")) or 9443,
     admin_port       = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_PORT")) or 9001,
     admin_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_SSL_PORT")) or 9444,
+    status_port      = tonumber(os.getenv("KONG_SPEC_TEST_STATUS_PORT")) or 8007,
     -- hosts — 主机
     proxy_host       = os.getenv("KONG_SPEC_TEST_PROXY_HOST") or "127.0.0.1",
     admin_host       = os.getenv("KONG_SPEC_TEST_ADMIN_HOST") or "127.0.0.1",
@@ -225,7 +226,7 @@ end
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 
 local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
-local MOCK_UPSTREAM_PID_FILE = "/tmp/kong-rust-mock-upstream.pid"
+local MOCK_UPSTREAM_PID_FILE = os.getenv("KONG_SPEC_MOCK_UPSTREAM_PID_FILE") or "/tmp/kong-rust-mock-upstream.pid"
 
 ---------------------------------------------------------------------------
 -- Mock upstream constants — Mock 上游服务常量
@@ -260,7 +261,7 @@ function _M.start_mock_upstream()
     end
 
     local cmd = string.format(
-        "nohup %s mock-upstream --port %d > /tmp/kong-rust-mock-upstream.log 2>&1 & echo $! > %s",
+        "nohup %s mock-upstream --port %d > /tmp/gw-mock-upstream.log 2>&1 & echo $! > %s",
         KONG_RUST_BIN, _M.mock_upstream_port, MOCK_UPSTREAM_PID_FILE)
     os.execute(cmd)
 
@@ -339,6 +340,8 @@ local function build_env_str(conf)
         or string.format("0.0.0.0:%d", _M.test_conf.proxy_port)
     env.KONG_ADMIN_LISTEN = conf.admin_listen
         or string.format("0.0.0.0:%d", _M.test_conf.admin_port)
+    env.KONG_STATUS_LISTEN = conf.status_listen
+        or string.format("127.0.0.1:%d", _M.test_conf.status_port)
     env.KONG_LOG_LEVEL = conf.log_level or _M.test_conf.log_level
 
     if conf.plugins then
@@ -359,7 +362,7 @@ local function build_env_str(conf)
 
     local env_parts = {}
     for k, v in pairs(env) do
-        env_parts[#env_parts + 1] = string.format("%s=%s", k, v)
+        env_parts[#env_parts + 1] = string.format("%s='%s'", k, v)
     end
     return table.concat(env_parts, " "), env
 end
@@ -370,14 +373,14 @@ function _M.start_kong(conf)
     -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
     _M.stop_kong()
 
-    -- Kill any orphaned kong processes not tracked by PID file — 清理所有未被 PID 文件跟踪的残留 kong 进程
-    os.execute("pkill -f 'target/debug/kong' 2>/dev/null || true")
+    -- Kill any orphaned kong processes matching our binary — 清理匹配我们 binary 的残留 kong 进程
+    os.execute(string.format("pkill -f '%s' 2>/dev/null || true", KONG_RUST_BIN))
 
     -- Wait for ALL kong ports to be released — 等待所有 kong 端口释放
     local ports_to_check = {
-        _M.test_conf.admin_port,      -- 8001
-        _M.test_conf.proxy_port,      -- 8000
-        8007,                          -- status API port
+        _M.test_conf.admin_port,
+        _M.test_conf.proxy_port,
+        _M.test_conf.status_port,
     }
     _M.wait_until(function()
         for _, port in ipairs(ports_to_check) do
@@ -398,7 +401,7 @@ function _M.start_kong(conf)
     end
 
     local cmd = string.format(
-        "%s nohup %s start > /tmp/kong-rust-spec.log 2>&1 & echo $! > %s",
+        "%s nohup %s start > /tmp/gw-spec.log 2>&1 & echo $! > %s",
         env_str, KONG_RUST_BIN, PID_FILE)
     os.execute(cmd)
 
@@ -2089,6 +2092,17 @@ function _M.generate_keys(key_type)
     os.remove(tmpfile)
     os.remove(pubfile)
     return private_key, public_key
+end
+
+---------------------------------------------------------------------------
+-- get_available_port — 获取可用端口
+-- Binds to port 0, reads the assigned port, then closes the socket.
+---------------------------------------------------------------------------
+function _M.get_available_port()
+  local server = assert(socket.bind("127.0.0.1", 0))
+  local _, port = server:getsockname()
+  server:close()
+  return tonumber(port)
 end
 
 return _M

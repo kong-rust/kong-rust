@@ -11,14 +11,14 @@
 | 5 | 插件系统 | 4 | 4 | 0 |
 | 6 | Admin API | 4 | 4 | 0 |
 | 7 | TLS 和证书管理 | 1 | 1 | 0 |
-| 8 | 集成、启动、优化 | 19 | 18 | 1 |
+| 8 | 集成、启动、优化 | 19 | 19 | 0 |
 | 9 | Hybrid 模式 | 7 | 0 | 7 |
 | 10 | Docker 镜像 | 6 | 6 | 0 |
 | 11 | HTTP 代理性能优化 | 7 | 7 | 0 |
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| **合计** | | **70** | **62** | **8** |
+| **合计** | | **70** | **63** | **7** |
 
 ---
 
@@ -186,10 +186,10 @@
   - 测试基础设施、10 个阶段链测试、20+ PDK 测试、run-cargo-test.sh 统一入口
   - 文件：`crates/kong-proxy/tests/`, `scripts/run-cargo-test.sh`
 
-- [-] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
-  - Phase 0 Step 1-3 完成：busted CLI + spec.helpers (1600+行) + mock upstream + 断言系统
-  - Phase 0 Task 4 进行中：Admin API spec 对齐（services_routes 44/75 通过）
-  - 已创建：Kong Lua shim 模块、FlexibleBody 提取器（多 Content-Type 支持）、ngx 全局 shim
+- [x] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
+  - Phase 0 全部完成：375/375 (100%) — 8 个 spec 全部 0 failures, 0 errors
+  - busted CLI + spec.helpers (1800+行) + mock upstream + 断言系统
+  - Kong Lua shim 模块、FlexibleBody 提取器（多 Content-Type 支持）、ngx 全局 shim
   - 已复制：31 个 Kong 官方 spec 文件（admin_api 11、proxy 8、db 3、status 5、dbless 4）
   - 详见：`docs/implementation-logs/phase0-test-alignment.md`
 
