@@ -136,9 +136,7 @@ pub async fn get_entity_schema(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({
-                    "message": format!("No entity named '{}' was found", entity_name),
-                    "name": "not found",
-                    "code": 3,
+                    "message": format!("No entity named '{}'", entity_name),
                 })),
             )
                 .into_response();
@@ -170,8 +168,6 @@ pub async fn get_plugin_schema(
                 status,
                 Json(json!({
                     "message": message,
-                    "name": err.error_name(),
-                    "code": err.error_code(),
                 })),
             )
                 .into_response()

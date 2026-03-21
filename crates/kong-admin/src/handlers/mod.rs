@@ -98,6 +98,10 @@ pub struct ListParams {
     pub size: Option<usize>,
     pub offset: Option<String>,
     pub tags: Option<String>,
+    /// Filter consumers by custom_id — 按 custom_id 过滤 consumer
+    pub custom_id: Option<String>,
+    /// Filter consumers by username — 按 username 过滤 consumer
+    pub username: Option<String>,
 }
 
 impl ListParams {
@@ -696,13 +700,16 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                     }
                 }
                 // Only set path if the original URL explicitly includes a path component — 仅当原始 URL 明确包含路径部分时才设置 path
-                // e.g. "http://example.com" → no path, "http://example.com/" → path="/", "http://example.com/foo" → path="/foo"
+                // e.g. "http://example.com" → no path (set null), "http://example.com/" → path="/", "http://example.com/foo" → path="/foo"
                 let has_explicit_path = {
                     let after_scheme = url_str.find("://").map(|i| i + 3).unwrap_or(0);
                     url_str[after_scheme..].find('/').is_some()
                 };
                 if has_explicit_path && !obj.contains_key("path") {
                     obj.insert("path".to_string(), json!(parsed.path()));
+                } else if !has_explicit_path {
+                    // No explicit path in URL — explicitly set path to null to clear it — URL 中无显式路径 — 显式设置 path 为 null 以清除
+                    obj.insert("path".to_string(), Value::Null);
                 }
             }
         }
@@ -777,6 +784,9 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         };
                         if has_explicit_path && !obj.contains_key("path") {
                             obj.insert("path".to_string(), json!(parsed.path()));
+                        } else if !has_explicit_path {
+                            // No explicit path in URL — explicitly set path to null — URL 中无显式路径 — 显式设置 path 为 null
+                            obj.insert("path".to_string(), Value::Null);
                         }
                     }
                     Err(_) => {
@@ -902,31 +912,6 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Ok(b) => b,
         Err(e) => return e,
     };
-
-    // Plugin name validation: if body contains "name", it must be a known plugin — 插件名称验证：如果 body 包含 "name"，必须是已知插件
-    if T::table_name() == "plugins" {
-        if let Some(name) = body.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
-            let valid_plugins = [
-                "key-auth", "basic-auth", "rate-limiting", "cors", "tcp-log", "file-log",
-                "http-log", "ip-restriction", "request-transformer", "response-transformer",
-                "pre-function", "post-function", "acl", "bot-detection", "correlation-id",
-                "jwt", "hmac-auth", "oauth2", "ldap-auth", "session", "request-size-limiting",
-                "request-termination", "response-ratelimiting", "syslog", "loggly", "datadog",
-                "udp-log", "statsd", "prometheus",
-            ];
-            if !valid_plugins.contains(&name) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "code": 2,
-                        "name": "schema violation",
-                        "message": format!("schema violation (name: plugin '{}' not enabled; add it to the 'plugins' configuration property)", name),
-                        "fields": {"name": format!("plugin '{}' not enabled; add it to the 'plugins' configuration property", name)}
-                    })),
-                );
-            }
-        }
-    }
 
     // PATCH merge: fetch existing entity and merge with request body — PATCH 合并：获取已有实体并与请求体合并
     // For fields explicitly set to null in the request, keep them as null (clear the field) — 请求中显式设置为 null 的字段保留为 null（清除该字段）
@@ -1204,13 +1189,82 @@ entity_handlers!(
     Consumer,
     consumers,
     "",
-    list_consumers,
+    _list_consumers_generic,
     get_consumer,
     create_consumer,
     update_consumer,
     upsert_consumer,
     delete_consumer
 );
+
+/// Custom list handler for consumers with custom_id/username filtering — Consumer 自定义列表 handler，支持 custom_id/username 过滤
+pub async fn list_consumers(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    // Validate: empty string custom_id or username is invalid — 空字符串的 custom_id 或 username 无效
+    if let Some(ref cid) = params.custom_id {
+        if cid.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "invalid filter syntax",
+                    "name": "invalid filter syntax",
+                    "code": 2,
+                })),
+            );
+        }
+    }
+    if let Some(ref uname) = params.username {
+        if uname.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "invalid filter syntax",
+                    "name": "invalid filter syntax",
+                    "code": 2,
+                })),
+            );
+        }
+    }
+
+    // Validate tags before query — 查询前验证 tags 参数
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+
+    match state.consumers.page(&params.to_page_params()).await {
+        Ok(page) => {
+            // Post-filter by custom_id and/or username — 按 custom_id 和/或 username 后置过滤
+            let filtered_data: Vec<_> = page.data.into_iter().filter(|c: &Consumer| {
+                if let Some(ref cid) = params.custom_id {
+                    if c.custom_id.as_deref() != Some(cid.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref uname) = params.username {
+                    if c.username.as_deref() != Some(uname.as_str()) {
+                        return false;
+                    }
+                }
+                true
+            }).collect();
+
+            let filtered_page = Page {
+                data: filtered_data,
+                offset: page.offset,
+                next: page.next,
+            };
+            let resp = build_page_response_with_tags(&filtered_page, params.tags.as_deref());
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let status =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status, Json(json!({"message": e.to_string()})))
+        }
+    }
+}
 entity_handlers!(
     Plugin,
     plugins,
@@ -1463,9 +1517,12 @@ async fn update_scoped_plugin(
     scope_id: uuid::Uuid,
     upsert: bool,
 ) -> (StatusCode, Json<Value>) {
-    let existing = get_scoped_plugin(dao, plugin_id_or_name, scope_field, scope_id).await;
-    if existing.0 == StatusCode::NOT_FOUND {
-        return existing;
+    // For non-upsert (PATCH), verify plugin exists first — 非 upsert (PATCH) 时先验证插件存在
+    if !upsert {
+        let existing = get_scoped_plugin(dao, plugin_id_or_name, scope_field, scope_id).await;
+        if existing.0 == StatusCode::NOT_FOUND {
+            return existing;
+        }
     }
 
     if let Some(obj) = body.as_object_mut() {

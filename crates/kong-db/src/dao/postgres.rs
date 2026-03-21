@@ -829,9 +829,36 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         let entity_json = serde_json::to_value(entity)
             .map_err(|e| KongError::SerializationError(format!("序列化失败: {}", e)))?;
 
-        let params = entity_to_params(&entity_json, &self.schema)?;
+        let mut params = entity_to_params(&entity_json, &self.schema)?;
         let table = &self.schema.table_name;
         let select_exprs = build_select_exprs(&self.schema);
+
+        // When upserting by endpoint_key (e.g. instance_name), first look up existing entity
+        // to get its real id, since the endpoint_key column may not have a UNIQUE constraint.
+        // 当通过 endpoint_key（如 instance_name）执行 upsert 时，先查找已有实体以获取其真实 id，
+        // 因为 endpoint_key 列可能没有 UNIQUE 约束。
+        if let PrimaryKey::EndpointKey(key) = pk {
+            if let Some(ek) = T::endpoint_key() {
+                let lookup_sql = format!(
+                    "SELECT \"id\" FROM \"{}\" WHERE \"{}\" = $1 LIMIT 1",
+                    table, ek
+                );
+                if let Ok(row) = sqlx::query(&lookup_sql)
+                    .bind(key)
+                    .fetch_one(self.db.pool())
+                    .await
+                {
+                    // Replace id in params with the existing entity's id — 用已有实体的 id 替换 params 中的 id
+                    let existing_id: Uuid = row.get("id");
+                    for (col, param) in &mut params {
+                        if col == "id" {
+                            *param = SqlParam::Uuid(Some(existing_id));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         let columns: Vec<&str> = params.iter().map(|(col, _)| col.as_str()).collect();
 
@@ -853,11 +880,8 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             .map(|(col, _)| format!("\"{}\" = EXCLUDED.\"{}\"", col, col))
             .collect();
 
-        // Determine conflict constraint — 确定冲突约束
-        let conflict_column = match pk {
-            PrimaryKey::Id(_) => "id".to_string(),
-            PrimaryKey::EndpointKey(_) => T::endpoint_key().unwrap_or("id").to_string(),
-        };
+        // Always use ON CONFLICT("id") — id has a PRIMARY KEY constraint — 始终使用 ON CONFLICT("id") — id 有主键约束
+        let conflict_column = "id".to_string();
 
         let sql = format!(
             "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT (\"{}\") DO UPDATE SET {} RETURNING {}",

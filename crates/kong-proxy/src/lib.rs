@@ -446,11 +446,20 @@ impl KongProxy {
         session: &mut Session,
         status_code: u16,
         message: &str,
+        request_id: Option<&str>,
     ) -> pingora_core::Result<bool> {
         let body = format!("{{\"message\":\"{}\"}}", message);
         let body_bytes = body.as_bytes();
 
-        let resp = self.build_response_header(status_code, body_bytes.len())?;
+        let mut resp = self.build_response_header(status_code, body_bytes.len())?;
+
+        // Inject X-Kong-Request-Id in error responses — 在错误响应中注入 X-Kong-Request-Id
+        if let Some(rid) = request_id {
+            if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+                let _ = resp.insert_header("x-kong-request-id", rid);
+            }
+        }
+
         session.write_response_header(Box::new(resp), false).await?;
         session
             .write_response_body(Some(Bytes::copy_from_slice(body_bytes)), true)
@@ -464,6 +473,7 @@ impl KongProxy {
         &self,
         session: &mut Session,
         ctx: &mut RequestCtx,
+        request_id: &str,
     ) -> pingora_core::Result<bool> {
         let status_code = ctx.exit_status.unwrap_or(200);
         let body = ctx.exit_body.take();
@@ -471,6 +481,11 @@ impl KongProxy {
 
         let body_bytes = body.as_deref().unwrap_or("").as_bytes();
         let mut resp = self.build_response_header(status_code, body_bytes.len())?;
+
+        // Inject X-Kong-Request-Id in short-circuit responses — 在短路响应中注入 X-Kong-Request-Id
+        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+            let _ = resp.insert_header("x-kong-request-id", request_id);
+        }
 
         // 应用插件设置的自定义响应头
         if let Some(hdrs) = headers {
@@ -542,7 +557,7 @@ impl ProxyHttp for KongProxy {
             Some(rm) => rm,
             None => {
                 return self
-                    .send_error_response(session, 404, "no Route matched with those values")
+                    .send_error_response(session, 404, "no Route matched with those values", Some(&ctx.request_id))
                     .await;
             }
         };
@@ -562,14 +577,14 @@ impl ProxyHttp for KongProxy {
             Some(s) => s,
             None => {
                 return self
-                    .send_error_response(session, 503, "no Service found for the requested route")
+                    .send_error_response(session, 503, "no Service found for the requested route", Some(&ctx.request_id))
                     .await;
             }
         };
 
         if !service.enabled {
             return self
-                .send_error_response(session, 503, "Service unavailable")
+                .send_error_response(session, 503, "Service unavailable", Some(&ctx.request_id))
                 .await;
         }
 
@@ -613,7 +628,7 @@ impl ProxyHttp for KongProxy {
         {
             tracing::error!("请求体预读取失败: {}", err);
             return self
-                .send_error_response(session, 400, "Bad request body")
+                .send_error_response(session, 400, "Bad request body", Some(&ctx.request_id))
                 .await;
         }
 
@@ -621,7 +636,7 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
             return self
-                .send_error_response(session, 500, "An unexpected error occurred")
+                .send_error_response(session, 500, "An unexpected error occurred", Some(&ctx.request_id))
                 .await;
         }
 
@@ -630,7 +645,7 @@ impl ProxyHttp for KongProxy {
             // Save plugin chain for log phase — 保存插件链供 log 阶段使用
             ctx.resolved_plugins = resolved_plugins;
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id)
                 .await;
         }
 
@@ -638,7 +653,7 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
             return self
-                .send_error_response(session, 500, "An unexpected error occurred")
+                .send_error_response(session, 500, "An unexpected error occurred", Some(&ctx.request_id))
                 .await;
         }
 
@@ -646,7 +661,7 @@ impl ProxyHttp for KongProxy {
         if ctx.plugin_ctx.is_short_circuited() {
             ctx.resolved_plugins = resolved_plugins;
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id)
                 .await;
         }
 
