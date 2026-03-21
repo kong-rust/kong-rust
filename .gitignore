@@ -62,7 +62,6 @@ kong-manager/bundle-analyzer/
 .claude/todos/
 
 # ========================
-# gstack / AI 工具
+# AI 工具
 # ========================
-.gstack/
 CLAUDE.md
