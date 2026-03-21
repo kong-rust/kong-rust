@@ -10,10 +10,24 @@ math.randomseed(socket.gettime() * 1000)
 local _M = {}
 
 ---------------------------------------------------------------------------
+-- Penlight modules — Penlight 工具库
+---------------------------------------------------------------------------
+
+local pl_path = require("pl.path")
+local pl_dir = require("pl.dir")
+local pl_file = require("pl.file")
+local pl_utils = require("pl.utils")
+
+_M.dir = pl_dir
+_M.path = pl_path
+_M.file = pl_file
+_M.utils = pl_utils
+
+---------------------------------------------------------------------------
 -- Configuration — 配置
 ---------------------------------------------------------------------------
 
--- 自动检测 docker 容器端口映射 — auto-detect docker container port mapping
+-- auto-detect docker container port mapping — 自动检测 docker 容器端口映射
 local function detect_pg_port()
     local env_port = os.getenv("KONG_SPEC_TEST_PG_PORT")
     if env_port then return tonumber(env_port) end
@@ -33,17 +47,37 @@ local function detect_pg_port()
 end
 
 _M.test_conf = {
+    -- listen addresses — 监听地址
+    proxy_listen     = "0.0.0.0:9000, 0.0.0.0:9443 ssl",
+    admin_listen     = "127.0.0.1:9001",
+    -- ports — 端口
     proxy_port       = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_PORT")) or 9000,
     proxy_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_SSL_PORT")) or 9443,
     admin_port       = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_PORT")) or 9001,
+    admin_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_SSL_PORT")) or 9444,
+    -- hosts — 主机
     proxy_host       = os.getenv("KONG_SPEC_TEST_PROXY_HOST") or "127.0.0.1",
     admin_host       = os.getenv("KONG_SPEC_TEST_ADMIN_HOST") or "127.0.0.1",
+    -- database — 数据库
     pg_host          = os.getenv("KONG_SPEC_TEST_PG_HOST") or "127.0.0.1",
     pg_port          = detect_pg_port(),
     pg_user          = os.getenv("KONG_SPEC_TEST_PG_USER") or "kong",
     pg_password      = os.getenv("KONG_SPEC_TEST_PG_PASSWORD") or "kong",
     pg_database      = os.getenv("KONG_SPEC_TEST_PG_DATABASE") or "kong_tests",
     database         = os.getenv("KONG_SPEC_TEST_DATABASE") or "postgres",
+    -- paths — 路径
+    prefix           = os.getenv("KONG_SPEC_TEST_PREFIX") or "servroot",
+    -- ssl certificates — SSL 证书
+    ssl_cert         = "spec/fixtures/kong_spec.crt",
+    ssl_cert_key     = "spec/fixtures/kong_spec.key",
+    admin_ssl_cert   = "spec/fixtures/kong_spec.crt",
+    admin_ssl_cert_key = "spec/fixtures/kong_spec.key",
+    -- worker config — worker 配置
+    nginx_worker_processes = 1,
+    -- logging — 日志
+    log_level        = "warn",
+    -- plugins
+    plugins          = "bundled",
 }
 
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
@@ -122,10 +156,25 @@ function _M.stop_mock_upstream()
 end
 
 ---------------------------------------------------------------------------
+-- Mock upstream constants — Mock 上游服务常量
+---------------------------------------------------------------------------
+
+_M.mock_upstream_protocol = "http"
+_M.mock_upstream_host = "127.0.0.1"
+_M.mock_upstream_hostname = "localhost"
+_M.mock_upstream_port = tonumber(os.getenv("KONG_SPEC_MOCK_UPSTREAM_PORT")) or 15555
+_M.mock_upstream_ssl_port = tonumber(os.getenv("KONG_SPEC_MOCK_UPSTREAM_SSL_PORT")) or 15556
+_M.mock_upstream_url = string.format("http://127.0.0.1:%d", _M.mock_upstream_port)
+_M.mock_upstream_ssl_url = string.format("https://127.0.0.1:%d", _M.mock_upstream_ssl_port)
+_M.mock_upstream_stream_port = 15557
+_M.mock_upstream_stream_ssl_port = 15558
+
+---------------------------------------------------------------------------
 -- Kong lifecycle — Kong 生命周期管理
 ---------------------------------------------------------------------------
 
-function _M.start_kong(conf)
+-- build env string from conf table — 从配置表构建环境变量字符串
+local function build_env_str(conf)
     conf = conf or {}
 
     -- Auto-start mock upstream — 自动启动 mock upstream
@@ -133,14 +182,16 @@ function _M.start_kong(conf)
 
     local env = {}
     env.KONG_DATABASE = conf.database or _M.test_conf.database
-    env.KONG_PG_HOST = _M.test_conf.pg_host
-    env.KONG_PG_PORT = tostring(_M.test_conf.pg_port)
-    env.KONG_PG_USER = _M.test_conf.pg_user
-    env.KONG_PG_PASSWORD = _M.test_conf.pg_password
-    env.KONG_PG_DATABASE = _M.test_conf.pg_database
-    env.KONG_PROXY_LISTEN = string.format("0.0.0.0:%d", _M.test_conf.proxy_port)
-    env.KONG_ADMIN_LISTEN = string.format("0.0.0.0:%d", _M.test_conf.admin_port)
-    env.KONG_LOG_LEVEL = conf.log_level or "warn"
+    env.KONG_PG_HOST = conf.pg_host or _M.test_conf.pg_host
+    env.KONG_PG_PORT = tostring(conf.pg_port or _M.test_conf.pg_port)
+    env.KONG_PG_USER = conf.pg_user or _M.test_conf.pg_user
+    env.KONG_PG_PASSWORD = conf.pg_password or _M.test_conf.pg_password
+    env.KONG_PG_DATABASE = conf.pg_database or _M.test_conf.pg_database
+    env.KONG_PROXY_LISTEN = conf.proxy_listen
+        or string.format("0.0.0.0:%d", _M.test_conf.proxy_port)
+    env.KONG_ADMIN_LISTEN = conf.admin_listen
+        or string.format("0.0.0.0:%d", _M.test_conf.admin_port)
+    env.KONG_LOG_LEVEL = conf.log_level or _M.test_conf.log_level
 
     if conf.plugins then
         env.KONG_PLUGINS = type(conf.plugins) == "table"
@@ -148,11 +199,27 @@ function _M.start_kong(conf)
             or tostring(conf.plugins)
     end
 
+    -- pass through any KONG_* keys from conf — 透传 conf 中的 KONG_* 键
+    for k, v in pairs(conf) do
+        local upper = k:upper()
+        if upper:sub(1, 5) == "KONG_" and not env[upper] then
+            env[upper] = tostring(v)
+        elseif not env["KONG_" .. upper] then
+            env["KONG_" .. upper] = tostring(v)
+        end
+    end
+
     local env_parts = {}
     for k, v in pairs(env) do
         env_parts[#env_parts + 1] = string.format("%s=%s", k, v)
     end
-    local env_str = table.concat(env_parts, " ")
+    return table.concat(env_parts, " "), env
+end
+
+function _M.start_kong(conf)
+    conf = conf or {}
+
+    local env_str, env = build_env_str(conf)
 
     if env.KONG_DATABASE ~= "off" then
         os.execute(string.format("%s %s db bootstrap 2>/dev/null || true",
@@ -179,7 +246,7 @@ function _M.start_kong(conf)
     return true
 end
 
-function _M.stop_kong()
+function _M.stop_kong(prefix, preserve_prefix, preserve_dc)
     local f = io.open(PID_FILE, "r")
     if f then
         local pid = f:read("*l")
@@ -200,19 +267,56 @@ function _M.stop_kong()
     return true
 end
 
+function _M.restart_kong(conf)
+    _M.stop_kong()
+    return _M.start_kong(conf)
+end
+
+function _M.reload_kong(conf)
+    -- Kong-Rust: reload = restart (no hot reload support yet)
+    -- Kong-Rust: reload = 重启（暂不支持热重载）
+    return _M.restart_kong(conf)
+end
+
+function _M.cleanup_kong(prefix)
+    _M.stop_kong()
+end
+
 ---------------------------------------------------------------------------
 -- HTTP Clients — HTTP 客户端
 ---------------------------------------------------------------------------
 
-function _M.proxy_client(timeout)
+-- generic HTTP client constructor — 通用 HTTP 客户端构造器
+-- supports both (host, port, timeout) and ({host=, port=, ...}) forms
+_M.http_client = function(host_or_opts, port, timeout)
+    if type(host_or_opts) == "table" then
+        local opts = host_or_opts
+        return http_client.new(
+            opts.host or "127.0.0.1",
+            opts.port,
+            {
+                timeout = opts.timeout and (opts.timeout / 1000) or 10,
+                scheme = opts.scheme or "http",
+            }
+        )
+    else
+        return http_client.new(
+            host_or_opts or "127.0.0.1",
+            port,
+            { timeout = timeout and (timeout / 1000) or 10 }
+        )
+    end
+end
+
+function _M.proxy_client(timeout, forced_port, forced_ip)
     return http_client.new(
-        _M.test_conf.proxy_host,
-        _M.test_conf.proxy_port,
+        forced_ip or _M.test_conf.proxy_host,
+        forced_port or _M.test_conf.proxy_port,
         { timeout = timeout or 10 }
     )
 end
 
-function _M.proxy_ssl_client(timeout)
+function _M.proxy_ssl_client(timeout, sni)
     return http_client.new(
         _M.test_conf.proxy_host,
         _M.test_conf.proxy_ssl_port,
@@ -220,12 +324,35 @@ function _M.proxy_ssl_client(timeout)
     )
 end
 
-function _M.admin_client(timeout)
+function _M.admin_client(timeout, forced_port)
     return http_client.new(
         _M.test_conf.admin_host,
-        _M.test_conf.admin_port,
+        forced_port or _M.test_conf.admin_port,
         { timeout = timeout or 10 }
     )
+end
+
+function _M.admin_ssl_client(timeout)
+    return http_client.new(
+        _M.test_conf.admin_host,
+        _M.test_conf.admin_ssl_port,
+        { timeout = timeout or 10, scheme = "https" }
+    )
+end
+
+---------------------------------------------------------------------------
+-- Proxy/Admin port helpers — 代理/管理端口辅助
+---------------------------------------------------------------------------
+
+function _M.get_proxy_port(ssl)
+    if ssl then
+        return _M.test_conf.proxy_ssl_port
+    end
+    return _M.test_conf.proxy_port
+end
+
+function _M.get_proxy_ip(ssl)
+    return _M.test_conf.proxy_host
 end
 
 ---------------------------------------------------------------------------
@@ -291,6 +418,13 @@ function Blueprint:new(admin_client)
                         end
                     end
                 end,
+
+                -- remove: alias for delete by id — remove: 按 id 删除的别名
+                remove = function(_, data)
+                    if data and data.id then
+                        bp.admin:delete(endpoint .. "/" .. data.id)
+                    end
+                end,
             }
         end,
     })
@@ -299,7 +433,34 @@ function Blueprint:new(admin_client)
 end
 
 function _M.get_db_utils(strategy, tables, plugins)
+    -- strategy is accepted but ignored (Kong-Rust only supports postgres)
+    -- strategy 参数接受但忽略（Kong-Rust 仅支持 postgres）
+    if strategy and strategy ~= "postgres" and strategy ~= "off" then
+        -- skip strategies we don't support — 跳过不支持的策略
+        return nil, "strategy '" .. strategy .. "' not supported"
+    end
+
     local admin = _M.admin_client()
+    if not admin then
+        error("Failed to connect to Admin API, is Kong-Rust running?")
+    end
+
+    -- truncate specified tables or all — 清空指定表或所有表
+    if tables then
+        for _, tbl in ipairs(tables) do
+            local endpoint = "/" .. tbl:gsub("_", "-")
+            local res = admin:get(endpoint)
+            if res and res.status == 200 then
+                local ok, body = pcall(cjson.decode, res.body)
+                if ok and body and body.data then
+                    for _, item in ipairs(body.data) do
+                        admin:delete(endpoint .. "/" .. item.id)
+                    end
+                end
+            end
+        end
+    end
+
     local bp = Blueprint:new(admin)
     return bp, nil
 end
@@ -912,21 +1073,114 @@ end
 -- Wait utilities — 等待工具
 ---------------------------------------------------------------------------
 
-function _M.wait_until(fn, timeout)
+function _M.wait_until(fn, timeout, step)
     timeout = timeout or 10
+    step = step or 0.1
     local deadline = socket.gettime() + timeout
+    local last_err
     while socket.gettime() < deadline do
         local ok, res = pcall(fn)
         if ok and res then
             return true
         end
-        socket.sleep(0.1)
+        if not ok then
+            last_err = res
+        end
+        socket.sleep(step)
     end
-    return false
+    return false, last_err
+end
+
+-- pwait_until: protected wait — 受保护的等待（函数无错误即成功）
+function _M.pwait_until(fn, timeout, step)
+    timeout = timeout or 10
+    step = step or 0.1
+    local deadline = socket.gettime() + timeout
+    local last_err
+    while socket.gettime() < deadline do
+        local ok, err = pcall(fn)
+        if ok then
+            return true
+        end
+        last_err = err
+        socket.sleep(step)
+    end
+    error("pwait_until timeout after " .. timeout .. "s: " .. tostring(last_err))
+end
+
+-- wait_for_file: wait for file to exist with given mode — 等待文件以指定模式存在
+function _M.wait_for_file(mode, path, timeout)
+    timeout = timeout or 10
+    _M.pwait_until(function()
+        -- use pl.path for mode checking — 使用 pl.path 检查文件模式
+        if mode == "file" then
+            assert(pl_path.isfile(path),
+                string.format("expected '%s' to be a file", path))
+        elseif mode == "directory" then
+            assert(pl_path.isdir(path),
+                string.format("expected '%s' to be a directory", path))
+        else
+            assert(pl_path.exists(path),
+                string.format("expected '%s' to exist", path))
+        end
+    end, timeout)
+end
+
+-- wait_for_file_contents: wait for file to exist and be non-empty — 等待文件存在且非空
+function _M.wait_for_file_contents(fname, timeout)
+    assert(type(fname) == "string", "filename must be a string")
+    timeout = timeout or 10
+
+    -- try immediate read — 先尝试立即读取
+    local data = pl_file.read(fname)
+    if data and #data > 0 then
+        return data
+    end
+
+    -- poll until file has content — 轮询直到文件有内容
+    pcall(_M.wait_until, function()
+        data = pl_file.read(fname)
+        return data and #data > 0
+    end, timeout)
+
+    assert(data, "file (" .. fname .. ") does not exist or is not readable"
+                 .. " after " .. tostring(timeout) .. " seconds")
+    assert(#data > 0, "file (" .. fname .. ") exists but is empty after "
+                      .. tostring(timeout) .. " seconds")
+    return data
 end
 
 function _M.sleep(seconds)
     socket.sleep(seconds)
+end
+
+---------------------------------------------------------------------------
+-- Shell utilities — Shell 工具
+---------------------------------------------------------------------------
+
+function _M.execute(cmd)
+    local handle = io.popen(cmd .. " 2>&1")
+    local result = handle:read("*a")
+    local ok, _, code = handle:close()
+    return result, "", code or (ok and 0 or 1)
+end
+
+-- kong_exec: execute kong CLI command — 执行 kong CLI 命令
+function _M.kong_exec(cmd, env)
+    local env_str = ""
+    if env then
+        local parts = {}
+        for k, v in pairs(env) do
+            local key = k:upper()
+            if key:sub(1, 5) ~= "KONG_" then
+                key = "KONG_" .. key
+            end
+            parts[#parts + 1] = string.format("%s=%s", key, tostring(v))
+        end
+        env_str = table.concat(parts, " ") .. " "
+    end
+    local full_cmd = string.format("%s%s %s", env_str, KONG_RUST_BIN, cmd)
+    return _M.execute(full_cmd)
 end
 
 ---------------------------------------------------------------------------
@@ -953,13 +1207,15 @@ _M.all_strategies = _M.each_strategy
 
 function _M.clean_db()
     local admin = _M.admin_client()
+    if not admin then return end
+
     local entities = { "plugins", "snis", "routes", "services", "consumers",
                        "targets", "upstreams", "certificates", "ca_certificates" }
     for _, entity in ipairs(entities) do
         local res = admin:get("/" .. entity:gsub("_", "-"))
         if res and res.status == 200 then
-            local body = cjson.decode(res.body)
-            if body and body.data then
+            local ok, body = pcall(cjson.decode, res.body)
+            if ok and body and body.data then
                 for _, item in ipairs(body.data) do
                     admin:delete("/" .. entity:gsub("_", "-") .. "/" .. item.id)
                 end
@@ -969,15 +1225,117 @@ function _M.clean_db()
 end
 
 ---------------------------------------------------------------------------
--- Misc utilities — 杂项工具
+-- TCP/UDP server — TCP/UDP 服务器
 ---------------------------------------------------------------------------
 
-function _M.execute(cmd)
-    local handle = io.popen(cmd .. " 2>&1")
-    local result = handle:read("*a")
-    local ok, _, code = handle:close()
-    return result, "", code or (ok and 0 or 1)
+-- tcp_server: start a simple TCP echo server in a coroutine
+-- TCP 服务器：在协程中启动简单的 TCP 回显服务器
+function _M.tcp_server(port, opts)
+    opts = opts or {}
+    port = port or _M.mock_upstream_port
+
+    local server = assert(socket.tcp())
+    server:settimeout(opts.timeout or 60)
+    assert(server:setoption("reuseaddr", true))
+    assert(server:bind("*", port))
+    assert(server:listen())
+
+    -- return a thread-like object with :join() — 返回类线程对象，支持 :join()
+    local result = nil
+    local done = false
+
+    -- use a coroutine to simulate llthreads2 behavior — 用协程模拟 llthreads2 行为
+    local co = coroutine.create(function()
+        local n = opts.requests or 1
+        local data = {}
+        for i = 1, n do
+            local client, err = server:accept()
+            if not client then
+                result = nil
+                done = true
+                server:close()
+                return
+            end
+            local line, recv_err = client:receive()
+            if line then
+                data[i] = line
+                client:send((opts.prefix or "") .. line .. "\n")
+            end
+            client:close()
+        end
+        server:close()
+        result = n == 1 and data[1] or data
+        done = true
+    end)
+
+    -- start the coroutine — 启动协程
+    coroutine.resume(co)
+
+    return {
+        join = function(self)
+            -- poll until done — 轮询直到完成
+            local deadline = socket.gettime() + (opts.timeout or 60)
+            while not done and socket.gettime() < deadline do
+                if coroutine.status(co) == "suspended" then
+                    coroutine.resume(co)
+                end
+                socket.sleep(0.01)
+            end
+            return true, result
+        end,
+    }
 end
+
+-- udp_server: start a simple UDP server in a coroutine
+-- UDP 服务器：在协程中启动简单的 UDP 服务器
+function _M.udp_server(port, n, timeout)
+    port = port or _M.mock_upstream_port
+    n = n or 1
+    timeout = timeout or 360
+
+    local server = assert(socket.udp())
+    server:settimeout(timeout)
+    server:setoption("reuseaddr", true)
+    server:setsockname("127.0.0.1", port)
+
+    local result = nil
+    local done = false
+
+    local co = coroutine.create(function()
+        local data = {}
+        local i = 0
+        while i < n do
+            local pkt, err = server:receive()
+            if not pkt then
+                break
+            end
+            i = i + 1
+            data[i] = pkt
+        end
+        server:close()
+        result = n == 1 and data[1] or data
+        done = true
+    end)
+
+    coroutine.resume(co)
+
+    return {
+        join = function(self)
+            local deadline = socket.gettime() + timeout
+            while not done and socket.gettime() < deadline do
+                if coroutine.status(co) == "suspended" then
+                    coroutine.resume(co)
+                end
+                socket.sleep(0.01)
+            end
+            return true, result
+        end,
+    }
+end
+
+---------------------------------------------------------------------------
+-- Misc utilities — 杂项工具
+---------------------------------------------------------------------------
 
 function _M.uuid()
     local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
@@ -985,6 +1343,151 @@ function _M.uuid()
         local v = (c == "x") and math.random(0, 0xf) or math.random(8, 0xb)
         return string.format("%x", v)
     end)
+end
+
+-- unindent: remove common leading whitespace — 移除公共前导空白
+function _M.unindent(str, concat_newlines, spaced_newlines)
+    str = string.match(str, "(.-%S*)%s*$")
+    if not str then
+        return ""
+    end
+
+    local level = math.huge
+    local prefix = ""
+    local len
+
+    str = str:match("^%s") and "\n" .. str or str
+    for pref in str:gmatch("\n(%s+)") do
+        len = #pref
+        if len < level then
+            level = len
+            prefix = pref
+        end
+    end
+
+    local repl = concat_newlines and "" or "\n"
+    repl = spaced_newlines and " " or repl
+
+    return (str:gsub("^\n%s*", ""):gsub("\n" .. prefix, repl):gsub("\n$", ""):gsub("\\r", "\r"))
+end
+
+-- make_yaml_file: write YAML content to a temp file — 写 YAML 内容到临时文件
+function _M.make_yaml_file(content, filename)
+    filename = filename or pl_path.tmpname() .. ".yml"
+    if content then
+        local fd = assert(io.open(filename, "w"))
+        assert(fd:write(_M.unindent(content)))
+        assert(fd:write("\n"))
+        assert(fd:close())
+    end
+    return filename
+end
+
+-- setenv / unsetenv: set/unset environment variables — 设置/取消环境变量
+-- Note: Lua 5.1 has no native setenv; use os.execute as fallback
+-- 注意：Lua 5.1 没有原生 setenv；使用 os.execute 作为后备
+do
+    local ok, posix = pcall(require, "posix")
+    if ok and posix and posix.setenv then
+        _M.setenv = function(name, value)
+            posix.setenv(name, value)
+        end
+        _M.unsetenv = function(name)
+            posix.setenv(name, nil)
+        end
+    else
+        -- fallback: these only affect child processes, not current process
+        -- 后备方案：仅影响子进程，不影响当前进程
+        _M.setenv = function(name, value)
+            -- no-op in pure Lua 5.1, but some C modules provide this
+            -- 在纯 Lua 5.1 中无操作
+        end
+        _M.unsetenv = function(name)
+            -- no-op — 无操作
+        end
+    end
+end
+
+-- deep_sort: recursively sort tables for comparison — 递归排序表以便比较
+do
+    local deep_sort
+
+    local function deep_compare(a, b)
+        if a == nil then a = "" end
+        if b == nil then b = "" end
+
+        deep_sort(a)
+        deep_sort(b)
+
+        if type(a) ~= type(b) then
+            return type(a) < type(b)
+        end
+
+        if type(a) == "table" then
+            return deep_compare(a[1], b[1])
+        end
+
+        if type(a) == "userdata" and type(b) == "userdata" then
+            return false
+        end
+
+        return a < b
+    end
+
+    deep_sort = function(t)
+        if type(t) == "table" then
+            for _, v in pairs(t) do
+                deep_sort(v)
+            end
+            table.sort(t, deep_compare)
+        end
+        return t
+    end
+
+    _M.deep_sort = deep_sort
+end
+
+-- intercept: capture stdout/stderr of a function — 捕获函数的标准输出/错误
+function _M.intercept(fn, ...)
+    -- simple implementation: just run the function — 简单实现：直接运行函数
+    local old_print = print
+    local output = {}
+    print = function(...)
+        local args = { ... }
+        for i, v in ipairs(args) do
+            args[i] = tostring(v)
+        end
+        output[#output + 1] = table.concat(args, "\t")
+    end
+    local results = { pcall(fn, ...) }
+    print = old_print
+    return table.concat(output, "\n"), results
+end
+
+-- make_temp_dir: create a temporary directory — 创建临时目录
+function _M.make_temp_dir()
+    local name = os.tmpname()
+    os.remove(name)
+    pl_dir.makepath(name)
+    return name
+end
+
+-- generate_keys: generate RSA key pair (PEM) — 生成 RSA 密钥对
+function _M.generate_keys(key_type)
+    key_type = key_type or "RSA"
+    local tmpfile = os.tmpname()
+    local pubfile = tmpfile .. ".pub"
+    if key_type == "RSA" then
+        os.execute(string.format(
+            "openssl genrsa -out %s 2048 2>/dev/null", tmpfile))
+        os.execute(string.format(
+            "openssl rsa -in %s -pubout -out %s 2>/dev/null", tmpfile, pubfile))
+    end
+    local private_key = pl_file.read(tmpfile) or ""
+    local public_key = pl_file.read(pubfile) or ""
+    os.remove(tmpfile)
+    os.remove(pubfile)
+    return private_key, public_key
 end
 
 return _M

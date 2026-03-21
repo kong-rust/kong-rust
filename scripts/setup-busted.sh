@@ -26,6 +26,12 @@ luarocks install --local --lua-version=5.1 luasec
 echo "=== 安装 lua-cjson (JSON 编解码) ==="
 luarocks install --local --lua-version=5.1 lua-cjson 2.1.0.10-1
 
+echo "=== 安装 luafilesystem (文件系统操作) ==="
+luarocks install --local --lua-version=5.1 luafilesystem
+
+echo "=== 安装 penlight (工具库) ==="
+luarocks install --local --lua-version=5.1 penlight
+
 echo "=== 验证安装 ==="
 eval "$(luarocks path --bin)"
 busted --version
