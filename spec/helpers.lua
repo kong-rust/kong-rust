@@ -214,19 +214,13 @@ _M.test_conf = {
 -- db shim — 数据库对象兼容层（供 helpers.db.daos 使用）
 ---------------------------------------------------------------------------
 _M.db = {
-    daos = {
-        services = true,
-        routes = true,
-        consumers = true,
-        plugins = true,
-        upstreams = true,
-        targets = true,
-        certificates = true,
-        snis = true,
-        ca_certificates = true,
-        vaults = true,
-    }
+    daos = {}
 }
+-- Populate with entity objects that have schema.name — 填充具有 schema.name 的实体对象
+for _, name in ipairs({"services", "routes", "consumers", "plugins", "upstreams",
+                        "targets", "certificates", "snis", "ca_certificates", "vaults"}) do
+    _M.db.daos[name] = { schema = { name = name } }
+end
 
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 

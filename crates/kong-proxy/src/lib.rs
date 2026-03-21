@@ -1179,18 +1179,24 @@ impl ProxyHttp for KongProxy {
             }
         }
 
-        // Add Kong standard response headers — 添加 Kong 标准响应头
-        let now = std::time::Instant::now();
-        let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
-        let upstream_latency = ctx
-            .upstream_response_time
-            .map(|t| t.duration_since(ctx.request_start_time).as_millis())
-            .unwrap_or(0);
-        let _ =
-            upstream_response.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
-        let _ = upstream_response
-            .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
-        let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
+        // Add Kong standard response headers (only if headers config enables them) — 添加 Kong 标准响应头（仅当 headers 配置启用时）
+        let has_latency = self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("latency_tokens"));
+        if has_latency {
+            let now = std::time::Instant::now();
+            let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+            let upstream_latency = ctx
+                .upstream_response_time
+                .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+                .unwrap_or(0);
+            let _ =
+                upstream_response.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
+            let _ = upstream_response
+                .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
+        }
+        let has_server_tokens = self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("server_tokens"));
+        if has_server_tokens {
+            let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
+        }
         // Use per-request X-Kong-Request-Id in downstream response (only if headers config includes it) — 在下游响应中使用每请求的 X-Kong-Request-Id（仅当 headers 配置包含时）
         if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
             let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
@@ -1200,7 +1206,9 @@ impl ProxyHttp for KongProxy {
         if self.config.proxy_hide_server_header {
             upstream_response.remove_header("server");
         }
-        let _ = upstream_response.insert_header("server", "kong-rust/0.1.0");
+        if has_server_tokens {
+            let _ = upstream_response.insert_header("server", "kong-rust/0.1.0");
+        }
 
         // 注入自定义响应头
         for header_str in &self.config.proxy_response_headers {

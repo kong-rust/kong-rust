@@ -145,13 +145,13 @@ async fn parse_multipart<S: Send + Sync>(
     req: Request,
     state: &S,
 ) -> Result<FlexibleBody, FlexibleBodyRejection> {
-    let mut multipart =
-        Multipart::from_request(req, state)
-            .await
-            .map_err(|e| FlexibleBodyRejection {
-                status: StatusCode::BAD_REQUEST,
-                message: format!("invalid multipart body: {}", e),
-            })?;
+    let mut multipart = match Multipart::from_request(req, state).await {
+        Ok(m) => m,
+        Err(_) => {
+            // Multipart 解析失败（如空请求体）— 返回空 JSON 对象以便验证逻辑执行
+            return Ok(FlexibleBody(Value::Object(Map::new())));
+        }
+    };
 
     let mut pairs: Vec<(String, String)> = Vec::new();
 

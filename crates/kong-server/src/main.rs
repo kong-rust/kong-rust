@@ -546,7 +546,11 @@ async fn init_proxy_and_admin(
     use kong_db::*;
 
     let plugin_registry = build_plugin_registry(config);
-    let node_id = uuid::Uuid::new_v4();
+    // Use configured node_id if provided, otherwise generate a new one — 如果配置了 node_id 则使用，否则生成新的
+    let node_id = match &config.node_id {
+        Some(id) => uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        None => uuid::Uuid::new_v4(),
+    };
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Create shared async DNS resolver — 创建共享异步 DNS 解析器

@@ -535,7 +535,13 @@ impl KongConfig {
             "lua_ssl_protocols" => self.lua_ssl_protocols = value.to_string(),
 
             // HTTP headers and upstream — HTTP 头和上游
-            "headers" => self.headers = parse_array(value),
+            // When headers=off, also clear headers_upstream — headers=off 时同时清除 headers_upstream
+            "headers" => {
+                self.headers = parse_array(value);
+                if value.trim() == "off" {
+                    self.headers_upstream = vec![];
+                }
+            }
             "headers_upstream" => self.headers_upstream = parse_array(value),
             "trusted_ips" => self.trusted_ips = parse_array(value),
             "real_ip_header" => self.real_ip_header = value.to_string(),

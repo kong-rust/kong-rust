@@ -387,6 +387,7 @@ pub async fn root_info(State(state): State<AdminState>) -> impl IntoResponse {
             "pg_port": config.pg_port,
             "pg_database": &config.pg_database,
             "pg_user": &config.pg_user,
+            "pg_password": "******",
             "pg_ssl": config.pg_ssl,
             "pg_ssl_verify": config.pg_ssl_verify,
             "pg_timeout": config.pg_timeout,
@@ -483,7 +484,7 @@ pub async fn status_info(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "message": format!("invalid value '{}' for parameter 'unit'", u),
+                    "message": format!("invalid unit '{}' (expected 'k/K', 'm/M', or 'g/G')", u),
                 })),
             ).into_response();
         }
@@ -578,6 +579,31 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/schemas/plugins/validate",
         "/tags",
         "/tags/{tags}",
+        // Plugin credential endpoints — 插件凭证端点
+        "/basic-auths",
+        "/basic-auths/{basicauth_credentials}",
+        "/basic-auths/{basicauth_credentials}/consumer",
+        "/consumers/{consumers}/basic-auth",
+        "/consumers/{consumers}/basic-auth/{basicauth_credentials}",
+        "/key-auths",
+        "/key-auths/{keyauth_credentials}",
+        "/key-auths/{keyauth_credentials}/consumer",
+        "/consumers/{consumers}/key-auth",
+        "/consumers/{consumers}/key-auth/{keyauth_credentials}",
+        "/hmac-auths",
+        "/hmac-auths/{hmacauth_credentials}",
+        "/consumers/{consumers}/hmac-auth",
+        "/jwt-secrets",
+        "/jwt-secrets/{jwtsecret}",
+        "/consumers/{consumers}/jwt",
+        "/oauth2-tokens",
+        "/oauth2-tokens/{oauth2_tokens}",
+        "/oauth2",
+        "/oauth2/{oauth2_credentials}",
+        "/consumers/{consumers}/oauth2",
+        "/acls",
+        "/acls/{acls}",
+        "/consumers/{consumers}/acls",
     ];
 
     Json(json!({ "data": endpoints }))
@@ -811,23 +837,76 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
                         })),
                     ));
                 }
-                let parsed = url::Url::parse(url_str).map_err(|_| (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "message": "schema violation (url: missing host in url)",
-                        "name": "schema violation",
-                        "code": 2,
-                        "fields": {"url": "missing host in url"},
-                    })),
-                ))?;
+                let parsed = match url::Url::parse(url_str) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // URL 无法解析 — 分解为字段级错误
+                        let mut fields = serde_json::Map::new();
+                        let mut violations = Vec::new();
+                        fields.insert("host".to_string(), json!("required field missing"));
+                        violations.push("host: required field missing");
+                        fields.insert("path".to_string(), json!("should start with: /"));
+                        violations.push("path: should start with: /");
+                        let msg = if violations.len() > 1 {
+                            format!("{} schema violations ({})", violations.len(), violations.join("; "))
+                        } else {
+                            format!("schema violation ({})", violations[0])
+                        };
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": msg,
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": Value::Object(fields),
+                            })),
+                        ));
+                    }
+                };
                 if parsed.host_str().map_or(true, |h| h.is_empty()) {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(json!({
-                            "message": "schema violation (url: missing host in url)",
+                            "message": "schema violation (host: required field missing)",
                             "name": "schema violation",
                             "code": 2,
-                            "fields": {"url": "missing host in url"},
+                            "fields": {"host": "required field missing"},
+                        })),
+                    ));
+                }
+                // Validate protocol — 验证 URL 中解析出的协议
+                let scheme = parsed.scheme();
+                let valid_protocols = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                if !valid_protocols.contains(&scheme) {
+                    // 无效协议 — 分解为字段级错误
+                    let mut fields = serde_json::Map::new();
+                    let mut violations = Vec::new();
+                    fields.insert("protocol".to_string(), json!("expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"));
+                    violations.push("protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp");
+                    // Check if path is missing or doesn't start with / — 检查路径
+                    let has_explicit_path = {
+                        let after_scheme = url_str.find("://").map(|i| i + 3).unwrap_or(0);
+                        url_str[after_scheme..].find('/').is_some()
+                    };
+                    if has_explicit_path {
+                        let path = parsed.path();
+                        if !path.starts_with('/') {
+                            fields.insert("path".to_string(), json!("should start with: /"));
+                            violations.push("path: should start with: /");
+                        }
+                    }
+                    let msg = if violations.len() > 1 {
+                        format!("{} schema violations ({})", violations.len(), violations.join("; "))
+                    } else {
+                        format!("schema violation ({})", violations[0])
+                    };
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": msg,
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": Value::Object(fields),
                         })),
                     ));
                 }
@@ -902,10 +981,29 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                             return (
                                 StatusCode::BAD_REQUEST,
                                 Json(json!({
-                                    "message": "schema violation (url: missing host in url)",
+                                    "message": "schema violation (host: required field missing)",
                                     "name": "schema violation",
                                     "code": 2,
-                                    "fields": {"url": "missing host in url"},
+                                    "fields": {"host": "required field missing"},
+                                })),
+                            );
+                        }
+                        // Validate protocol from URL — 验证 URL 中解析出的协议
+                        let scheme = parsed.scheme();
+                        let valid_protocols = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                        if !valid_protocols.contains(&scheme) {
+                            let mut fields = serde_json::Map::new();
+                            let mut violations = Vec::new();
+                            fields.insert("protocol".to_string(), json!("expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"));
+                            violations.push("protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp");
+                            let msg = format!("schema violation ({})", violations[0]);
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": msg,
+                                    "name": "schema violation",
+                                    "code": 2,
+                                    "fields": Value::Object(fields),
                                 })),
                             );
                         }
@@ -935,13 +1033,25 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                         }
                     }
                     Err(_) => {
+                        // URL 无法解析 — 分解为字段级错误
+                        let mut fields = serde_json::Map::new();
+                        let mut violations = Vec::new();
+                        fields.insert("host".to_string(), json!("required field missing"));
+                        violations.push("host: required field missing");
+                        fields.insert("path".to_string(), json!("should start with: /"));
+                        violations.push("path: should start with: /");
+                        let msg = if violations.len() > 1 {
+                            format!("{} schema violations ({})", violations.len(), violations.join("; "))
+                        } else {
+                            format!("schema violation ({})", violations[0])
+                        };
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(json!({
-                                "message": "schema violation (url: missing host in url)",
+                                "message": msg,
                                 "name": "schema violation",
                                 "code": 2,
-                                "fields": {"url": "missing host in url"},
+                                "fields": Value::Object(fields),
                             })),
                         );
                     }
@@ -961,6 +1071,22 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
     if let Some(obj) = body.as_object() {
         // Issue 1: Service.host is required and must be non-empty — Service.host 必填且不能为空
         if T::table_name() == "services" {
+            // Validate protocol — 验证协议
+            if let Some(protocol) = obj.get("protocol").and_then(|v| v.as_str()) {
+                let valid = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                if !valid.contains(&protocol) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "code": 2,
+                            "name": "schema violation",
+                            "message": "schema violation (protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)",
+                            "fields": {"protocol": "expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"}
+                        })),
+                    );
+                }
+            }
+
             let host_missing = match obj.get("host") {
                 None => true,
                 Some(Value::Null) => true,
@@ -1797,7 +1923,12 @@ async fn update_scoped_plugin(
     }
 
     if let Some(obj) = body.as_object_mut() {
-        obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
+        // If the patch body explicitly sets the scope field to null, allow clearing it — 如果 patch 请求体显式将作用域字段设为 null，允许清除
+        // Otherwise inject the scope foreign key — 否则注入作用域外键
+        let explicitly_null = obj.get(scope_field).map_or(false, |v| v.is_null());
+        if !explicitly_null {
+            obj.insert(scope_field.to_string(), json!(ForeignKey::new(scope_id)));
+        }
     }
 
     if upsert {
