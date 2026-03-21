@@ -242,10 +242,19 @@ impl TraditionalRouter {
 
     /// Match a request (with LRU cache) — 匹配请求（带 LRU 缓存）
     pub fn find_route(&self, ctx: &RequestContext) -> Option<RouteMatch> {
-        // Build cache key: method + "\0" + host_no_port + "\0" + uri — 构建缓存键
+        // Build cache key: method + host + uri + sorted headers — 构建缓存键：method + host + uri + 排序后的 headers
         let host_lower = ctx.host.to_lowercase();
         let host_no_port = host_lower.split(':').next().unwrap_or(&host_lower);
-        let cache_key = format!("{}\0{}\0{}", ctx.method, host_no_port, ctx.uri);
+        // Include headers in cache key to avoid incorrect cache hits when header-based routes exist
+        // 将 headers 加入缓存键，避免 header 路由条件的缓存误命中
+        let mut sorted_headers: Vec<_> = ctx.headers.iter().collect();
+        sorted_headers.sort_by_key(|(k, _)| k.as_str());
+        let header_part: String = sorted_headers
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let cache_key = format!("{}\0{}\0{}\0{}", ctx.method, host_no_port, ctx.uri, header_part);
 
         if let Some(cached) = self.cache.get(&cache_key) {
             return cached;
@@ -338,6 +347,14 @@ impl TraditionalRouter {
                 } else {
                     return false;
                 }
+            }
+        }
+
+        // Protocol matching — 协议匹配
+        // If route defines protocols, request scheme must be in the list — 如果路由定义了 protocols，请求 scheme 必须在列表中
+        if !route.protocols.is_empty() {
+            if !route.protocols.iter().any(|p| p == &ctx.scheme) {
+                return false;
             }
         }
 
@@ -710,6 +727,7 @@ mod tests {
         let ctx = RequestContext {
             uri: "/api".to_string(),
             host: "localhost".to_string(),
+            scheme: "http".to_string(),
             ..Default::default()
         };
         assert!(router.find_route(&ctx).is_some());
@@ -743,6 +761,7 @@ mod tests {
             method: "POST".to_string(),
             uri: "/anything".to_string(),
             host: "localhost".to_string(),
+            scheme: "http".to_string(),
             ..Default::default()
         };
         assert!(router.find_route(&ctx_post).is_some());
@@ -791,6 +810,7 @@ mod tests {
         let ctx = RequestContext {
             uri: "/api/v2/users".to_string(),
             host: "localhost".to_string(),
+            scheme: "http".to_string(),
             ..Default::default()
         };
 
@@ -811,6 +831,7 @@ mod tests {
         let ctx = RequestContext {
             uri: "/api/v1/users".to_string(),
             host: "localhost".to_string(),
+            scheme: "http".to_string(),
             ..Default::default()
         };
         assert!(router.find_route(&ctx).is_some());

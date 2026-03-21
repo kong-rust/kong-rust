@@ -17,8 +17,8 @@
 | 11 | HTTP 代理性能优化 | 7 | 7 | 0 |
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
-| 14 | QA 测试与 Bug 修复 | 2 | 2 | 0 |
-| **合计** | | **68** | **60** | **8** |
+| 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
+| **合计** | | **70** | **62** | **8** |
 
 ---
 
@@ -336,27 +336,18 @@
   - INSERT workspaces 从 `ON CONFLICT (id) DO NOTHING` 改为 `ON CONFLICT DO NOTHING`，兼容已有 Kong DB
   - 文件：`crates/kong-db/migrations/core/001_add_workspaces.sql`
 
-### 已知问题（QA 发现，待修复）
+- [x] **14.3** 修复 QA 发现的 11 个 Bug `[R1-R6]`
+  - Admin API 404 空响应体、url shorthand 解析、preserve_host 端口号、timestamps 0.0、上游不可达 500 空响应、Kong 特征头、HTTPS-only 协议过滤、Service host 验证、外键冲突 400→409、Prometheus node_id/version
+  - 文件：`crates/kong-admin/`, `crates/kong-proxy/`, `crates/kong-router/`, `crates/kong-db/`
 
-以下问题由 QA 测试（2026-03-20）发现，完整报告见 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`。
+- [x] **14.4** 修复最后 4 个 QA 问题 `[R1, R3, R5]`
+  - ISSUE-005: 路由缓存键加入 headers，修复 header 路由条件被缓存绕过
+  - ISSUE-009: 加权 round-robin 改为 GCD 交错分配，修复小请求数全命中同一 target
+  - ISSUE-010: Prometheus log_serialize 补全 consumer/workspace/size 字段
+  - ISSUE-013: preload 后保留 body buffer 避免重新缓冲触发超时
+  - 修复 4 个路由器单元测试缺失 scheme 字段的已有 bug
+  - 文件：`crates/kong-router/src/traditional.rs`, `crates/kong-proxy/src/balancer.rs`, `crates/kong-proxy/src/lib.rs`
 
-**High（3 个）：**
-- [ ] 负载均衡不分发请求到多个 targets — round-robin 全部请求只发到第一个 target
-- [ ] Header 路由匹配不严格 — 缺少必要 header 的请求仍被匹配
-- [ ] HTTPS-only 路由匹配 HTTP 请求 — `protocols: ["https"]` 路由未过滤 HTTP 请求
+### 已知问题（QA 发现，全部已修复 ✅）
 
-**Medium（8 个）：**
-- [ ] PUT upsert Service 不解析 `url` shorthand（host 为空、时间戳为 0）
-- [ ] preserve_host=true 时 Host 头丢失端口号
-- [ ] Targets created_at/updated_at 返回 0.0
-- [ ] Prometheus 插件缺少请求级别指标（kong_http_requests_total 等）
-- [ ] 上游不可达返回 500 空响应体（应返回 JSON 错误）
-- [ ] 1MB 请求体导致 502 超时
-- [ ] 代理响应缺少 Kong 特征头（Server、X-Kong-*-Latency、X-Kong-Request-Id）
-- [ ] Service 创建缺少 host 字段必填验证
-
-**Low（4 个）：**
-- [ ] Admin API 未知路径 404 响应体为空
-- [ ] 失败的 Target 创建请求仍部分写入数据库（事务未回滚）
-- [ ] Prometheus 指标中 node_id 全零、version 显示 3.0.0
-- [ ] 删除有关联路由的 Service 返回 400 而非 409 Conflict
+以下 16 个问题由 QA 测试（2026-03-20）发现，已全部修复。完整报告见 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`。

@@ -582,13 +582,19 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     kong.set("client", client)?;
 
     let node = lua.create_table()?;
+    // Generate stable node_id from hostname using UUID v5 — 基于 hostname 生成稳定的 node_id（UUID v5）
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+    let node_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, hostname.as_bytes()).to_string();
+    let hostname_clone = hostname.clone();
     node.set(
         "get_id",
-        lua.create_function(|_, _: ()| Ok("00000000-0000-0000-0000-000000000001".to_string()))?,
+        lua.create_function(move |_, _: ()| Ok(node_id.clone()))?,
     )?;
     node.set(
         "get_hostname",
-        lua.create_function(|_, _: ()| Ok("localhost".to_string()))?,
+        lua.create_function(move |_, _: ()| Ok(hostname_clone.clone()))?,
     )?;
     node.set(
         "get_memory_stats",

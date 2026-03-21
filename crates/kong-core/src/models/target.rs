@@ -9,9 +9,8 @@ use crate::traits::Entity;
 #[serde(default)]
 pub struct Target {
     pub id: Uuid,
-    /// Note: Target uses millisecond timestamps (unlike other entities which use seconds) — 注意：Target 使用毫秒时间戳（与其他实体的秒级不同）
-    pub created_at: f64,
-    pub updated_at: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
     /// Parent upstream (foreign key to upstreams, cascade delete) — 所属上游（外键引用 upstreams，级联删除）
     pub upstream: ForeignKey,
     /// Target address (host:port format), required — 目标地址（host:port 格式），必填
@@ -32,8 +31,8 @@ impl Default for Target {
     fn default() -> Self {
         Self {
             id: Uuid::new_v4(),
-            created_at: 0.0,
-            updated_at: 0.0,
+            created_at: 0,
+            updated_at: 0,
             upstream: ForeignKey::new(Uuid::nil()),
             target: String::new(),
             weight: 100,

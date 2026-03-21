@@ -13,9 +13,11 @@ use std::sync::Arc;
 
 use std::sync::RwLock;
 
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use serde_json::{json, Value};
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
@@ -231,6 +233,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .put(upsert_vault)
                 .delete(delete_vault),
         )
+        .fallback(admin_fallback)
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::mirror_request())
@@ -243,6 +246,18 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 ])),
         )
         .with_state(state)
+}
+
+/// Admin API 404 fallback — Kong 兼容的 404 JSON 响应
+async fn admin_fallback() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "message": "Not found",
+            "name": "not found",
+            "code": 3,
+        })),
+    )
 }
 
 /// Build the Status API router — 构建 Status API 路由

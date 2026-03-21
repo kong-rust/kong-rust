@@ -88,7 +88,7 @@ impl KongError {
             KongError::NotFound { .. } => 404,
             KongError::ValidationError(_) => 400,
             KongError::UniqueViolation(_) => 409,
-            KongError::ForeignKeyViolation(_) => 400,
+            KongError::ForeignKeyViolation(_) => 409,
             KongError::PluginError { .. } => 500,
             KongError::LuaError(_) => 500,
             KongError::ConfigError(_) => 400,

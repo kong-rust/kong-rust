@@ -401,7 +401,12 @@ impl KongProxy {
 
         let body_bytes = body_buf.finish();
         plugin_ctx.request_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
-        *request_body_buf = None;
+        // Retain the fully-read body so that request_body_filter can release it in one shot
+        // instead of re-buffering from scratch (which would trigger the chunk-interval timeout).
+        // 保留已完整读取的 body，让 request_body_filter 一次性释放，而非从头重新缓冲（那样会触发 chunk 间隔超时）。
+        let mut retained = SpillableBuffer::new();
+        retained.extend(&body_bytes);
+        *request_body_buf = Some(retained);
 
         Ok(())
     }
@@ -768,22 +773,22 @@ impl ProxyHttp for KongProxy {
         // 1. preserve_host handling — preserve_host 处理
         if let Some(ref rm) = ctx.route_match {
             if rm.preserve_host {
+                // Use the original client Host header (including port if present) — 使用原始客户端 Host 头（含端口）
                 let req = session.req_header();
                 let host_header = req
                     .headers
                     .get("host")
                     .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-                    .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()))
-                    .or_else(|| {
-                        req.uri.host().map(|h| {
+                    .map(|s| {
+                        // If Host header lacks port but URI has a non-standard port, append it — 如果 Host 头无端口但 URI 有非标准端口，补上
+                        if !s.contains(':') {
                             if let Some(port) = req.uri.port_u16() {
-                                format!("{}:{}", h, port)
-                            } else {
-                                h.to_string()
+                                return format!("{}:{}", s, port);
                             }
-                        })
-                    });
+                        }
+                        s.to_string()
+                    })
+                    .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()));
 
                 if let Some(host) = host_header {
                     let _ = upstream_request.insert_header("host", &host);
@@ -1068,11 +1073,15 @@ impl ProxyHttp for KongProxy {
             return Ok(());
         }
 
-        // Check chunk interval timeout (60s, similar to nginx client_body_timeout) — 检查 chunk 间隔超时（60 秒，类似 nginx 的 client_body_timeout）
+        // Check chunk interval timeout (use service read_timeout, default 60s) — 检查 chunk 间隔超时（使用 service read_timeout，默认 60s）
+        let timeout_secs = ctx.service.as_ref()
+            .map(|s| s.read_timeout as u64 / 1000)
+            .unwrap_or(60)
+            .max(60); // minimum 60s to avoid premature timeout — 最少 60s 避免过早超时
         let now = std::time::Instant::now();
         if let Some(last_at) = ctx.last_body_chunk_at {
-            if now.duration_since(last_at).as_secs() > 60 {
-                tracing::warn!("请求体 chunk 间隔超时 (>60s)，终止请求");
+            if now.duration_since(last_at).as_secs() > timeout_secs {
+                tracing::warn!("请求体 chunk 间隔超时 (>{}s)，终止请求", timeout_secs);
                 return Err(pingora_core::Error::new_str("client body timeout"));
             }
         }
@@ -1148,14 +1157,26 @@ impl ProxyHttp for KongProxy {
         }
 
         // Add Kong standard response headers — 添加 Kong 标准响应头
-        // let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
-        // let _ = upstream_response.insert_header("x-kong-proxy-latency", "0");
-        // let _ = upstream_response.insert_header("x-kong-upstream-latency", "0");
+        let now = std::time::Instant::now();
+        let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+        let upstream_latency = ctx
+            .upstream_response_time
+            .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+            .unwrap_or(0);
+        let _ =
+            upstream_response.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
+        let _ = upstream_response
+            .insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
+        let _ = upstream_response.insert_header("via", "1.1 kong/0.1.0");
+        // Generate X-Kong-Request-Id — 生成请求 ID
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let _ = upstream_response.insert_header("x-kong-request-id", &request_id);
 
-        // Server 头隐藏：根据配置移除上游返回的 Server 头
+        // Server 头处理：隐藏上游 Server 头并注入 Kong 标识
         if self.config.proxy_hide_server_header {
             upstream_response.remove_header("server");
         }
+        let _ = upstream_response.insert_header("server", "kong-rust/0.1.0");
 
         // 注入自定义响应头
         for header_str in &self.config.proxy_response_headers {
@@ -1267,6 +1288,43 @@ impl ProxyHttp for KongProxy {
         }
 
         Ok(None)
+    }
+
+    /// Handle upstream connection/proxy failures — 处理上游连接/代理失败
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &pingora_core::Error,
+        ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let error_msg = format!("{}", e);
+        let (status, body) = if error_msg.contains("timeout") || error_msg.contains("Timeout") {
+            (504u16, serde_json::json!({"message": "The upstream server is timing out"}))
+        } else {
+            (502u16, serde_json::json!({"message": "An invalid response was received from the upstream server"}))
+        };
+
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        if let Ok(mut resp) = ResponseHeader::build(status, Some(4)) {
+            let _ = resp.insert_header("content-type", "application/json; charset=utf-8");
+            let _ = resp.insert_header("content-length", body_bytes.len().to_string());
+            let _ = resp.insert_header("server", "kong-rust/0.1.0");
+            let _ = session.write_response_header(Box::new(resp), false).await;
+            let _ = session
+                .write_response_body(Some(bytes::Bytes::from(body_bytes)), true)
+                .await;
+        }
+
+        ctx.plugin_ctx.response_status = Some(status);
+        ctx.plugin_ctx.response_source = Some("error".to_string());
+
+        pingora_proxy::FailToProxy {
+            error_code: 0, // 0 = we already sent the response — 0 = 已发送响应
+            can_reuse_downstream: false,
+        }
     }
 
     /// Logging phase — 日志阶段
@@ -1410,6 +1468,24 @@ impl ProxyHttp for KongProxy {
         // Populate log_serialize for Lua plugins (prometheus plugin expects this) — 填充 log_serialize 供 Lua 插件使用（prometheus 插件依赖此数据）
         let service_name = ctx.service.as_ref().and_then(|s| s.name.clone()).unwrap_or_default();
         let route_id = ctx.route_match.as_ref().map(|rm| rm.route_id.to_string()).unwrap_or_default();
+        let route_name = ctx.route_match.as_ref().and_then(|rm| rm.route_name.as_ref().map(|n| n.to_string())).unwrap_or_else(|| route_id.clone());
+
+        // Calculate request size: header line + headers + body — 计算请求大小：请求行 + 头 + 体
+        let req_header_size: usize = session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum();
+        let req_body_size = ctx.plugin_ctx.request_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let request_size = (req_header_size + req_body_size) as i64;
+
+        // Calculate response size: headers + body — 计算响应大小：头 + 体
+        let resp_header_size: usize = session.response_written()
+            .map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum::<usize>())
+            .unwrap_or(0);
+        let resp_body_size = ctx.plugin_ctx.service_response_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let response_size = (resp_header_size + resp_body_size) as i64;
+
+        // Extract consumer username from authenticated_consumer — 从 authenticated_consumer 提取消费者用户名
+        let consumer_value = ctx.plugin_ctx.authenticated_consumer.as_ref()
+            .and_then(|c| c.get("username").and_then(|u| u.as_str()))
+            .unwrap_or("");
 
         ctx.plugin_ctx.log_serialize = Some(serde_json::json!({
             "service": {
@@ -1419,20 +1495,20 @@ impl ProxyHttp for KongProxy {
             },
             "route": {
                 "id": route_id.clone(),
-                "name": route_id
+                "name": route_name
             },
             "request": {
                 "method": method,
                 "path": uri,
-                "size": session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>() as i64
+                "size": request_size
             },
             "response": {
                 "status": status,
-                "size": session.response_written().map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len()).sum::<usize>()).unwrap_or(0) as i64
+                "size": response_size
             },
             "latencies": latencies,
-            "consumer": null,
-            "workspace_name": ""
+            "consumer": consumer_value,
+            "workspace_name": "default"
         }));
 
         // Execute plugin log phase (always executes, even after short-circuit) — 执行插件 log 阶段（总是执行，即使之前短路）
