@@ -619,7 +619,14 @@ pub async fn get_plugin_schema(
     let plugin_dirs = kong_lua_bridge::loader::resolve_plugin_dirs(&state.config.prefix);
 
     match kong_lua_bridge::loader::load_plugin_schema(&plugin_dirs, &name) {
-        Ok(schema) => (StatusCode::OK, Json(schema)).into_response(),
+        Ok(schema) => {
+            // Ensure entity_checks is always present — 确保 entity_checks 始终存在
+            let mut schema_json = schema;
+            if !schema_json.get("entity_checks").is_some() {
+                schema_json["entity_checks"] = json!([]);
+            }
+            (StatusCode::OK, Json(schema_json)).into_response()
+        }
         Err(_err) => {
             // Fall back to minimal schema for known bundled plugins — 对已知内置插件回退到最小 schema
             if BUNDLED_PLUGINS.contains(&name.as_str()) {
@@ -772,45 +779,97 @@ pub async fn validate_plugin_schema(
         }
     };
 
-    // Check if plugin schema exists — 检查插件 schema 是否存在
+    // Validate config fields against known schema — 验证 config 字段是否符合已知 schema
+    let is_known = BUNDLED_PLUGINS.contains(&plugin_name.as_str());
     let plugin_dirs = kong_lua_bridge::loader::resolve_plugin_dirs(&state.config.prefix);
-    match kong_lua_bridge::loader::load_plugin_schema(&plugin_dirs, &plugin_name) {
-        Ok(_schema) => {
-            // Plugin found and schema is valid — 插件已找到且 schema 有效
-            (
-                StatusCode::OK,
-                Json(json!({"message": "schema validation successful"})),
-            ).into_response()
-        }
-        Err(err) => {
-            // Bundled plugins without lua schema are still valid — 没有 lua schema 的内置插件仍然有效
-            if BUNDLED_PLUGINS.contains(&plugin_name.as_str()) {
-                (
-                    StatusCode::OK,
-                    Json(json!({"message": "schema validation successful"})),
-                ).into_response()
-            } else if matches!(&err, kong_core::error::KongError::NotFound { .. }) {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "message": format!("No plugin named '{}'", plugin_name),
-                        "name": "schema violation",
-                        "code": 2,
-                        "fields": {"name": format!("No plugin named '{}'", plugin_name)},
-                    })),
-                ).into_response()
-            } else {
-                let status = StatusCode::from_u16(err.status_code())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                (
-                    status,
-                    Json(json!({
-                        "message": err.to_string(),
-                        "name": err.error_name(),
-                        "code": err.error_code(),
-                    })),
-                ).into_response()
+    let lua_loaded = kong_lua_bridge::loader::load_plugin_schema(&plugin_dirs, &plugin_name).ok();
+
+    if !is_known && lua_loaded.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("No plugin named '{}'", plugin_name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": {"name": format!("No plugin named '{}'", plugin_name)},
+            })),
+        ).into_response();
+    }
+
+    // If config is provided, validate its fields against known schema — 如果提供了 config，验证其字段是否在已知 schema 中
+    if let Some(config) = body.get("config").and_then(|v| v.as_object()) {
+        // Get known config fields from our schema definitions — 从 schema 定义中获取已知 config 字段
+        let known_config_fields = get_known_config_fields(&plugin_name);
+        if !known_config_fields.is_empty() {
+            for key in config.keys() {
+                // custom_fields_by_lua is always allowed — custom_fields_by_lua 始终允许
+                if key == "custom_fields_by_lua" {
+                    continue;
+                }
+                if !known_config_fields.contains(&key.as_str()) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": format!("schema violation (config.{}: unknown field)", key),
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {"config": {key.clone(): "unknown field"}},
+                        })),
+                    ).into_response();
+                }
             }
         }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({"message": "schema validation successful"})),
+    ).into_response()
+}
+
+/// Extract known config field names from a plugin's schema definition — 从插件 schema 定义中提取已知 config 字段名
+fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
+    match plugin_name {
+        "key-auth" => vec!["key_names", "key_in_body", "key_in_header", "key_in_query", "hide_credentials", "anonymous", "run_on_preflight"],
+        "basic-auth" => vec!["hide_credentials", "anonymous"],
+        "rate-limiting" => vec!["second", "minute", "hour", "day", "month", "year", "limit_by", "policy", "fault_tolerant", "hide_client_headers", "redis_host", "redis_port", "redis_password", "redis_timeout", "redis_database", "header_name", "path", "redis_ssl", "redis_ssl_verify", "redis_server_name", "error_code", "error_message", "sync_rate"],
+        "cors" => vec!["origins", "methods", "headers", "exposed_headers", "credentials", "max_age", "preflight_continue", "private_network"],
+        "tcp-log" => vec!["host", "port", "timeout", "keepalive", "tls", "tls_sni"],
+        "udp-log" => vec!["host", "port", "timeout"],
+        "http-log" => vec!["http_endpoint", "method", "content_type", "timeout", "keepalive", "flush_timeout", "retry_count", "queue_size", "custom_fields_by_lua"],
+        "file-log" => vec!["path", "reopen", "custom_fields_by_lua"],
+        "ip-restriction" => vec!["allow", "deny", "status", "message"],
+        "request-transformer" => vec!["http_method", "remove", "rename", "replace", "add", "append"],
+        "response-transformer" => vec!["remove", "rename", "replace", "add", "append"],
+        "acl" => vec!["allow", "deny", "hide_groups_header"],
+        "hmac-auth" => vec!["hide_credentials", "clock_skew", "algorithms", "enforce_headers", "validate_request_body"],
+        "jwt" => vec!["uri_param_names", "cookie_names", "header_names", "key_claim_name", "secret_is_base64", "claims_to_verify", "anonymous", "run_on_preflight", "maximum_expiration"],
+        "request-size-limiting" => vec!["allowed_payload_size", "size_unit", "require_content_length"],
+        "request-termination" => vec!["status_code", "message", "body", "content_type", "trigger", "echo"],
+        "bot-detection" => vec!["allow", "deny"],
+        "correlation-id" => vec!["header_name", "generator", "echo_downstream"],
+        "prometheus" => vec!["per_consumer", "status_code_metrics", "latency_metrics", "bandwidth_metrics", "upstream_health_metrics"],
+        "oauth2" => vec!["scopes", "mandatory_scope", "provision_key", "token_expiration", "enable_authorization_code", "enable_client_credentials", "enable_implicit_grant", "enable_password_grant", "hide_credentials", "accept_http_if_already_terminated", "anonymous", "global_credentials", "auth_header_name", "refresh_token_ttl", "reuse_refresh_token", "persistent_refresh_token"],
+        "ldap-auth" => vec!["ldap_host", "ldap_port", "start_tls", "verify_ldap_host", "base_dn", "attribute", "cache_ttl", "timeout", "keepalive", "anonymous", "header_type", "hide_credentials"],
+        "session" => vec!["secret", "cookie_name", "cookie_lifetime", "cookie_path", "cookie_domain", "cookie_samesite", "cookie_httponly", "cookie_secure", "storage"],
+        "response-ratelimiting" => vec!["header_name", "limit_by", "policy", "fault_tolerant", "hide_client_headers", "redis_host", "redis_port", "redis_password", "redis_timeout", "redis_database", "block_on_first_violation", "limits"],
+        "syslog" => vec!["successful_severity", "client_errors_severity", "server_errors_severity", "log_level"],
+        "loggly" => vec!["host", "port", "key", "tags", "timeout", "successful_severity", "client_errors_severity", "server_errors_severity", "log_level"],
+        "datadog" => vec!["host", "port", "prefix", "metrics"],
+        "statsd" => vec!["host", "port", "prefix", "metrics"],
+        "zipkin" => vec!["http_endpoint", "sample_ratio", "default_service_name", "include_credential", "traceid_byte_count", "header_type", "default_header_type", "tags_header", "static_tags"],
+        "grpc-gateway" => vec!["proto"],
+        "grpc-web" => vec!["proto", "pass_stripped_path", "allow_origin_header"],
+        "aws-lambda" => vec!["aws_key", "aws_secret", "aws_region", "function_name", "qualifier", "invocation_type", "log_type", "timeout", "port", "keepalive", "forward_request_method", "forward_request_headers", "forward_request_body", "forward_request_uri", "is_proxy_integration", "unhandled_status", "skip_large_bodies", "base64_encode_body"],
+        "proxy-cache" => vec!["response_code", "request_method", "content_type", "cache_ttl", "strategy", "cache_control", "storage_ttl", "memory", "vary_headers", "vary_query_params"],
+        "pre-function" | "post-function" => vec!["certificate", "rewrite", "access", "header_filter", "body_filter", "log", "ws_handshake", "ws_client_frame", "ws_upstream_frame", "ws_close"],
+        "dummy" => vec!["resp_header_value", "resp_code", "append_body", "resp_headers", "old_field", "new_field"],
+        "short-circuit" => vec!["status", "message"],
+        "error-generator-last" => vec!["access", "header_filter", "log", "rewrite"],
+        "ctx-checker" | "ctx-checker-last" => vec!["ctx_kind", "ctx_set_field", "ctx_set_value", "ctx_check_field", "ctx_check_value", "ctx_throw_error"],
+        "enable-buffering" => vec!["phase", "mode"],
+        "mocking" => vec!["api_specification"],
+        "rewriter" => vec!["value"],
+        _ => vec![], // Unknown plugin: skip config field validation — 未知插件：跳过 config 字段验证
     }
 }

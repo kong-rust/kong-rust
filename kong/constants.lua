@@ -94,4 +94,7 @@ _M.RATELIMIT = {
 -- Schema defaults — Schema 默认值
 _M.DEFAULT_CONTENT_TYPE = "application/json; charset=utf-8"
 
+-- Declarative config empty hash (32 zeros) — 声明式配置空哈希（32 个零）
+_M.DECLARATIVE_EMPTY_CONFIG_HASH = string.rep("0", 32)
+
 return _M

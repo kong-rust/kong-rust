@@ -591,6 +591,7 @@ async fn init_proxy_and_admin(
             proxy: kong_proxy.clone(),
             refresh_tx,
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
+            configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
@@ -701,6 +702,7 @@ async fn init_proxy_and_admin(
             proxy: kong_proxy.clone(),
             refresh_tx,
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
+            configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))

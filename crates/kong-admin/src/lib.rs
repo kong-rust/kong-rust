@@ -46,6 +46,9 @@ pub struct AdminState {
     pub refresh_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
     /// Stream router reference (shared with Stream Proxy), synced on route changes — Stream 路由器引用（与 Stream Proxy 共享），路由变更时同步更新
     pub stream_router: Option<Arc<RwLock<StreamRouter>>>,
+    /// Configuration hash for db-less mode — db-less 模式下的配置哈希值
+    /// Default is all zeros (empty config); updated via POST /config — 默认全零（空配置）；通过 POST /config 更新
+    pub configuration_hash: Arc<RwLock<String>>,
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
@@ -104,7 +107,7 @@ async fn admin_latency_middleware(
 fn is_known_route(path: &str) -> bool {
     // Static routes — 静态路由
     let static_routes = [
-        "/", "/status", "/endpoints", "/plugins/enabled", "/plugins",
+        "/", "/status", "/config", "/endpoints", "/plugins/enabled", "/plugins",
         "/services", "/routes", "/consumers", "/upstreams",
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
     ];
@@ -190,6 +193,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Root info endpoint — 根信息端点
         .route("/", get(root_info))
         .route("/status", get(status_info))
+        .route("/config", axum::routing::post(post_config))
         .route("/endpoints", get(list_endpoints))
         .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))

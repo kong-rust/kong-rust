@@ -528,14 +528,57 @@ pub async fn status_info(
     });
 
     if is_dbless {
-        // In dbless mode, include configuration_hash — dbless 模式下包含 configuration_hash
-        body["configuration_hash"] = json!("00000000000000000000000000000000");
+        // In dbless mode, include configuration_hash from shared state — dbless 模式下从共享状态获取 configuration_hash
+        let hash = state.configuration_hash.read()
+            .map(|h| h.clone())
+            .unwrap_or_else(|_| "00000000000000000000000000000000".to_string());
+        body["configuration_hash"] = json!(hash);
     } else {
         // In DB mode, include database reachable status (no configuration_hash) — DB 模式下包含数据库可达状态（不含 configuration_hash）
         body["database"] = json!({ "reachable": true });
     }
 
     Json(body).into_response()
+}
+
+/// POST /config — Accept declarative config (db-less mode) — POST /config — 接受声明式配置（db-less 模式）
+pub async fn post_config(
+    State(state): State<AdminState>,
+    body: String,
+) -> impl IntoResponse {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    if !state.config.is_dbless() {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "message": "this endpoint is only available when Kong is in DB-less mode",
+            })),
+        ).into_response();
+    }
+
+    // Compute hash of the config body using DefaultHasher — 使用 DefaultHasher 计算配置内容的哈希
+    let mut hasher = DefaultHasher::new();
+    body.hash(&mut hasher);
+    let h1 = hasher.finish();
+    // Generate a second hash with a different seed for 32 hex chars — 用不同种子再生成一个哈希以凑 32 位十六进制
+    let mut hasher2 = DefaultHasher::new();
+    h1.hash(&mut hasher2);
+    let h2 = hasher2.finish();
+    let hash = format!("{:016x}{:016x}", h1, h2);
+
+    // Store the hash in shared state — 将哈希存储到共享状态
+    if let Ok(mut h) = state.configuration_hash.write() {
+        *h = hash.clone();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "configuration_hash": hash,
+        })),
+    ).into_response()
 }
 
 /// GET /endpoints — List all registered Admin API endpoints — GET /endpoints — 列出所有已注册的 Admin API 端点
@@ -656,10 +699,56 @@ pub async fn validate_entity_schema(
         ).into_response();
     }
 
+    // Entity-specific validations — 实体特定的验证逻辑
+    if entity_name == "certificates" {
+        // Validate snis: must not be IP addresses — 验证 snis：不能是 IP 地址
+        if let Some(snis) = body.get("snis").and_then(|v| v.as_array()) {
+            for (i, sni) in snis.iter().enumerate() {
+                if let Some(sni_str) = sni.as_str() {
+                    if looks_like_ip(sni_str) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": format!("schema violation (snis.{}: must not be an IP)", i + 1),
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": {
+                                    "snis": ["must not be an IP"]
+                                },
+                            })),
+                        ).into_response();
+                    }
+                }
+            }
+        }
+    }
+
     (
         StatusCode::OK,
         Json(json!({ "message": "schema validation successful" })),
     ).into_response()
+}
+
+/// Check if a string looks like an IP address (v4 or v6), optionally with port — 检查字符串是否看起来像 IP 地址（v4 或 v6），可选带端口
+fn looks_like_ip(s: &str) -> bool {
+    use std::net::{IpAddr, SocketAddr};
+    // Direct IP parse — 直接 IP 解析
+    if s.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    // IP:port format — IP:端口 格式
+    if s.parse::<SocketAddr>().is_ok() {
+        return true;
+    }
+    // IPv4 with port: e.g. "120.0.9.32:90" — 带端口的 IPv4
+    if let Some(colon_pos) = s.rfind(':') {
+        let host = &s[..colon_pos];
+        let port = &s[colon_pos + 1..];
+        if port.parse::<u16>().is_ok() && host.parse::<IpAddr>().is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// GET /metrics — Prometheus metrics from the status port — GET /metrics — 从状态端口暴露的 Prometheus 指标

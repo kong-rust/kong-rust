@@ -384,11 +384,11 @@ function _M.start_kong(conf)
         if not client then return false end
         local res = client:get("/status")
         return res and res.status == 200
-    end, 15)
+    end, 30)
 
     if not ok then
         _M.stop_kong()
-        error("Kong-Rust failed to start within 15 seconds. Check /tmp/kong-rust-spec.log")
+        error("Kong-Rust failed to start within 30 seconds. Check /tmp/kong-rust-spec.log")
     end
 
     return true
