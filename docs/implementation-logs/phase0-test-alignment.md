@@ -4,6 +4,19 @@
 
 使 Kong-Rust 能够运行 Kong 官方 spec 测试文件，验证 Admin API 和代理层与 Kong 原版的行为兼容性。
 
+## 测试结果汇总
+
+| Spec 文件 | 通过 | 总数 | 通过率 |
+|-----------|------|------|--------|
+| 00-smoke (all) | 59 | 59 | **100%** |
+| 04-admin_api/10-services_routes | 44 | 75 | 59% |
+| 04-admin_api/02-kong_routes | 27 | 87 | 31% |
+| 04-admin_api/04-plugins_routes | 18 | 26 | 69% |
+| 04-admin_api/03-consumers_routes | 17 | 99 | 17% |
+| 04-admin_api/14-tags | 5 | 14 | 36% |
+| 05-proxy/33-request-id-header | 2 | 10 | 20% |
+| 05-proxy/08-uri_encoding | 0 | 5 | 0% |
+
 ## 已完成的工作
 
 ### Task 1-3: 基础设施（已完成）
