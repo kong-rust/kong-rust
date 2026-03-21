@@ -1,25 +1,39 @@
 # Kong-Rust
 
-使用 Rust 完全重写的高性能 **AI 网关**，100% 兼容 [Kong Gateway](https://github.com/Kong/kong)。零成本替换 Kong，同时构建 Rust 原生 AI 网关引擎。
+Rust 原生 **AI 网关** —— API 网关、LLM 网关、Agent 网关、MCP/Skill 网关，单一二进制文件。100% 兼容 [Kong Gateway](https://github.com/Kong/kong)，零成本替换。
 
 ## 为什么选择 Kong-Rust？
 
-Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty 之上。Kong-Rust 使用 Rust 和 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 重写了核心引擎，同时保持与 Kong 的配置、Admin API、数据库 Schema 和 Lua 插件生态的 **100% 兼容性**。
+AI 时代需要新一代网关。传统 API 网关处理 HTTP 流量；LLM 代理处理模型调用；MCP 网关路由工具访问 —— 但没有一个能覆盖全局。Kong-Rust 将四种网关统一为 **一个 Rust 原生 AI 网关**，基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 构建。
 
-**Kong-Rust 是一个 AI 网关** —— 在传统 API 网关兼容性之上，构建 **Rust 原生 AI 网关引擎**，覆盖 LLM Proxy、MCP Gateway、Skill/Agent Gateway，全部 Rust 实现，追求极致性能。市场上唯一同时覆盖完整 Kong 兼容 + 全栈 AI 网关的 Rust 原生项目。
+```
+┌─────────────────────────────────────────────────┐
+│              Kong-Rust  AI 网关                  │
+│                                                 │
+│  ┌───────────┐ ┌───────────┐ ┌───────────────┐ │
+│  │ API 网关   │ │ LLM 网关   │ │  Agent 网关   │ │
+│  │(Kong 100%)│ │           │ │               │ │
+│  └───────────┘ └───────────┘ └───────────────┘ │
+│  ┌──────────────────────────────────────────┐   │
+│  │         MCP / Skill 网关                  │   │
+│  └──────────────────────────────────────────┘   │
+│                                                 │
+│  Rust · Pingora · 单一二进制                      │
+└─────────────────────────────────────────────────┘
+```
 
-| | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
+| | Kong (Lua) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
-| **传统 API 网关** | 完整 | 无 | 完整（100% Kong 兼容） |
-| **AI / LLM Proxy** | Lua 插件 | 完整（100+ provider） | Rust 原生（规划中） |
-| **MCP Gateway** | 企业版 | 基础 | Rust 原生（规划中） |
-| **代理引擎** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, 多线程) |
-| **实现语言** | Lua | Python | Rust |
-| **内存安全** | 手动管理 (GC + FFI) | GC | Rust 所有权系统 |
+| **API 网关** | 完整 | 无 | 完整（100% Kong 兼容） |
+| **LLM 网关** | Lua 插件 | 完整（100+ provider） | Rust 原生（规划中） |
+| **Agent 网关** | 无 | 无 | Rust 原生（规划中） |
+| **MCP / Skill 网关** | 企业版 | 基础 | Rust 原生（规划中） |
+| **引擎** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, 多线程) |
+| **语言** | Lua | Python | Rust |
 
 ## 核心特性
 
-### 传统网关（Kong 兼容）
+### API 网关（Kong 兼容）
 
 - **完全兼容 Kong** — 数据模型、Admin API、`kong.conf` 配置格式、声明式配置（YAML/JSON）、Lua 插件接口（PDK + `ngx.*`）完全一致
 - **高性能代理** — Pingora 多线程架构，共享连接池
@@ -32,11 +46,27 @@ Kong 是全球最流行的开源 API 网关，但它运行在 LuaJIT + OpenResty
 - **多数据源** — PostgreSQL 数据库模式或 db-less 声明式配置模式
 - **Hybrid 模式** — Control Plane / Data Plane 分离部署（规划中）
 
-### AI 网关（规划中）
+### LLM 网关（规划中）
 
-- **LLM Proxy** — Token 限流（TPM/RPM）、多模型负载均衡与 Fallback、虚拟 API Key 管理、Token 成本追踪、语义缓存、Prompt Guard
-- **MCP Gateway** — MCP Server 注册/发现/路由/认证/可观测性
-- **Skill / Agent Gateway** — Skill 注册与编排、Agent 通信路由、身份管理
+- **Token 限流** — 按 key/route/consumer 的 TPM/RPM 限制
+- **多模型负载均衡与 Fallback** — 多个 LLM provider 作为上游，自动故障转移
+- **虚拟 API Key 管理** — 发行虚拟 key 映射到真实 provider key，设置预算/限额
+- **Token 成本追踪** — 按 key/team/route 的 token 用量和费用统计
+- **语义缓存** — 向量相似度缓存 LLM 响应
+- **Prompt Guard** — 正则 + 语义级提示词注入检测
+
+### Agent 网关（规划中）
+
+- **Agent 通信路由** — 路由和管理 Agent 间流量
+- **Agent 身份与访问控制** — 按 Agent 的认证和授权
+- **Agent 可观测性** — 延迟、错误率、使用量指标
+
+### MCP / Skill 网关（规划中）
+
+- **MCP Server 注册** — 通过 Admin API 注册、发现、版本管理 MCP Server
+- **MCP 路由与负载均衡** — 工具调用路由到 MCP Server，支持故障转移
+- **Skill 编排** — Skill 注册、组合、执行
+- **认证与可观测性** — 按 tool/agent 的访问控制，调用指标
 
 ## 架构
 

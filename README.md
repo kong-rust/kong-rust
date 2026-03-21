@@ -1,25 +1,39 @@
 # Kong-Rust
 
-A high-performance **AI Gateway** written in Rust, fully compatible with [Kong Gateway](https://github.com/Kong/kong). Drop-in replacement for Kong — zero migration cost — with a Rust-native AI gateway engine on the roadmap.
+A Rust-native **AI Gateway** — API Gateway, LLM Gateway, Agent Gateway, and MCP/Skill Gateway in a single binary. Fully compatible with [Kong Gateway](https://github.com/Kong/kong) as a drop-in replacement with zero migration cost.
 
 ## Why Kong-Rust?
 
-Kong is the world's most popular open-source API gateway, but it runs on LuaJIT + OpenResty. Kong-Rust rewrites the core engine in Rust using [Cloudflare Pingora](https://github.com/cloudflare/pingora), while maintaining **100% compatibility** with Kong's configuration, Admin API, database schema, and Lua plugin ecosystem.
+The AI era needs a new kind of gateway. Traditional API gateways handle HTTP traffic; LLM proxies handle model calls; MCP gateways route tool access — but none of them cover the full picture. Kong-Rust unifies all four gateway types into **one Rust-native AI Gateway**, built on [Cloudflare Pingora](https://github.com/cloudflare/pingora).
 
-**Kong-Rust is an AI Gateway** — beyond traditional API gateway compatibility, it is building a **Rust-native AI gateway engine** covering LLM Proxy, MCP Gateway, and Skill/Agent Gateway, all in Rust for maximum performance. The only project that combines full Kong compatibility with a full-stack AI gateway in a single Rust binary.
+```
+┌─────────────────────────────────────────────────┐
+│              Kong-Rust  AI Gateway              │
+│                                                 │
+│  ┌───────────┐ ┌───────────┐ ┌───────────────┐ │
+│  │API Gateway│ │LLM Gateway│ │ Agent Gateway  │ │
+│  │(Kong 100%)│ │           │ │               │ │
+│  └───────────┘ └───────────┘ └───────────────┘ │
+│  ┌──────────────────────────────────────────┐   │
+│  │         MCP / Skill Gateway              │   │
+│  └──────────────────────────────────────────┘   │
+│                                                 │
+│  Rust · Pingora · Single Binary                 │
+└─────────────────────────────────────────────────┘
+```
 
-| | Kong (Lua/OpenResty) | LiteLLM (Python) | Kong-Rust |
+| | Kong (Lua) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
-| **Traditional API Gateway** | Full | None | Full (100% Kong compatible) |
-| **AI / LLM Proxy** | Lua plugins | Full (100+ providers) | Rust-native (roadmap) |
-| **MCP Gateway** | Enterprise | Basic | Rust-native (roadmap) |
-| **Proxy Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, multi-threaded) |
+| **API Gateway** | Full | None | Full (100% Kong compatible) |
+| **LLM Gateway** | Lua plugins | Full (100+ providers) | Rust-native (roadmap) |
+| **Agent Gateway** | None | None | Rust-native (roadmap) |
+| **MCP / Skill Gateway** | Enterprise | Basic | Rust-native (roadmap) |
+| **Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | Pingora (Rust, multi-threaded) |
 | **Language** | Lua | Python | Rust |
-| **Memory Safety** | Manual (GC + FFI) | GC | Rust ownership system |
 
 ## Features
 
-### Traditional Gateway (Kong Compatible)
+### API Gateway (Kong Compatible)
 
 - **Full Kong Compatibility** — Same data models, Admin API, `kong.conf` format, declarative config (YAML/JSON), and Lua plugin interface (PDK + `ngx.*`)
 - **High-Performance Proxy** — Pingora's multi-threaded architecture with shared connection pools
@@ -32,11 +46,27 @@ Kong is the world's most popular open-source API gateway, but it runs on LuaJIT 
 - **Multiple Data Sources** — PostgreSQL or db-less (declarative config) modes
 - **Hybrid Mode** — Control Plane / Data Plane separation (planned)
 
-### AI Gateway (Roadmap)
+### LLM Gateway (Roadmap)
 
-- **LLM Proxy** — Token-based rate limiting (TPM/RPM), multi-model load balancing & fallback, virtual API key management, token cost tracking, semantic caching, prompt guard
-- **MCP Gateway** — MCP server registration/discovery/routing/auth/observability
-- **Skill / Agent Gateway** — Skill registration & orchestration, agent communication routing, identity management
+- **Token-based Rate Limiting** — TPM/RPM per key/route/consumer
+- **Multi-model Load Balancing & Fallback** — Multiple LLM providers as upstreams, auto-failover
+- **Virtual API Key Management** — Issue virtual keys mapped to real provider keys with budgets
+- **Token Cost Tracking** — Per key/team/route usage and cost metrics
+- **Semantic Caching** — Vector-similarity cached LLM responses
+- **Prompt Guard** — Regex + semantic prompt injection detection
+
+### Agent Gateway (Roadmap)
+
+- **Agent Communication Routing** — Route and manage inter-agent traffic
+- **Agent Identity & Access Control** — Per-agent authentication and authorization
+- **Agent Observability** — Latency, error rate, and usage metrics per agent
+
+### MCP / Skill Gateway (Roadmap)
+
+- **MCP Server Registry** — Register, discover, and version MCP servers via Admin API
+- **MCP Routing & Load Balancing** — Route tool calls to MCP servers with failover
+- **Skill Orchestration** — Skill registration, composition, and execution
+- **Auth & Observability** — Per-tool/per-agent access control, call metrics
 
 ## Architecture
 
