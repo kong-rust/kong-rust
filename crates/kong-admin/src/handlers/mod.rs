@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use kong_core::error::KongError;
 use kong_core::models::*;
-use kong_core::traits::{Dao, Entity, PageParams, PrimaryKey};
+use kong_core::traits::{Dao, Entity, Page, PageParams, PrimaryKey};
 
 use crate::extractors::FlexibleBody;
 use crate::AdminState;
@@ -321,6 +321,20 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
 
 // ============ Generic CRUD helpers — 通用 CRUD 辅助 ============
 
+/// Build Kong-compatible paginated response — 构建 Kong 兼容的分页响应
+/// Only includes offset/next when present — 仅在存在时包含 offset/next
+fn build_page_response<T: Serialize>(page: &Page<T>) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("data".to_string(), json!(page.data));
+    if let Some(ref offset) = page.offset {
+        body.insert("offset".to_string(), json!(offset));
+    }
+    if let Some(ref next) = page.next {
+        body.insert("next".to_string(), json!(next));
+    }
+    Value::Object(body)
+}
+
 /// Generic list/query/create/update/delete logic — 通用的列表/查询/创建/更新/删除逻辑
 /// Due to Rust generics limitations (cannot select DAO by type at runtime), — 因 Rust 泛型限制（无法在运行时根据类型选择 DAO）,
 /// uses concrete type handlers simplified via macros — 使用具体类型的 handler 通过宏简化注册
@@ -332,12 +346,7 @@ async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
 ) -> (StatusCode, Json<Value>) {
     match dao.page(&params.to_page_params()).await {
         Ok(page) => {
-            let body = json!({
-                "data": page.data,
-                "offset": page.offset,
-                "next": page.next,
-            });
-            (StatusCode::OK, Json(body))
+            (StatusCode::OK, Json(build_page_response(&page)))
         }
         Err(e) => {
             let status =
@@ -581,6 +590,7 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
 }
 
 /// Generic delete handler — 通用删除处理
+/// Kong-compatible: DELETE is idempotent, returns 204 even if not found — Kong 兼容：DELETE 幂等，即使不存在也返回 204
 async fn do_delete<T: Entity + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
@@ -589,6 +599,10 @@ async fn do_delete<T: Entity + Send + Sync + 'static>(
     match dao.delete(&pk).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
+            // Kong-compatible: DELETE returns 204 even if entity not found — Kong 兼容：即使实体不存在也返回 204
+            if e.status_code() == 404 {
+                return StatusCode::NO_CONTENT.into_response();
+            }
             let status =
                 StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = json!({
@@ -794,11 +808,7 @@ pub async fn list_nested_routes(
     {
         Ok(page) => (
             StatusCode::OK,
-            Json(json!({
-                "data": page.data,
-                "offset": page.offset,
-                "next": page.next,
-            })),
+            Json(build_page_response(&page)),
         ),
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -836,7 +846,7 @@ pub async fn list_service_plugins(
     {
         Ok(page) => (
             StatusCode::OK,
-            Json(json!({"data": page.data, "offset": page.offset, "next": page.next})),
+            Json(build_page_response(&page)),
         ),
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1130,7 +1140,7 @@ pub async fn list_route_plugins(
     {
         Ok(page) => (
             StatusCode::OK,
-            Json(json!({"data": page.data, "offset": page.offset, "next": page.next})),
+            Json(build_page_response(&page)),
         ),
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1313,7 +1323,7 @@ pub async fn list_consumer_plugins(
     {
         Ok(page) => (
             StatusCode::OK,
-            Json(json!({"data": page.data, "offset": page.offset, "next": page.next})),
+            Json(build_page_response(&page)),
         ),
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1533,11 +1543,7 @@ pub async fn list_nested_targets(
     {
         Ok(page) => (
             StatusCode::OK,
-            Json(json!({
-                "data": page.data,
-                "offset": page.offset,
-                "next": page.next,
-            })),
+            Json(build_page_response(&page)),
         ),
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),

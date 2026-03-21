@@ -4,8 +4,53 @@
 local http_client = require("spec.fixtures.http_client")
 local cjson = require("cjson")
 local socket = require("socket")
+local url_mod = require("socket.url")
 
 math.randomseed(socket.gettime() * 1000)
+
+---------------------------------------------------------------------------
+-- ngx shim — ngx 全局变量兼容层
+---------------------------------------------------------------------------
+if not ngx then
+    ngx = {
+        null = cjson.null,
+        escape_uri = function(str)
+            return url_mod.escape(str)
+        end,
+        unescape_uri = function(str)
+            return url_mod.unescape(str)
+        end,
+        re = {
+            match = function(subject, regex)
+                return string.match(subject, regex)
+            end,
+            find = function(subject, regex)
+                return string.find(subject, regex)
+            end,
+        },
+        log = function() end,
+        NOTICE = 5,
+        WARN = 4,
+        ERR = 3,
+        DEBUG = 8,
+        INFO = 7,
+        OK = 0,
+        ERROR = -1,
+        HTTP_OK = 200,
+        HTTP_CREATED = 201,
+        HTTP_NO_CONTENT = 204,
+        HTTP_NOT_FOUND = 404,
+        HTTP_BAD_REQUEST = 400,
+        HTTP_INTERNAL_SERVER_ERROR = 500,
+        config = {
+            subsystem = function() return "http" end,
+        },
+        shared = {},
+        now = function() return socket.gettime() end,
+        time = function() return math.floor(socket.gettime()) end,
+        update_time = function() end,
+    }
+end
 
 local _M = {}
 
