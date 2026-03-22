@@ -416,6 +416,29 @@ function _M.start_kong(conf, _, _, fixtures)
     end, 10)
     socket.sleep(0.5)
 
+    -- If dns_mock fixtures provided, generate a temporary hosts file — 如果提供了 dns_mock fixtures，生成临时 hosts 文件
+    if fixtures and fixtures.dns_mock and fixtures.dns_mock.records then
+        local hostsfile = "/tmp/kong_test_hosts"
+        local f = io.open(hostsfile, "w")
+        if f then
+            -- Write system /etc/hosts first — 先写入系统 /etc/hosts
+            local sys_hosts = io.open("/etc/hosts", "r")
+            if sys_hosts then
+                f:write(sys_hosts:read("*a"))
+                f:write("\n")
+                sys_hosts:close()
+            end
+            -- Add mock DNS A records — 添加 DNS mock A 记录
+            for _, rec in ipairs(fixtures.dns_mock.records) do
+                if rec.type == "A" and rec.name and rec.address then
+                    f:write(rec.address .. " " .. rec.name .. "\n")
+                end
+            end
+            f:close()
+            conf.dns_hostsfile = hostsfile
+        end
+    end
+
     local env_str, env = build_env_str(conf)
 
     if env.KONG_DATABASE ~= "off" then

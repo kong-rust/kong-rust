@@ -10,6 +10,7 @@
 pub mod extractors;
 pub mod handlers;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use std::sync::RwLock;
@@ -56,6 +57,9 @@ pub struct AdminState {
     /// DB-less store reference for hot-reloading via POST /config — DB-less 存储引用，用于 POST /config 热重载
     /// None in PostgreSQL mode — PostgreSQL 模式下为 None
     pub dbless_store: Option<Arc<kong_db::dbless::DblessStore>>,
+    /// In-memory target health status store: key = "upstream_id:target_address", value = health status string
+    /// 内存中 target 健康状态存储：key = "upstream_id:target地址"，value = 健康状态字符串
+    pub target_health: Arc<RwLock<HashMap<String, String>>>,
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行

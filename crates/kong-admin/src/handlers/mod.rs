@@ -4763,7 +4763,7 @@ pub async fn get_nested_target(
 pub async fn update_nested_target(
     State(state): State<AdminState>,
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
-    FlexibleBody(body): FlexibleBody,
+    FlexibleBody(mut body): FlexibleBody,
 ) -> impl IntoResponse {
     let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
         Ok(u) => u,
@@ -4774,6 +4774,17 @@ pub async fn update_nested_target(
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))),
         Err(e) => return e,
     };
+    if let Some(obj) = body.as_object_mut() {
+        // Ensure updated_at is strictly greater than created_at — 确保 updated_at 严格大于 created_at
+        let now = chrono::Utc::now().timestamp();
+        let new_updated_at = std::cmp::max(now, target.created_at + 1);
+        obj.insert("updated_at".to_string(), json!(new_updated_at));
+        // Update cache_key if target address changed — 如果 target 地址变了则更新 cache_key
+        if let Some(new_target) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            let t = if !new_target.contains(':') { format!("{}:8000", new_target) } else { new_target };
+            obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
+        }
+    }
     let pk = PrimaryKey::Id(target.id);
     match state.targets.update(&pk, &body).await {
         Ok(updated) => {
@@ -4833,13 +4844,28 @@ pub async fn upsert_nested_target(
     };
     if let Some(obj) = body.as_object_mut() {
         obj.insert("upstream".to_string(), json!({"id": upstream.id.to_string()}));
+        // Merge existing target fields (PUT preserves unset fields for targets) — 合并已有 target 字段（PUT 保留未设置的字段）
+        if let Some(ref existing_target) = existing {
+            obj.insert("id".to_string(), json!(existing_target.id));
+            // Preserve existing weight if not provided — 如果未提供则保留已有 weight
+            if !obj.contains_key("weight") {
+                obj.insert("weight".to_string(), json!(existing_target.weight));
+            }
+            // Preserve existing cache_key — 保留已有 cache_key
+            if let Some(ref ck) = existing_target.cache_key {
+                if !obj.contains_key("cache_key") {
+                    obj.insert("cache_key".to_string(), json!(ck));
+                }
+            }
+        }
+        // Normalize target address (append :8000 if no port) — 规范化 target 地址（无端口时追加 :8000）
         if let Some(t) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
             let t = if !t.contains(':') { format!("{}:8000", t) } else { t };
             obj.insert("target".to_string(), json!(t));
-            obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
-        }
-        if let Some(ref t) = existing {
-            obj.insert("id".to_string(), json!(t.id));
+            // Only set cache_key for new targets (existing keeps original) — 仅为新 target 设置 cache_key（已有保留原值）
+            if existing.is_none() {
+                obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
+            }
         }
     }
     let upsert_key = if let Some(ref t) = existing { t.id.to_string() } else { target_id_or_name };
@@ -4852,14 +4878,74 @@ pub async fn upsert_nested_target(
 pub async fn set_target_health(
     State(state): State<AdminState>,
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
     let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
         Ok(u) => u,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
-        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))).into_response(),
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))).into_response(),
+    };
+    // Determine health status from request URI — 从请求 URI 确定健康状态
+    let path = req.uri().path();
+    let health_status = if path.ends_with("/healthy") {
+        "HEALTHY"
+    } else {
+        "UNHEALTHY"
+    };
+    // Store health status in memory — 将健康状态存储在内存中
+    let key = format!("{}:{}", upstream.id, target.target);
+    if let Ok(mut map) = state.target_health.write() {
+        map.insert(key, health_status.to_string());
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Check if upstream has healthchecks enabled (passive or active) — 检查 upstream 是否启用了健康检查
+fn is_healthchecks_enabled(upstream: &Upstream) -> bool {
+    let hc = &upstream.healthchecks;
+    // Passive healthcheck is "on" if any threshold is non-zero — 被动健康检查"启用"条件：任一阈值非零
+    let passive_on = hc.passive.healthy.successes > 0
+        || hc.passive.unhealthy.tcp_failures > 0
+        || hc.passive.unhealthy.http_failures > 0
+        || hc.passive.unhealthy.timeouts > 0;
+    // Active healthcheck is "on" if any interval is non-zero — 主动健康检查"启用"条件：任一检查间隔非零
+    let active_on = hc.active.healthy.interval > 0.0
+        || hc.active.unhealthy.interval > 0.0;
+    passive_on || active_on
+}
+
+/// Resolve target IP address for health endpoint, using dns_hostsfile and system DNS — 为 health 端点解析 target IP 地址，使用 dns_hostsfile 和系统 DNS
+fn resolve_target_ip(target_host: &str, dns_hostsfile: &str) -> Option<String> {
+    // If it's already an IP address, return as-is — 如果已经是 IP 地址，直接返回
+    if target_host.starts_with('[') || target_host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(target_host.to_string());
+    }
+    // Check dns_hostsfile for custom hostname mappings — 检查 dns_hostsfile 中的自定义主机名映射
+    if !dns_hostsfile.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(dns_hostsfile) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    for hostname in &parts[1..] {
+                        if *hostname == target_host {
+                            return Some(parts[0].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Try system DNS resolution — 尝试系统 DNS 解析
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:0", target_host);
+    match addr_str.to_socket_addrs() {
+        Ok(mut addrs) => addrs.next().map(|a| a.ip().to_string()),
+        Err(_) => None,
     }
 }
 
@@ -4879,8 +4965,79 @@ pub async fn upstream_health(
     };
     // Sort by created_at DESC (newest first, like Kong) — 按 created_at 降序排列（最新在前，与 Kong 一致）
     targets.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
-    let mut health_data: Vec<Value> = targets.iter().map(|t| {
-        let health_status = "HEALTHCHECKS_OFF";
+    let hc_enabled = is_healthchecks_enabled(&upstream);
+    let active_hc_enabled = upstream.healthchecks.active.healthy.interval > 0.0
+        || upstream.healthchecks.active.unhealthy.interval > 0.0;
+    let health_map = state.target_health.read().ok();
+    let dns_hostsfile = state.config.dns_hostsfile.as_str();
+    let health_data: Vec<Value> = targets.iter().map(|t| {
+        // Parse target host:port — 解析 target 的 host:port
+        let (host, port) = if t.target.starts_with('[') {
+            // IPv6 format: [::1]:port
+            let parts: Vec<&str> = t.target.rsplitn(2, ':').collect();
+            if parts.len() == 2 {
+                (parts[1].to_string(), parts[0].parse::<u16>().unwrap_or(0))
+            } else {
+                (t.target.clone(), 0u16)
+            }
+        } else {
+            let parts: Vec<&str> = t.target.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                (parts[0].to_string(), parts[1].parse::<u16>().unwrap_or(0))
+            } else {
+                (t.target.clone(), 0u16)
+            }
+        };
+        // Determine health status — 确定健康状态
+        let health_key = format!("{}:{}", upstream.id, t.target);
+        let health_status = if t.weight == 0 {
+            // Weight 0 targets are always HEALTHCHECKS_OFF — weight=0 的 target 始终为 HEALTHCHECKS_OFF
+            "HEALTHCHECKS_OFF".to_string()
+        } else if !hc_enabled {
+            // No healthchecks configured — 未配置健康检查
+            // Try DNS resolution — 尝试 DNS 解析
+            let host_only = host.trim_start_matches('[').trim_end_matches(']');
+            if resolve_target_ip(host_only, dns_hostsfile).is_none() {
+                "DNS_ERROR".to_string()
+            } else {
+                "HEALTHCHECKS_OFF".to_string()
+            }
+        } else {
+            // Healthchecks enabled — 健康检查已启用
+            if let Some(ref map) = health_map {
+                if let Some(status) = map.get(&health_key) {
+                    status.clone()
+                } else {
+                    // Try DNS first — 先尝试 DNS
+                    let host_only = host.trim_start_matches('[').trim_end_matches(']');
+                    if resolve_target_ip(host_only, dns_hostsfile).is_none() {
+                        "DNS_ERROR".to_string()
+                    } else if active_hc_enabled {
+                        // Active healthcheck with probe: try TCP connect — 主动健康检查探测：尝试 TCP 连接
+                        if let Some(ref ip) = resolve_target_ip(host_only, dns_hostsfile) {
+                            let addr_str = format!("{}:{}", ip, port);
+                            if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                                match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)) {
+                                    Ok(_) => "HEALTHY".to_string(),
+                                    Err(_) => "UNHEALTHY".to_string(),
+                                }
+                            } else {
+                                "HEALTHY".to_string()
+                            }
+                        } else {
+                            "HEALTHY".to_string()
+                        }
+                    } else {
+                        "HEALTHY".to_string()
+                    }
+                }
+            } else {
+                "HEALTHY".to_string()
+            }
+        };
+        // Resolve IP for address data — 解析 IP 用于地址数据
+        let host_only = host.trim_start_matches('[').trim_end_matches(']');
+        let resolved_ip = resolve_target_ip(host_only, dns_hostsfile).unwrap_or_else(|| host_only.to_string());
         json!({
             "id": t.id,
             "target": t.target,
@@ -4890,8 +5047,8 @@ pub async fn upstream_health(
             "created_at": t.created_at,
             "data": {
                 "addresses": [{
-                    "ip": t.target.split(':').next().unwrap_or(""),
-                    "port": t.target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0),
+                    "ip": resolved_ip,
+                    "port": port,
                     "health": health_status,
                     "weight": t.weight,
                 }]

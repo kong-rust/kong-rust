@@ -602,6 +602,7 @@ async fn init_proxy_and_admin(
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
             configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
             dbless_store: Some(Arc::clone(&store)),
+            target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
@@ -718,6 +719,7 @@ async fn init_proxy_and_admin(
             // DB mode: empty string = no configuration_hash in /status — DB 模式：空字符串 = /status 不返回 configuration_hash
             configuration_hash: Arc::new(std::sync::RwLock::new(String::new())),
             dbless_store: None,
+            target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
