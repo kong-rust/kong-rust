@@ -79,6 +79,21 @@ Prompt Guard（正则+语义级 prompt injection 检测和内容过滤）。
 - **Effort:** M (human) → S (CC)
 - **Depends on:** Phase 2a-Full 完成（不依赖 2b/2c）
 
+### P2: AI 智能路由引擎（Phase 2 后续增强）
+
+在 ai-proxy 基础上构建更丰富的路由策略，超越简单的 model group 加权 round-robin。
+
+- **精确 Token 计数:** 接入专用 tokenizer（tiktoken-rs / 自研模型 tokenizer），替代 len/4 估算
+- **Token 感知路由:** 根据 prompt token 长度选择模型（短请求→便宜模型，长上下文→大窗口模型）
+- **Model 通配符路由:** 支持 `gpt-4*` 匹配 gpt-4, gpt-4-turbo, gpt-4o 等
+- **加权随机路由:** 按成本/延迟/可用性加权随机选择
+- **成本优化路由:** 自动选择满足能力要求的最便宜 provider
+- **内部推理模型感知:** 支持 `provider_type=internal`，感知自研 LLM 的 IP 列表/服务发现/动态扩缩容
+- **Why:** AI 网关的核心差异化能力。当前 model group 只支持固定权重 round-robin + priority fallback，生产环境需要更灵活的路由策略
+- **Context:** 用户反馈需要支持"根据 token 大小路由 + model 通配符 + 加权随机 + 内部模型 IP 感知"
+- **Effort:** XL (human) → L (CC)
+- **Depends on:** Phase 2 基础完成
+
 ### P1: MCP / Skill 网关 (Phase 3)
 
 MCP Server 注册/发现/路由/认证/可观测性。新建 `kong-mcp` crate。
