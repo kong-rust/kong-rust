@@ -1019,6 +1019,36 @@ impl ProxyHttp for KongProxy {
             }
         }
 
+        // 4.5 Remove hop-by-hop headers from upstream request (RFC 7230 §6.1) — 移除逐跳头（RFC 7230 §6.1）
+        // These are end-to-end connection-specific and must not be forwarded — 这些是端到端连接特定的，不应转发
+        {
+            // Parse Connection header to find additional hop-by-hop headers — 解析 Connection 头以发现额外的逐跳头
+            let connection_tokens: Vec<String> = upstream_request
+                .headers
+                .get("connection")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Standard hop-by-hop headers — 标准逐跳头
+            for header in &[
+                "connection", "keep-alive", "proxy-authenticate",
+                "proxy-authorization", "te", "trailer", "transfer-encoding",
+            ] {
+                upstream_request.remove_header(*header);
+            }
+            // Connection-declared headers — Connection 头声明的额外逐跳头
+            for token in &connection_tokens {
+                if let Ok(name) = http::header::HeaderName::from_bytes(token.as_bytes()) {
+                    upstream_request.headers.remove(name);
+                }
+            }
+        }
+
         // 5. If a plugin replaced the upstream body, fix Content-Length for the replayed payload. — 若插件替换了上游请求体，修正回放 payload 的 Content-Length。
         if let Some(body) = ctx.plugin_ctx.upstream_body.as_ref() {
             let _ = upstream_request.insert_header("content-length", body.len().to_string());
@@ -1134,17 +1164,26 @@ impl ProxyHttp for KongProxy {
             }
 
             if headers_set.contains("x-forwarded-port") {
-                let port = session.req_header().uri.port_u16().unwrap_or(
-                    if session
-                        .digest()
-                        .map(|d| d.ssl_digest.is_some())
-                        .unwrap_or(false)
-                    {
-                        443
-                    } else {
-                        80
-                    },
-                );
+                // Use the proxy's actual listening port, not the URI port — 使用代理的实际监听端口
+                let port = session
+                    .server_addr()
+                    .map(|a| a.as_inet().map(|s| s.port()).unwrap_or(0))
+                    .unwrap_or(0);
+                let port = if port == 0 {
+                    session.req_header().uri.port_u16().unwrap_or(
+                        if session
+                            .digest()
+                            .map(|d| d.ssl_digest.is_some())
+                            .unwrap_or(false)
+                        {
+                            443
+                        } else {
+                            80
+                        },
+                    )
+                } else {
+                    port
+                };
                 let port_str = port.to_string();
                 if is_trusted {
                     if session.req_header().headers.get("x-forwarded-port").is_none() {
