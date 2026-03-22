@@ -24,3 +24,5 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+axum = { workspace = true }
+reqwest = { workspace = true }
