@@ -117,26 +117,44 @@ impl PluginHandler for AiPromptGuardPlugin {
         // 提取 messages 数组
         if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
             // 编译正则（生产环境应缓存，MVP 先每次编译）
+            // 编译失败时返回错误，防止无效正则被静默丢弃导致安全绕过
             let deny_regexes: Vec<Regex> = cfg
                 .deny_patterns
                 .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect();
+                .map(|p| Regex::new(p).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-prompt-guard".to_string(),
+                    message: format!("invalid deny pattern '{}': {}", p, e),
+                }))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             let allow_regexes: Vec<Regex> = cfg
                 .allow_patterns
                 .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect();
+                .map(|p| Regex::new(p).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-prompt-guard".to_string(),
+                    message: format!("invalid allow pattern '{}': {}", p, e),
+                }))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             for msg in messages {
                 // 只检查 user 角色的消息
                 if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
                     continue;
                 }
-                let content = msg
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                // 提取文本内容：支持 string 和 content part 数组两种格式
+                let content = match msg.get("content") {
+                    Some(v) if v.is_string() => {
+                        v.as_str().unwrap_or("").to_string()
+                    }
+                    Some(v) if v.is_array() => {
+                        v.as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                    _ => String::new(),
+                };
 
                 // 长度检查
                 if content.len() > cfg.max_message_length {
@@ -153,7 +171,7 @@ impl PluginHandler for AiPromptGuardPlugin {
 
                 // 拒绝模式匹配
                 for regex in &deny_regexes {
-                    if regex.is_match(content) {
+                    if regex.is_match(&content) {
                         return self.handle_violation(
                             ctx,
                             &cfg,
@@ -164,7 +182,7 @@ impl PluginHandler for AiPromptGuardPlugin {
 
                 // 允许模式（白名单）：如果配置了 allow_patterns，必须至少匹配一个
                 if !allow_regexes.is_empty() {
-                    let any_match = allow_regexes.iter().any(|r| r.is_match(content));
+                    let any_match = allow_regexes.iter().any(|r| r.is_match(&content));
                     if !any_match {
                         return self.handle_violation(ctx, &cfg, "no allow pattern matched");
                     }

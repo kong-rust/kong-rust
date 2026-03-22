@@ -271,15 +271,7 @@ impl PluginHandler for AiProxyPlugin {
             (driver, ai_model, provider_config)
         };
 
-        // 7. 配置上游连接
-        let upstream = driver
-            .configure_upstream(&ai_model, &provider_config)
-            .map_err(|e| KongError::PluginError {
-                plugin_name: "ai-proxy".to_string(),
-                message: format!("failed to configure upstream: {}", e),
-            })?;
-
-        // 8. 确定流式模式
+        // 7. 确定流式模式（需在 configure_upstream 之前，Gemini 依赖此参数选择 API 端点）
         let stream_requested = chat_request.stream == Some(true);
         let stream_mode = match cfg.response_streaming.as_str() {
             "always" => {
@@ -293,6 +285,14 @@ impl PluginHandler for AiProxyPlugin {
             // "allow" — 尊重客户端请求
             _ => stream_requested,
         };
+
+        // 8. 配置上游连接
+        let upstream = driver
+            .configure_upstream(&ai_model, &provider_config, stream_mode)
+            .map_err(|e| KongError::PluginError {
+                plugin_name: "ai-proxy".to_string(),
+                message: format!("failed to configure upstream: {}", e),
+            })?;
 
         // 9. 转换请求
         let provider_request = driver
@@ -459,6 +459,22 @@ impl PluginHandler for AiProxyPlugin {
                         continue;
                     }
 
+                    // 提取 token usage（在 transform 之前，使用原始事件格式）
+                    // Extract token usage before transform — using raw provider event format
+                    if let Some(usage) = state.driver.extract_stream_usage(event) {
+                        // 使用替换而非累加：兼容所有 provider 的语义
+                        // - OpenAI：仅最后一个 chunk 携带 usage，替换 = 赋值
+                        // - Anthropic：分两次发送（input_tokens / output_tokens），各字段独立替换
+                        // - Gemini：每个 chunk 携带累计值，替换 = 取最新值
+                        // Use replacement instead of accumulation — works for all providers
+                        if let Some(pt) = usage.prompt_tokens {
+                            state.usage.prompt_tokens = Some(pt);
+                        }
+                        if let Some(ct) = usage.completion_tokens {
+                            state.usage.completion_tokens = Some(ct);
+                        }
+                    }
+
                     // 通过 driver 转换事件格式（OpenAI 直通，Anthropic provider 需转换）
                     match state.driver.transform_stream_event(event, &state.model) {
                         Ok(Some(transformed)) => {
@@ -476,18 +492,6 @@ impl PluginHandler for AiProxyPlugin {
                                 }
                             } else {
                                 output.push_str(&format!("data: {}\n\n", transformed.data));
-                            }
-
-                            // 累积 token usage（如果事件携带了 usage 数据）
-                            if let Some(usage) = state.driver.extract_stream_usage(&transformed) {
-                                if let Some(pt) = usage.prompt_tokens {
-                                    state.usage.prompt_tokens =
-                                        Some(state.usage.prompt_tokens.unwrap_or(0) + pt);
-                                }
-                                if let Some(ct) = usage.completion_tokens {
-                                    state.usage.completion_tokens =
-                                        Some(state.usage.completion_tokens.unwrap_or(0) + ct);
-                                }
                             }
 
                             // 累积到 response_buffer（供 ai-cache 等插件回写使用）

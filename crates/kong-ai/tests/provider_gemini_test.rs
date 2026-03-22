@@ -204,15 +204,20 @@ fn test_gemini_configure_upstream_path_with_model() {
     let model = make_model();
     let config = make_provider_config("AIza-test-key");
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    // 非流式请求应使用 :generateContent 端点
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     assert_eq!(upstream.scheme, "https");
     assert_eq!(upstream.host, "generativelanguage.googleapis.com");
     assert_eq!(upstream.port, 443);
-    // path 应包含模型名称
     assert!(upstream.path.contains("gemini-1.5-pro"));
-    assert!(upstream.path.contains("streamGenerateContent"));
-    assert!(upstream.path.contains("alt=sse"));
+    assert!(upstream.path.contains("generateContent"));
+    assert!(!upstream.path.contains("stream"), "非流式请求不应使用 streamGenerateContent");
+
+    // 流式请求应使用 :streamGenerateContent?alt=sse 端点
+    let upstream_stream = driver.configure_upstream(&model, &config, true).unwrap();
+    assert!(upstream_stream.path.contains("streamGenerateContent"));
+    assert!(upstream_stream.path.contains("alt=sse"));
 
     // 应有 Bearer auth header
     let auth_header = upstream.headers.iter().find(|(k, _)| k == "Authorization");
@@ -227,7 +232,7 @@ fn test_gemini_configure_upstream_custom_endpoint() {
     let mut config = make_provider_config("AIza-test-key");
     config.endpoint_url = Some("https://custom-gemini.example.com/v1/generate".to_string());
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
     assert_eq!(upstream.host, "custom-gemini.example.com");
     assert_eq!(upstream.path, "/v1/generate");
 }

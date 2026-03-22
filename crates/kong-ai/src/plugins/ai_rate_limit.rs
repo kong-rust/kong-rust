@@ -118,10 +118,10 @@ impl PluginHandler for AiRateLimitPlugin {
             _ => "global".to_string(),
         };
 
-        // 2. 检查 RPM
+        // 2. 检查 RPM（原子 check-and-increment，避免 TOCTOU 竞态）
         if let Some(rpm_limit) = cfg.rpm_limit {
             let rpm_key = format!("{}:rpm", rate_key);
-            let (allowed, current) = self.limiter.check(&rpm_key, rpm_limit);
+            let (allowed, current) = self.limiter.check_and_increment(&rpm_key, rpm_limit, 1);
             if !allowed {
                 ctx.short_circuited = true;
                 ctx.exit_status = Some(cfg.error_code);
@@ -135,13 +135,19 @@ impl PluginHandler for AiRateLimitPlugin {
                 );
                 return Ok(());
             }
-            self.limiter.increment(&rpm_key, 1);
         }
 
-        // 3. 检查 TPM（预扣估算值）
+        // 3. 检查 TPM（预扣估算值，原子 check-and-increment）
         if let Some(tpm_limit) = cfg.tpm_limit {
+            // 预扣：用请求体长度 / 4 估算 prompt tokens
+            let estimated = ctx
+                .request_body
+                .as_ref()
+                .map(|b| ((b.len() as u64) + 3) / 4)
+                .unwrap_or(0);
+
             let tpm_key = format!("{}:tpm", rate_key);
-            let (allowed, current) = self.limiter.check(&tpm_key, tpm_limit);
+            let (allowed, current) = self.limiter.check_and_increment(&tpm_key, tpm_limit, estimated);
             if !allowed {
                 ctx.short_circuited = true;
                 ctx.exit_status = Some(cfg.error_code);
@@ -156,14 +162,6 @@ impl PluginHandler for AiRateLimitPlugin {
                 return Ok(());
             }
 
-            // 预扣：用请求体长度 / 4 估算 prompt tokens
-            let estimated = ctx
-                .request_body
-                .as_ref()
-                .map(|b| ((b.len() as u64) + 3) / 4)
-                .unwrap_or(0);
-            self.limiter.increment(&tpm_key, estimated);
-
             // 存储预扣信息到 extensions，供 log 阶段修正
             ctx.extensions.insert(AiRateLimitContext {
                 rate_key: rate_key.clone(),
@@ -175,7 +173,7 @@ impl PluginHandler for AiRateLimitPlugin {
     }
 
     async fn log(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
-        // TPM 修正：actual_tokens - estimated
+        // TPM 修正：根据实际 token 消耗量修正预扣值
         let rl_ctx = ctx.extensions.get::<AiRateLimitContext>();
         let ai_state = ctx.extensions.get::<AiRequestState>();
 
@@ -184,9 +182,13 @@ impl PluginHandler for AiRateLimitPlugin {
             if cfg.tpm_limit.is_some() {
                 let actual = ai_state.usage.total_tokens.unwrap_or(0);
                 let estimated = rl_ctx.estimated_prompt_tokens;
+                let tpm_key = format!("{}:tpm", rl_ctx.rate_key);
                 if actual > estimated {
-                    let tpm_key = format!("{}:tpm", rl_ctx.rate_key);
+                    // 实际消耗 > 预扣：补扣差额
                     self.limiter.increment(&tpm_key, actual - estimated);
+                } else if estimated > actual {
+                    // 预扣 > 实际消耗：退还多扣的部分
+                    self.limiter.decrement(&tpm_key, estimated - actual);
                 }
             }
         }

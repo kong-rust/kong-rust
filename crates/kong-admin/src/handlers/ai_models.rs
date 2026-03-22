@@ -65,11 +65,13 @@ pub async fn delete_one(
 /// GET /ai-model-groups — 列出所有不同的 model name（model group = 同名模型组成负载均衡组）
 pub async fn list_groups(
     State(state): State<AdminState>,
-    Query(params): Query<ListParams>,
+    Query(_params): Query<ListParams>,
 ) -> impl IntoResponse {
-    // 获取所有 model，提取 distinct name 作为 group — fetch all models, extract distinct names as groups
-    let page_params = params.to_page_params();
-    match state.ai_models.page(&page_params).await {
+    // 全量拉取 model，提取 distinct name 作为 group
+    // fetch all models (large page), extract distinct names as groups
+    use kong_core::traits::PageParams;
+    let all_params = PageParams { size: 10000, ..PageParams::default() };
+    match state.ai_models.page(&all_params).await {
         Ok(page) => {
             let mut seen = std::collections::HashSet::new();
             let mut groups = Vec::new();

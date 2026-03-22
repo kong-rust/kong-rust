@@ -64,7 +64,7 @@ fn test_compat_configure_upstream_uses_custom_endpoint() {
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     );
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     assert_eq!(upstream.scheme, "https");
     assert_eq!(upstream.host, "dashscope.aliyuncs.com");
@@ -91,7 +91,7 @@ fn test_compat_configure_upstream_requires_endpoint() {
         ..Default::default()
     };
 
-    let result = driver.configure_upstream(&model, &config);
+    let result = driver.configure_upstream(&model, &config, false);
     assert!(result.is_err());
 }
 
@@ -185,7 +185,7 @@ fn test_compat_hunyuan_endpoint() {
         "https://hunyuan.tencentcloudapi.com/v1/chat/completions",
     );
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
     assert_eq!(upstream.host, "hunyuan.tencentcloudapi.com");
     assert_eq!(upstream.path, "/v1/chat/completions");
 }

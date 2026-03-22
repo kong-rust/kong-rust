@@ -23,68 +23,86 @@ impl MemoryRateLimiter {
             window_duration,
         }
     }
+
+    /// 获取或创建窗口，过期则原子重置。返回 entry 的引用守卫。
+    /// 使用 entry() API 保证读-检测-修改在同一个锁守卫内完成，避免竞态。
+    fn get_or_reset(&self, key: &str, now: Instant) -> dashmap::mapref::one::Ref<'_, String, WindowEntry> {
+        // 先尝试快速路径：key 已存在且未过期
+        if let Some(entry) = self.windows.get(key) {
+            if now.duration_since(entry.start) < self.window_duration {
+                return entry;
+            }
+        }
+        // 慢路径：使用 entry() API 原子创建或重置
+        self.windows.entry(key.to_string())
+            .and_modify(|e| {
+                if now.duration_since(e.start) >= self.window_duration {
+                    e.start = now;
+                    e.count.store(0, Ordering::Relaxed);
+                }
+            })
+            .or_insert_with(|| WindowEntry {
+                start: now,
+                count: AtomicU64::new(0),
+            });
+        // entry() 返回的是 OccupiedEntry/VacantEntry，我们需要 Ref，所以再 get 一次
+        // 此时 key 一定存在，且窗口已正确初始化
+        self.windows.get(key).unwrap()
+    }
 }
 
 impl super::RateLimiter for MemoryRateLimiter {
     fn check(&self, key: &str, limit: u64) -> (bool, u64) {
         let now = Instant::now();
+        let entry = self.get_or_reset(key, now);
+        let current = entry.count.load(Ordering::Relaxed);
+        (current < limit, current)
+    }
 
-        // 尝试获取已有窗口
-        if let Some(entry) = self.windows.get(key) {
-            // 窗口过期则重置
-            if now.duration_since(entry.start) >= self.window_duration {
-                drop(entry);
-                self.windows.insert(
-                    key.to_string(),
-                    WindowEntry {
-                        start: now,
-                        count: AtomicU64::new(0),
-                    },
-                );
-                return (true, 0);
-            }
+    fn check_and_increment(&self, key: &str, limit: u64, amount: u64) -> (bool, u64) {
+        let now = Instant::now();
+        let entry = self.get_or_reset(key, now);
+        // 使用 CAS 循环实现原子的 check-and-increment
+        loop {
             let current = entry.count.load(Ordering::Relaxed);
-            return (current < limit, current);
+            if current.saturating_add(amount) > limit {
+                return (false, current);
+            }
+            // 尝试原子递增
+            match entry.count.compare_exchange_weak(
+                current,
+                current + amount,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return (true, current + amount),
+                Err(_) => continue, // 被其他线程修改，重试
+            }
         }
+    }
 
-        // 不存在则创建新窗口
-        self.windows.insert(
-            key.to_string(),
-            WindowEntry {
-                start: now,
-                count: AtomicU64::new(0),
-            },
-        );
-        (true, 0)
+    fn decrement(&self, key: &str, amount: u64) {
+        let now = Instant::now();
+        let entry = self.get_or_reset(key, now);
+        // 使用 CAS 防止下溢
+        loop {
+            let current = entry.count.load(Ordering::Relaxed);
+            let new_val = current.saturating_sub(amount);
+            match entry.count.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(_) => continue,
+            }
+        }
     }
 
     fn increment(&self, key: &str, amount: u64) {
         let now = Instant::now();
-
-        if let Some(entry) = self.windows.get(key) {
-            // 窗口过期则重置并设为 amount
-            if now.duration_since(entry.start) >= self.window_duration {
-                drop(entry);
-                self.windows.insert(
-                    key.to_string(),
-                    WindowEntry {
-                        start: now,
-                        count: AtomicU64::new(amount),
-                    },
-                );
-                return;
-            }
-            entry.count.fetch_add(amount, Ordering::Relaxed);
-            return;
-        }
-
-        // 不存在则创建并设为 amount
-        self.windows.insert(
-            key.to_string(),
-            WindowEntry {
-                start: now,
-                count: AtomicU64::new(amount),
-            },
-        );
+        let entry = self.get_or_reset(key, now);
+        entry.count.fetch_add(amount, Ordering::Relaxed);
     }
 }

@@ -65,6 +65,7 @@ impl AiDriver for OpenAiCompatDriver {
         &self,
         model: &AiModel,
         provider_config: &AiProviderConfig,
+        stream: bool,
     ) -> Result<UpstreamConfig> {
         // 必须提供 endpoint_url（兼容模式的核心配置）
         if provider_config.endpoint_url.is_none() {
@@ -73,7 +74,7 @@ impl AiDriver for OpenAiCompatDriver {
             ));
         }
         // 委托给 OpenAI driver（它已支持 endpoint_url 解析）
-        self.inner.configure_upstream(model, provider_config)
+        self.inner.configure_upstream(model, provider_config, stream)
     }
 
     fn extract_usage(&self, body: &str) -> Option<TokenUsage> {

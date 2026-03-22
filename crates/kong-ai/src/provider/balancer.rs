@@ -146,8 +146,9 @@ impl ModelGroupBalancer {
             }
 
             // 加权 round-robin — weighted round-robin
-            let position = (self.counter.fetch_add(1, Ordering::Relaxed) as i32).abs()
-                % total_weight;
+            // 在 u64 域取模后转 i32，避免 u64 → i32 截断导致溢出 panic
+            let position = (self.counter.fetch_add(1, Ordering::Relaxed)
+                % total_weight as u64) as i32;
             let mut cumulative: i32 = 0;
             for entry in &candidates {
                 cumulative += entry.model.weight;

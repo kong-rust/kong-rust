@@ -34,7 +34,7 @@ fn test_openai_auth_bearer_header() {
     };
     let config = make_provider("openai", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     let auth_header = upstream.headers.iter().find(|(k, _)| k == "Authorization");
     assert!(auth_header.is_some(), "应包含 Authorization header");
@@ -56,7 +56,7 @@ fn test_openai_auth_already_has_bearer_prefix() {
     };
     let config = make_provider("openai", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     let auth_header = upstream.headers.iter().find(|(k, _)| k == "Authorization");
     assert!(auth_header.is_some());
@@ -80,7 +80,7 @@ fn test_anthropic_auth_x_api_key() {
     };
     let config = make_provider("anthropic", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     // 验证 x-api-key header
     let api_key_header = upstream.headers.iter().find(|(k, _)| k == "x-api-key");
@@ -122,7 +122,7 @@ fn test_gemini_auth_bearer_token() {
     };
     let config = make_provider("gemini", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     // Gemini 默认 header_name 为 Authorization，header_value 会被加 Bearer 前缀
     let auth_header = upstream.headers.iter().find(|(k, _)| k == "Authorization");
@@ -144,7 +144,7 @@ fn test_openai_auth_custom_header_name() {
     };
     let config = make_provider("openai", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     let custom_header = upstream.headers.iter().find(|(k, _)| k == "X-Custom-Key");
     assert!(
@@ -175,7 +175,7 @@ fn test_auth_config_empty_values() {
     let auth = AuthConfig::default(); // 所有字段为 None
     let config = make_provider("openai", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     // 不应包含任何认证相关的 header
     assert!(
@@ -197,7 +197,7 @@ fn test_anthropic_auth_custom_header_name() {
     };
     let config = make_provider("anthropic", auth);
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     // 应有 anthropic-version + 自定义 header
     let custom = upstream.headers.iter().find(|(k, _)| k == "X-My-Auth");

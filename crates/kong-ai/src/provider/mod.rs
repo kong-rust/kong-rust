@@ -75,10 +75,12 @@ pub trait AiDriver: Send + Sync {
     ) -> Result<Option<SseEvent>>;
 
     /// 生成上游连接配置（scheme、host、port、path、auth headers）
+    /// stream 参数指示是否为流式请求（Gemini 需要据此选择不同的 API 端点）
     fn configure_upstream(
         &self,
         model: &AiModel,
         provider_config: &AiProviderConfig,
+        stream: bool,
     ) -> Result<UpstreamConfig>;
 
     /// 从非流式响应 body 中提取 token 使用量

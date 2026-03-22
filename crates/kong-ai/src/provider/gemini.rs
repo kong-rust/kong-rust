@@ -284,6 +284,7 @@ impl AiDriver for GeminiDriver {
         &self,
         model: &AiModel,
         provider_config: &AiProviderConfig,
+        stream: bool,
     ) -> Result<UpstreamConfig> {
         if let Some(ref endpoint_url) = provider_config.endpoint_url {
             let (scheme, host, port, path) =
@@ -300,13 +301,16 @@ impl AiDriver for GeminiDriver {
         }
 
         // 默认 Gemini API 路径（含模型名）
-        let model_name = &model.model_name;
         // 非流式: :generateContent，流式: :streamGenerateContent?alt=sse
-        // 这里默认使用流式 endpoint，因为 ai-proxy 会在 access 阶段设置 stream
-        let path = format!(
-            "/v1beta/models/{}:streamGenerateContent?alt=sse",
-            model_name
-        );
+        let model_name = &model.model_name;
+        let path = if stream {
+            format!(
+                "/v1beta/models/{}:streamGenerateContent?alt=sse",
+                model_name
+            )
+        } else {
+            format!("/v1beta/models/{}:generateContent", model_name)
+        };
 
         let mut headers = Vec::new();
 
@@ -314,8 +318,19 @@ impl AiDriver for GeminiDriver {
         let auth: AuthConfig =
             serde_json::from_value(provider_config.auth_config.clone()).unwrap_or_default();
 
-        // 如果有 param_value，追加到 path 查询参数
-        // 如果有 header_value，作为 Bearer token
+        // 如果有 param_value，追加到 path 查询参数 — append API key to query string
+        // 如果有 header_value，作为 Bearer token — use as Bearer token
+        let path = if let Some(ref param_value) = auth.param_value {
+            let param_name = auth.param_name.as_deref().unwrap_or("key");
+            if path.contains('?') {
+                format!("{}&{}={}", path, param_name, param_value)
+            } else {
+                format!("{}?{}={}", path, param_name, param_value)
+            }
+        } else {
+            path
+        };
+
         if let Some(ref header_value) = auth.header_value {
             let header_name = auth
                 .header_name

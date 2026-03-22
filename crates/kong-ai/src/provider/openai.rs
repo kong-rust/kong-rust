@@ -82,6 +82,7 @@ impl AiDriver for OpenAiDriver {
         &self,
         _model: &AiModel,
         provider_config: &AiProviderConfig,
+        _stream: bool,
     ) -> Result<UpstreamConfig> {
         // 如果 provider 配置了自定义 endpoint，使用它；否则使用 OpenAI 默认
         let (scheme, host, port, path) =

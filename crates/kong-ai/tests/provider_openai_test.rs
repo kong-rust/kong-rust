@@ -154,7 +154,7 @@ fn test_openai_configure_upstream() {
     let model = make_model();
     let config = make_provider_config("sk-test-key-123");
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     assert_eq!(upstream.scheme, "https");
     assert_eq!(upstream.host, "api.openai.com");
@@ -175,7 +175,7 @@ fn test_openai_configure_upstream_custom_endpoint() {
     let mut config = make_provider_config("sk-test");
     config.endpoint_url = Some("https://custom-openai.example.com:8443/v2/chat".to_string());
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     assert_eq!(upstream.scheme, "https");
     assert_eq!(upstream.host, "custom-openai.example.com");
@@ -197,7 +197,7 @@ fn test_openai_configure_upstream_bearer_prefix() {
         ..Default::default()
     };
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
     assert_eq!(upstream.headers[0].1, "Bearer sk-already-prefixed");
 }
 

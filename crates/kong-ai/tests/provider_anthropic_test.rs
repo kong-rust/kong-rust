@@ -264,7 +264,7 @@ fn test_anthropic_configure_upstream() {
     let model = make_model();
     let config = make_provider_config("sk-ant-api-key-123");
 
-    let upstream = driver.configure_upstream(&model, &config).unwrap();
+    let upstream = driver.configure_upstream(&model, &config, false).unwrap();
 
     assert_eq!(upstream.scheme, "https");
     assert_eq!(upstream.host, "api.anthropic.com");

@@ -320,6 +320,7 @@ impl AiDriver for AnthropicDriver {
         &self,
         _model: &AiModel,
         provider_config: &AiProviderConfig,
+        _stream: bool,
     ) -> Result<UpstreamConfig> {
         let (scheme, host, port, path) =
             if let Some(ref endpoint_url) = provider_config.endpoint_url {
