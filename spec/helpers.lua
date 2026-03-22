@@ -2212,6 +2212,20 @@ function _M.get_available_port()
 end
 
 ---------------------------------------------------------------------------
+-- Log file helpers — 日志文件辅助函数
+---------------------------------------------------------------------------
+
+function _M.clean_logfile(logfile)
+    logfile = logfile or "/tmp/gw-spec.log"
+    local f = io.open(logfile, "w")
+    if f then f:close() end
+end
+
+function _M.wait_for_log(fn, timeout)
+    return _M.wait_until(fn, timeout or 10)
+end
+
+---------------------------------------------------------------------------
 -- DNS mock stub — DNS 模拟桩
 -- Kong-Rust uses system DNS; this stub collects records for compatibility.
 -- Actual DNS override is not yet implemented.
