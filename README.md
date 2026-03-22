@@ -25,7 +25,7 @@ The AI era needs a new kind of gateway. Traditional API gateways handle HTTP tra
 | | Kong (Lua) | LiteLLM (Python) | Kong-Rust |
 |---|---|---|---|
 | **API Gateway** | Full | None | **Full (100% Kong compatible, faster)** |
-| **LLM Gateway** | Lua plugins | Full (100+ providers) | Rust-native (roadmap) |
+| **LLM Gateway** | Lua plugins | Full (100+ providers) | **Rust-native (4 plugins, 5 providers, intelligent routing)** |
 | **Agent Gateway** | None | None | Rust-native (roadmap) |
 | **MCP / Skill Gateway** | Enterprise | Basic | Rust-native (roadmap) |
 | **Engine** | OpenResty (Nginx + LuaJIT) | uvicorn | **Pingora (Rust, multi-threaded)** |
@@ -49,14 +49,18 @@ Everything Kong does, Kong-Rust does — with Rust-level performance and memory 
 - **Multiple Data Sources** — PostgreSQL or db-less (declarative config) modes
 - **Hybrid Mode** — Control Plane / Data Plane separation (planned)
 
-### LLM Gateway (Roadmap)
+### LLM Gateway
 
-- **Token-based Rate Limiting** — TPM/RPM per key/route/consumer
-- **Multi-model Load Balancing & Fallback** — Multiple LLM providers as upstreams, auto-failover
-- **Virtual API Key Management** — Issue virtual keys mapped to real provider keys with budgets
-- **Token Cost Tracking** — Per key/team/route usage and cost metrics
-- **Semantic Caching** — Vector-similarity cached LLM responses
-- **Prompt Guard** — Regex + semantic prompt injection detection
+- **Multi-Provider Support** — OpenAI, Anthropic (Claude), Gemini, Qwen, Hunyuan, and any OpenAI-compatible service
+- **Intelligent Model Routing** — Regex pattern matching + weighted round-robin across providers (A/B testing, cost optimization, multi-region)
+- **Dual Client Protocol** — Expose both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) endpoints simultaneously
+- **Token-based Rate Limiting** — TPM/RPM per consumer/route/global with pre-deduction + correction
+- **Multi-model Load Balancing & Fallback** — Weighted round-robin with priority-based fallback and health-aware cooldown
+- **Virtual API Key Management** — Issue virtual keys with budgets, quotas, and model allowlists
+- **Token Cost Tracking** — Per-model pricing with three-tier token counting (provider > tiktoken > estimate)
+- **Semantic Caching** — SHA256 cache key extraction with skip header support (Redis backend planned)
+- **Prompt Guard** — Regex deny/allow patterns + message length limits with block or log-only modes
+- **Streaming SSE** — Full streaming support with cross-chunk reassembly, TTFT tracking, and usage accumulation
 
 ### Agent Gateway (Roadmap)
 
@@ -95,7 +99,7 @@ kong-server (binary entry point)
  ├── kong-lua-bridge    — Lua compatibility layer + PDK + ngx.*
  ├── kong-admin         — Admin API (axum)
  ├── kong-cluster       — CP/DP cluster communication (planned)
- ├── kong-ai            — LLM Gateway engine: rate limiter, OpenAI/Anthropic protocol, token counting (planned)
+ ├── kong-ai            — LLM Gateway engine: 4 plugins (proxy, rate-limit, cache, prompt-guard), 5 providers, intelligent routing
  ├── kong-mcp           — MCP/Skill Gateway: MCP protocol, tool registry & routing (planned)
  └── kong-agent         — Agent Gateway: A2A protocol, agent registry & routing (planned)
 ```
@@ -247,12 +251,12 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 | Phase | Track | Status | Description |
 |-------|-------|--------|-------------|
 | Phase 0 | A | **Done** | Stability hardening — Kong official spec test alignment (375/375 = 100%) |
-| Phase 2a-MVP | B | Planned | LLM Gateway MVP — OpenAI protocol proxy, token counting |
+| Phase 2a-MVP | B | **Done** | LLM Gateway MVP — OpenAI protocol proxy, token counting |
 | Phase 1 | A | Planned | Hybrid CP/DP mode (traditional gateway completion) |
-| Phase 2a-Full | B | Planned | Multi-model LB & fallback (Anthropic, Gemini) |
-| Phase 2b | B | Planned | Virtual API keys, token cost tracking |
-| Phase 2c | B | Planned | Semantic caching |
-| Phase 2d | B | Planned | Prompt guard |
+| Phase 2a-Full | B | **Done** | Multi-model LB & fallback (Anthropic, Gemini, Qwen, Hunyuan) + intelligent routing |
+| Phase 2b | B | **Done** | Virtual API keys, token cost tracking |
+| Phase 2c | B | **Done** | Semantic caching (cache key infrastructure) |
+| Phase 2d | B | **Done** | Prompt guard (regex deny/allow + length limits) |
 | Phase 3 | B | Planned | MCP Gateway — Server registration, discovery, routing |
 | Phase 4 | B | Planned | Agent Gateway — A2A protocol, agent routing, identity management |
 | Phase 5a | C | Planned | AI Gateway Console — Replace Kong Manager OSS with modern UI |
@@ -267,6 +271,7 @@ See [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md) for t
 
 | Document | Description |
 |----------|-------------|
+| [AI Gateway Guide](docs/ai-gateway-guide.md) | Usage guide: quick start, plugin config, Admin API, multi-provider LB |
 | [AI Gateway Strategy](docs/designs/ai-gateway-strategy.md) | AI gateway positioning & dual-track execution plan |
 | [Roadmap](docs/designs/kong-rust-roadmap.md) | Hybrid mode detailed design & legacy roadmap |
 | [Design](docs/design.md) | Architecture & component design |

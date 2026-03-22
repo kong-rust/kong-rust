@@ -13,7 +13,8 @@
 5. [多 Provider 负载均衡](#5-多-provider-负载均衡)
 6. [双协议支持](#6-双协议支持)
 7. [插件组合示例](#7-插件组合示例)
-8. [支持的 Provider](#8-支持的-provider)
+8. [智能模型路由](#8-智能模型路由)
+9. [支持的 Provider](#9-支持的-provider)
 
 ---
 
@@ -193,7 +194,8 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 | `retries` | integer | `1` | 上游重试次数 |
 | `log_payloads` | boolean | `false` | 是否记录请求/响应体（调试用） |
 | `log_statistics` | boolean | `true` | 是否在日志中记录 token 统计 |
-| `provider` | object | `null` | 内联 Provider 配置（见下方） |
+| `model_routes` | array | `[]` | 智能路由规则（正则匹配 + 加权选择，见下方"智能路由"章节） |
+| `provider` | object | `null` | 内联 Provider 配置（见下方）；配置了 `model_routes` 时可省略 |
 
 #### 内联 Provider 配置（`provider` 字段）
 
@@ -694,7 +696,124 @@ curl -X POST http://localhost:8001/plugins \
 
 ---
 
-## 8. 支持的 Provider
+## 8. 智能模型路由
+
+ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由：根据请求中的 model 名称，用正则匹配决定路由到哪个 provider + 模型，支持加权分配。
+
+### 8.1 配置结构
+
+```json
+{
+  "model_routes": [
+    {
+      "pattern": "正则表达式（匹配请求中的 model 名）",
+      "targets": [
+        {
+          "provider_type": "openai",
+          "model_name": "gpt-4o",
+          "endpoint_url": null,
+          "auth_config": { "header_value": "sk-..." },
+          "weight": 80
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **`pattern`**：正则表达式，匹配客户端请求体中的 `model` 字段。按规则顺序匹配，第一条命中即生效。
+- **`targets`**：匹配后的候选目标列表。多个 target 时按 `weight` 加权轮询选择。
+- **`weight`**：加权值，默认 `1`。同规则内多个 target 的 weight 决定流量分配比例。
+
+> **注意**：配置了 `model_routes` 后，`provider` 字段可省略。路由结果直接决定使用哪个 provider。
+
+### 8.2 使用场景
+
+**场景 1 — A/B 测试（80% OpenAI / 20% Azure）：**
+
+```json
+{
+  "model_routes": [
+    {
+      "pattern": "^gpt-4",
+      "targets": [
+        { "provider_type": "openai", "model_name": "gpt-4o", "weight": 80,
+          "auth_config": { "header_value": "sk-openai-xxx" } },
+        { "provider_type": "openai_compat", "model_name": "gpt-4o", "weight": 20,
+          "endpoint_url": "https://my-azure.openai.azure.com",
+          "auth_config": { "header_value": "azure-key-xxx" } }
+      ]
+    }
+  ]
+}
+```
+
+**场景 2 — 多 Provider 统一入口：**
+
+```json
+{
+  "model_source": "request",
+  "model_routes": [
+    {
+      "pattern": "^gpt",
+      "targets": [
+        { "provider_type": "openai", "model_name": "gpt-4o",
+          "auth_config": { "header_value": "sk-openai" } }
+      ]
+    },
+    {
+      "pattern": "^claude",
+      "targets": [
+        { "provider_type": "anthropic", "model_name": "claude-3-opus-20240229",
+          "auth_config": { "header_value": "sk-ant-xxx" } }
+      ]
+    },
+    {
+      "pattern": "^qwen",
+      "targets": [
+        { "provider_type": "openai_compat", "model_name": "qwen-turbo",
+          "endpoint_url": "https://dashscope.aliyuncs.com",
+          "auth_config": { "header_value": "sk-qwen-xxx" } }
+      ]
+    },
+    {
+      "pattern": ".*",
+      "targets": [
+        { "provider_type": "openai", "model_name": "gpt-4o-mini",
+          "auth_config": { "header_value": "sk-default" } }
+      ]
+    }
+  ]
+}
+```
+
+客户端发送 `model: "claude-3-opus"` → 自动路由到 Anthropic；发送 `model: "gpt-4o"` → 路由到 OpenAI；未匹配的 → 使用 gpt-4o-mini 兜底。
+
+**场景 3 — 成本优化（不同前缀路由到不同价位模型）：**
+
+```json
+{
+  "model_source": "request",
+  "model_routes": [
+    { "pattern": "^cheap-", "targets": [
+        { "provider_type": "openai", "model_name": "gpt-3.5-turbo",
+          "auth_config": { "header_value": "sk-xxx" } }
+    ]},
+    { "pattern": "^smart-", "targets": [
+        { "provider_type": "anthropic", "model_name": "claude-3-opus-20240229",
+          "auth_config": { "header_value": "sk-ant-xxx" } }
+    ]},
+    { "pattern": ".*", "targets": [
+        { "provider_type": "openai", "model_name": "gpt-4o-mini",
+          "auth_config": { "header_value": "sk-xxx" } }
+    ]}
+  ]
+}
+```
+
+---
+
+## 9. 支持的 Provider
 
 | Provider | `provider_type` | 默认端点 | 鉴权方式 |
 |---|---|---|---|
