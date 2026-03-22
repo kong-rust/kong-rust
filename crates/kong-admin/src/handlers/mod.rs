@@ -253,6 +253,114 @@ fn validate_upstream_name(name: &str) -> Option<(StatusCode, Json<Value>)> {
     None
 }
 
+
+/// Validate upstream hash_on / hash_fallback related fields
+/// 验证 upstream 的 hash_on / hash_fallback 相关字段
+fn validate_upstream_hash_fields(obj: &serde_json::Map<String, Value>) -> Option<(StatusCode, Json<Value>)> {
+    let valid_hash_on = ["none", "consumer", "ip", "header", "cookie", "path", "query_arg", "uri_capture"];
+    let valid_hash_fallback = ["none", "ip", "header", "cookie", "path", "query_arg", "uri_capture"];
+    let schema_err = |fields: Value| -> (StatusCode, Json<Value>) {
+        let fields_str = fields.as_object()
+            .map(|o| o.iter().map(|(k, v)| format!("{}: {}", k, v.as_str().unwrap_or(&v.to_string()))).collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        (StatusCode::BAD_REQUEST, Json(json!({
+            "message": format!("schema violation ({})", fields_str),
+            "name": "schema violation",
+            "code": 2,
+            "fields": fields,
+        })))
+    };
+    let get_str = |key: &str| -> Option<&str> { obj.get(key).and_then(|v| v.as_str()) };
+    if let Some(hash_on) = get_str("hash_on") {
+        if !valid_hash_on.contains(&hash_on) {
+            return Some(schema_err(json!({"hash_on": "expected one of: none, consumer, ip, header, cookie, path, query_arg, uri_capture"})));
+        }
+        if hash_on == "header" {
+            match get_str("hash_on_header") {
+                None | Some("") => {
+                    return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_on_header": "required field missing"})));
+                }
+                Some(h) => {
+                    if !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                        return Some(schema_err(json!({"hash_on_header": format!("bad header name '{}', allowed characters are A-Z, a-z, 0-9, '_', and '-'", h)})));
+                    }
+                }
+            }
+        }
+        if hash_on == "cookie" {
+            if let Some(cookie) = get_str("hash_on_cookie") {
+                if !is_valid_cookie_name(cookie) {
+                    return Some(schema_err(json!({"hash_on_cookie": r#"contains one or more invalid characters. ASCII control characters (0-31;127), space, tab and the characters ()<>@,;:\"/?={}[] are not allowed."#})));
+                }
+            }
+            if let Some(path) = get_str("hash_on_cookie_path") {
+                if !path.starts_with('/') {
+                    return Some(schema_err(json!({"hash_on_cookie_path": "should start with: /"})));
+                }
+            }
+        }
+        if let Some(hash_fallback) = get_str("hash_fallback") {
+            if hash_on == "cookie" && hash_fallback != "none" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none"})));
+            }
+            if !valid_hash_fallback.contains(&hash_fallback) && hash_fallback != "consumer" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none, ip, header, cookie, path, query_arg, uri_capture"})));
+            }
+            if hash_on == "consumer" && hash_fallback == "consumer" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none, ip, header, cookie, path, query_arg, uri_capture"})));
+            }
+            if hash_fallback == "header" {
+                match get_str("hash_fallback_header") {
+                    None | Some("") => {
+                        return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_fallback'"], "hash_fallback_header": "required field missing"})));
+                    }
+                    Some(h) => {
+                        if !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                            return Some(schema_err(json!({"hash_fallback_header": format!("bad header name '{}', allowed characters are A-Z, a-z, 0-9, '_', and '-'", h)})));
+                        }
+                    }
+                }
+            }
+            if hash_on == "header" && hash_fallback == "header" {
+                if let (Some(h1), Some(h2)) = (get_str("hash_on_header"), get_str("hash_fallback_header")) {
+                    if h1 == h2 {
+                        return Some(schema_err(json!({"@entity": ["values of these fields must be distinct: 'hash_on_header', 'hash_fallback_header'"]})));
+                    }
+                }
+            }
+            if hash_fallback == "cookie" {
+                if let Some(cookie) = get_str("hash_on_cookie") {
+                    if !is_valid_cookie_name(cookie) {
+                        return Some(schema_err(json!({"hash_on_cookie": r#"contains one or more invalid characters. ASCII control characters (0-31;127), space, tab and the characters ()<>@,;:\"/?={}[] are not allowed."#})));
+                    }
+                }
+                if let Some(path) = get_str("hash_on_cookie_path") {
+                    if !path.starts_with('/') {
+                        return Some(schema_err(json!({"hash_on_cookie_path": "should start with: /"})));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_valid_cookie_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    for c in name.chars() {
+        let b = c as u32;
+        if b <= 31 || b == 127 {
+            return false;
+        }
+        if matches!(c, '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '?' | '=' | '{' | '}' | '[' | ']' | ' ' | '\t') {
+            return false;
+        }
+    }
+    true
+}
+
 fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Value>) {
     let msg = err.to_string();
     if let KongError::UniqueViolation(inner) = err {
@@ -1342,6 +1450,33 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                     return err;
                 }
             }
+            // Validate upstream slots range [10, 65536] — 验证 slots 范围
+            if let Some(slots_val) = obj.get("slots") {
+                let slots_invalid = if let Some(n) = slots_val.as_i64() {
+                    n < 10 || n > 65536
+                } else if let Some(n) = slots_val.as_f64() {
+                    (n as i64) < 10 || (n as i64) > 65536
+                } else {
+                    false
+                };
+                if slots_invalid {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (slots: value should be between 10 and 65536)",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "slots": "value should be between 10 and 65536"
+                            },
+                        })),
+                    );
+                }
+            }
+            // Validate hash_on / hash_fallback fields — 验证 hash 相关字段
+            if let Some(err) = validate_upstream_hash_fields(obj) {
+                return err;
+            }
         }
 
         // Route must have at least one of methods/hosts/headers/paths/snis — Route 至少需要一个路由匹配字段
@@ -1713,6 +1848,33 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 if let Some(err) = validate_upstream_name(name) {
                     return err;
                 }
+            }
+            // Validate upstream slots range [10, 65536] — 验证 slots 范围
+            if let Some(slots_val) = obj.get("slots") {
+                let slots_invalid = if let Some(n) = slots_val.as_i64() {
+                    n < 10 || n > 65536
+                } else if let Some(n) = slots_val.as_f64() {
+                    (n as i64) < 10 || (n as i64) > 65536
+                } else {
+                    false
+                };
+                if slots_invalid {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (slots: value should be between 10 and 65536)",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "slots": "value should be between 10 and 65536"
+                            },
+                        })),
+                    );
+                }
+            }
+            // Validate hash_on / hash_fallback fields — 验证 hash 相关字段
+            if let Some(err) = validate_upstream_hash_fields(obj) {
+                return err;
             }
         }
     }
@@ -2412,6 +2574,26 @@ pub async fn upsert_route_service(
             }
         }
         result
+    }
+}
+
+/// DELETE /routes/{route_id_or_name}/service — route exists→405, not found→404
+pub async fn delete_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    match state.routes.select(&pk).await {
+        Ok(Some(_)) => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({"message": "Method not allowed"})),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"message": "Not found"})),
+        )
+            .into_response(),
     }
 }
 

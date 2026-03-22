@@ -2308,4 +2308,10 @@ function _M.http2_client(host, port, tls)
     error("HTTP/2 client is not yet supported in Kong-Rust test framework")
 end
 
+---------------------------------------------------------------------------
+-- Load wait/eventually assertions (with_timeout, eventually, etc.) — 加载 wait/eventually 断言扩展
+-- Must be loaded after busted environment is available — 必须在 busted 环境可用后加载
+---------------------------------------------------------------------------
+pcall(require, "spec.helpers.wait")
+
 return _M
