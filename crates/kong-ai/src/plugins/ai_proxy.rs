@@ -296,14 +296,42 @@ impl PluginHandler for AiProxyPlugin {
 
     async fn header_filter(&self, _config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
         // 检查 AiRequestState 是否存在（access 阶段应已设置）
-        let state = ctx.extensions.get::<AiRequestState>();
-        if state.is_none() {
-            warn!("ai-proxy header_filter: AiRequestState not found in extensions");
-            return Ok(());
+        let ai_state = match ctx.extensions.get_mut::<AiRequestState>() {
+            Some(s) => s,
+            None => {
+                warn!("ai-proxy header_filter: AiRequestState not found in extensions");
+                return Ok(());
+            }
+        };
+
+        // 检测上游响应是否为流式 — 通过 Content-Type 判断
+        let content_type = ctx
+            .response_headers
+            .get("content-type")
+            .cloned()
+            .unwrap_or_default();
+
+        let is_stream = content_type.contains("text/event-stream")
+            || content_type.contains("application/x-ndjson")
+            || content_type.contains("application/stream+json");
+
+        if is_stream {
+            // 初始化流式解析状态
+            ai_state.stream_mode = true;
+            ai_state.sse_parser = Some(crate::codec::SseParser::new(
+                crate::codec::SseFormat::Standard,
+            ));
+            ai_state.response_buffer = Some(String::new());
+
+            // 设置客户端响应 Content-Type 为 SSE
+            ctx.response_headers_to_set.push((
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            ));
+
+            debug!("ai-proxy header_filter: detected streaming response, content-type={}", content_type);
         }
 
-        // 非流式模式：header_filter 无需特殊处理
-        // 流式模式的 SSE 解析在 Task 6 中实现
         Ok(())
     }
 
@@ -320,11 +348,103 @@ impl PluginHandler for AiProxyPlugin {
             None => return Ok(()),
         };
 
-        // 流式模式在 Task 6 实现，这里只处理非流式
+        // ---- 流式处理分支 ----
         if state.stream_mode {
+            if let Some(body_bytes) = body.as_ref() {
+                let chunk = match std::str::from_utf8(body_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        warn!("ai-proxy body_filter: invalid UTF-8 in SSE chunk: {}", e);
+                        return Ok(());
+                    }
+                };
+
+                // 解析 SSE 事件：end_of_stream 时同时 flush 缓冲区
+                let events = if end_of_stream {
+                    let mut evts = if let Some(ref mut parser) = state.sse_parser {
+                        parser.feed(&chunk)
+                    } else {
+                        vec![]
+                    };
+                    if let Some(ref mut parser) = state.sse_parser {
+                        evts.extend(parser.flush());
+                    }
+                    evts
+                } else {
+                    if let Some(ref mut parser) = state.sse_parser {
+                        parser.feed(&chunk)
+                    } else {
+                        vec![]
+                    }
+                };
+
+                // 记录首 token 时间（TTFT）
+                if !events.is_empty() && state.ttft.is_none() {
+                    state.ttft = Some(std::time::Instant::now());
+                }
+
+                // 转换每个 SSE 事件并拼装输出
+                let mut output = String::new();
+                for event in &events {
+                    // [DONE] 终止事件直接透传
+                    if event.is_done() {
+                        output.push_str("data: [DONE]\n\n");
+                        continue;
+                    }
+
+                    // 通过 driver 转换事件格式（OpenAI 直通，Anthropic 需转换）
+                    match state.driver.transform_stream_event(event, &state.model) {
+                        Ok(Some(transformed)) => {
+                            output.push_str(&format!("data: {}\n\n", transformed.data));
+
+                            // 累积 token usage（如果事件携带了 usage 数据）
+                            if let Some(usage) = state.driver.extract_stream_usage(&transformed) {
+                                if let Some(pt) = usage.prompt_tokens {
+                                    state.usage.prompt_tokens =
+                                        Some(state.usage.prompt_tokens.unwrap_or(0) + pt);
+                                }
+                                if let Some(ct) = usage.completion_tokens {
+                                    state.usage.completion_tokens =
+                                        Some(state.usage.completion_tokens.unwrap_or(0) + ct);
+                                }
+                            }
+
+                            // 累积到 response_buffer（供 ai-cache 等插件回写使用）
+                            if let Some(ref mut buf) = state.response_buffer {
+                                buf.push_str(&transformed.data);
+                            }
+                        }
+                        Ok(None) => {
+                            // transform_stream_event 返回 None 表示 [DONE] 或需跳过的事件
+                        }
+                        Err(e) => {
+                            warn!("ai-proxy body_filter: SSE event transform error: {}", e);
+                        }
+                    }
+                }
+
+                // 更新 body：有输出则替换，无输出则清空避免透传原始 chunk
+                if !output.is_empty() {
+                    *body = Some(bytes::Bytes::from(output));
+                } else if !end_of_stream {
+                    // 无完整事件产出时清空 body（事件尚在缓冲中）
+                    *body = Some(bytes::Bytes::new());
+                }
+            }
+
+            // 流结束时汇总 total_tokens
+            if end_of_stream {
+                let pt = state.usage.prompt_tokens.unwrap_or(0);
+                let ct = state.usage.completion_tokens.unwrap_or(0);
+                if pt > 0 || ct > 0 {
+                    state.usage.total_tokens = Some(pt + ct);
+                }
+            }
+
             return Ok(());
         }
 
+        // ---- 非流式处理分支 ----
         // 非流式：收集响应体
         if let Some(chunk) = body.as_ref() {
             let chunk_str = String::from_utf8_lossy(chunk);
