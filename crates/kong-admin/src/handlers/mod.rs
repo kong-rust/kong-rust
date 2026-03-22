@@ -1923,7 +1923,7 @@ entity_handlers!(
 /// Fetch SNI names associated with a certificate — 获取关联证书的 SNI 名称列表
 async fn fetch_sni_names_for_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_id: &uuid::Uuid) -> Vec<String> {
     let all_params = PageParams { size: 10000, ..Default::default() };
-    match snis_dao.select_by_foreign_key("certificate_id", cert_id, &all_params).await {
+    match snis_dao.select_by_foreign_key("certificate", cert_id, &all_params).await {
         Ok(page) => page.data.into_iter().map(|s| s.name).collect(),
         Err(_) => vec![],
     }
@@ -2210,6 +2210,49 @@ pub async fn delete_certificate(
 
     let result = do_delete::<Certificate>(&state.certificates, &resolved).await;
     let _ = state.refresh_tx.send("certificates");
+    let _ = state.refresh_tx.send("snis");
+    result
+}
+
+/// GET /certificates/{cert_id_or_name}/snis — list SNIs for a certificate — 列出证书关联的 SNI
+pub async fn list_certificate_snis(
+    State(state): State<AdminState>,
+    Path(cert_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    let resolved = resolve_cert_id_or_name(&state, &cert_id_or_name).await;
+    let cert_id = match resolved.and_then(|s| uuid::Uuid::parse_str(&s).ok()) {
+        Some(id) => id,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let page_params = params.to_page_params();
+    match state.snis.select_by_foreign_key("certificate", &cert_id, &page_params).await {
+        Ok(page) => {
+            let resp = build_page_response_with_tags(&page, params.tags.as_deref());
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()}))),
+    }
+}
+
+/// POST /certificates/{cert_id_or_name}/snis — create SNI for a certificate — 为证书创建 SNI
+pub async fn create_certificate_sni(
+    State(state): State<AdminState>,
+    Path(cert_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let resolved = resolve_cert_id_or_name(&state, &cert_id_or_name).await;
+    let cert_id = match resolved.and_then(|s| uuid::Uuid::parse_str(&s).ok()) {
+        Some(id) => id,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let mut body = body.0;
+    // Force certificate FK to the path cert — 强制 certificate 外键指向路径中的证书
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("certificate".to_string(), json!({"id": cert_id.to_string()}));
+    }
+    let result = do_create::<Sni>(&state.snis, body).await;
     let _ = state.refresh_tx.send("snis");
     result
 }

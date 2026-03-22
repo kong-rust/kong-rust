@@ -169,6 +169,8 @@ fn is_known_route(path: &str) -> bool {
         ["consumers", _, "plugins"] => true,
         // /consumers/{id}/plugins/{id}
         ["consumers", _, "plugins", _] => true,
+        // /certificates/{id}/snis
+        ["certificates", _, "snis"] => true,
         // /upstreams/{id}/targets
         ["upstreams", _, "targets"] => true,
         // /upstreams/{id}/targets/{id}
@@ -390,6 +392,11 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .patch(update_sni)
                 .put(upsert_sni)
                 .delete(delete_sni),
+        )
+        // Certificates nested SNIs — 证书嵌套 SNI 路由
+        .route(
+            "/certificates/{cert_id_or_name}/snis",
+            get(handlers::list_certificate_snis).post(handlers::create_certificate_sni),
         )
         // CA Certificates
         .route(
