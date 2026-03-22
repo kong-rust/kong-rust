@@ -410,7 +410,8 @@ pub fn build_admin_router(state: AdminState) -> Router {
             "/routes/{route_id_or_name}/service",
             get(handlers::get_route_service)
                 .patch(handlers::update_route_service)
-                .put(handlers::upsert_route_service),
+                .put(handlers::upsert_route_service)
+                .delete(handlers::delete_route_service),
         )
         // Certificates nested SNIs — 证书嵌套 SNI 路由
         .route(

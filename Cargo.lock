@@ -1656,6 +1656,7 @@ dependencies = [
  "kong-proxy",
  "kong-router",
  "mime",
+ "openssl",
  "serde",
  "serde_json",
  "sha2",

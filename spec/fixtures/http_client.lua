@@ -32,21 +32,51 @@ do
     if ok then cjson_null = cj.null end
 end
 
+-- Recursive form encoder (mirrors Kong's kong.tools.http.encode_args)
+-- 递归表单编码器（模仿 Kong 原始实现）
+local function recursive_encode_args(parent_key, value, query)
+    local sub_keys = {}
+    for sk in pairs(value) do
+        sub_keys[#sub_keys + 1] = sk
+    end
+    table.sort(sub_keys, function(a, b)
+        local ta = type(a)
+        if ta == type(b) then return a < b end
+        return ta == "number"
+    end)
+    for _, sub_key in ipairs(sub_keys) do
+        local sub_value = value[sub_key]
+        local next_sub_key
+        if type(sub_key) == "number" then
+            next_sub_key = string.format("%s[%s]", parent_key, tostring(sub_key))
+        else
+            next_sub_key = string.format("%s.%s", parent_key, tostring(sub_key))
+        end
+        if sub_value == cjson_null then
+            query[#query + 1] = url_mod.escape(next_sub_key) .. "="
+        elseif type(sub_value) == "table" then
+            recursive_encode_args(next_sub_key, sub_value, query)
+        else
+            query[#query + 1] = url_mod.escape(next_sub_key) .. "=" .. url_mod.escape(tostring(sub_value))
+        end
+    end
+end
+
 -- encode_args: encode table to application/x-www-form-urlencoded — 编码表为 form-urlencoded 格式
 local function encode_args(args)
     local parts = {}
-    for k, v in pairs(args) do
-        -- cjson.null values → encode as key= (empty value) so server receives empty string — cjson.null 值 → 编码为 key=（空值）以便服务端收到空字符串
+    local keys = {}
+    for k in pairs(args) do
+        keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        local v = args[k]
         if v == cjson_null then
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "="
         elseif type(v) == "table" then
-            -- multi-value: key=v1&key=v2 — 多值
-            for _, item in ipairs(v) do
-                if item ~= cjson_null then
-                    parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
-                end
-            end
-        else
+            recursive_encode_args(k, v, parts)
+        elseif v ~= nil then
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(v))
         end
     end

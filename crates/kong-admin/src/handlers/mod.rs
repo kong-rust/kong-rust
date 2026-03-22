@@ -97,7 +97,7 @@ impl AdminState {
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
-    pub size: Option<usize>,
+    pub size: Option<String>,
     pub offset: Option<String>,
     pub tags: Option<String>,
     /// Filter consumers by custom_id — 按 custom_id 过滤 consumer
@@ -194,7 +194,7 @@ impl ListParams {
             }
         });
         PageParams {
-            size: self.size.unwrap_or(100).min(1000),
+            size: self.size.as_ref().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100).min(1000),
             offset: self.offset.clone(),
             tags,
             tags_mode: if is_or { TagFilterMode::Or } else { TagFilterMode::And },
@@ -216,6 +216,67 @@ fn error_response(err: KongError) -> Response {
         "code": err.error_code(),
     });
     (status, Json(body)).into_response()
+}
+
+/// Validate integer fields in request body — 验证请求体中的整数字段
+fn validate_integer_fields(table_name: &str, body: &Value) -> Option<(StatusCode, Json<Value>)> {
+    let int_fields: &[&str] = match table_name {
+        "routes" => &["regex_priority", "https_redirect_status_code", "priority"],
+        "services" => &["port", "retries", "connect_timeout", "write_timeout", "read_timeout", "tls_verify_depth"],
+        "upstreams" => &["slots"],
+        "targets" => &["weight"],
+        _ => return None,
+    };
+    if let Some(obj) = body.as_object() {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        for &field in int_fields {
+            if let Some(val) = obj.get(field) {
+                if val.is_string() {
+                    violations.push(format!("{}: expected an integer", field));
+                    fields.insert(field.to_string(), json!("expected an integer"));
+                }
+            }
+        }
+        if !violations.is_empty() {
+            let msg = if violations.len() == 1 {
+                format!("schema violation ({})", violations[0])
+            } else {
+                format!("{} schema violations ({})", violations.len(), violations.join("; "))
+            };
+            return Some((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": msg,
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": Value::Object(fields),
+                })),
+            ));
+        }
+    }
+    None
+}
+
+/// Convert empty JSON objects {} to empty arrays [] for known array fields — 将已知数组字段的空 JSON 对象转为空数组
+fn normalize_empty_objects_to_arrays(body: &Value) -> Value {
+    let known_array_fields = [
+        "protocols", "methods", "hosts", "paths", "snis",
+        "sources", "destinations", "ca_certificates", "tags",
+    ];
+    let mut body = body.clone();
+    if let Some(obj) = body.as_object_mut() {
+        for &field in &known_array_fields {
+            if let Some(val) = obj.get(field) {
+                if let Some(map) = val.as_object() {
+                    if map.is_empty() {
+                        obj.insert(field.to_string(), json!([]));
+                    }
+                }
+            }
+        }
+    }
+    body
 }
 
 /// Enrich UNIQUE violation error with actual field values from the request body
@@ -1035,6 +1096,35 @@ pub(crate) async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     params: &ListParams,
 ) -> (StatusCode, Json<Value>) {
+    // Validate size parameter — 验证 size 参数
+    if let Some(ref s) = params.size {
+        if s.parse::<usize>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "code": 8,
+                    "name": "invalid size",
+                    "message": "size must be a number",
+                })),
+            );
+        }
+    }
+    // Validate offset parameter — 验证 offset 参数
+    if let Some(ref offset) = params.offset {
+        let valid_b64 = !offset.is_empty() && offset.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
+        });
+        if !valid_b64 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "code": 7,
+                    "name": "invalid offset",
+                    "message": format!("'{}' is not a valid offset: bad base64 encoding", offset),
+                })),
+            );
+        }
+    }
     // Validate tags before query — 查询前验证 tags 参数
     if let Err(err) = params.validate_tags() {
         return err;
@@ -1205,8 +1295,12 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
     dao: &Arc<dyn Dao<T>>,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
+    // Normalize empty objects and validate integer fields — 归一化空对象并验证整数字段
+    let mut body = normalize_empty_objects_to_arrays(&body);
+    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+        return err;
+    }
     // Auto-inject id and timestamps (Kong-compatible: these fields are optional on create) — 自动注入 id 和时间戳（Kong 兼容：创建时这些字段可选）
-    let mut body = body;
     if let Some(obj) = body.as_object_mut() {
         if !obj.contains_key("id") {
             obj.insert("id".to_string(), json!(uuid::Uuid::new_v4()));
@@ -1492,29 +1586,83 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 };
                 let has_routing_field = has_field("methods") || has_field("hosts") || has_field("headers")
                     || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
-                if !has_routing_field {
-                    let protocols_str = obj.get("protocols").and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("', '"))
-                        .unwrap_or_else(|| "grpcs', 'https', 'http', 'grpc".to_string());
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "message": format!("schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}')", protocols_str),
-                            "name": "schema violation",
-                            "code": 2,
-                            "fields": {
-                                "@entity": [format!("must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}'", protocols_str)]
-                            },
-                        })),
-                    );
-                }
-
-                // gRPC routes: strip_path must be false — gRPC 路由：strip_path 必须为 false
+                // Determine protocols — 确定协议
                 let protocols = obj.get("protocols").and_then(|v| v.as_array());
                 let is_grpc = protocols.map_or(false, |arr| {
                     arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
                 });
+
+                // Validate protocol values — 验证协议值
+                if let Some(Value::Array(protos)) = obj.get("protocols") {
+                    let valid_protos = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                    for (i, p) in protos.iter().enumerate() {
+                        if let Some(ps) = p.as_str() {
+                            if !valid_protos.contains(&ps) {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "message": format!("schema violation (protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)", i + 1),
+                                        "name": "schema violation",
+                                        "code": 2,
+                                        "fields": { "protocols": ["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"] },
+                                    })),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if !has_routing_field {
+                    // Kong shows the most restrictive (TLS/secure) protocol — Kong 只显示最受限的协议
+                    let proto_display = if let Some(arr) = protocols {
+                        let pl: Vec<&str> = arr.iter().filter_map(|p| p.as_str()).collect();
+                        if pl.contains(&"grpcs") { "grpcs".to_string() }
+                        else if pl.contains(&"https") { "https".to_string() }
+                        else if pl.contains(&"tls") { "tls".to_string() }
+                        else { pl.join("', '") }
+                    } else {
+                        "https".to_string()
+                    };
+                    let rf = if is_grpc { "'hosts', 'headers', 'paths', 'snis'" }
+                             else { "'methods', 'hosts', 'headers', 'paths', 'snis'" };
+                    let emsg = format!("must set one of {} when 'protocols' is '{}'", rf, proto_display);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": format!("schema violation ({})", emsg),
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": { "@entity": [emsg] },
+                        })),
+                    );
+                }
+
+                // gRPC routes: validate constraints — gRPC 路由约束验证
                 if is_grpc {
+                    if obj.get("strip_path").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": "schema violation (strip_path: cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs')",
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": { "strip_path": "cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs'" },
+                            })),
+                        );
+                    }
+                    if let Some(Value::Array(arr)) = obj.get("methods") {
+                        if !arr.is_empty() {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": "schema violation (methods: cannot set 'methods' when 'protocols' is 'grpc' or 'grpcs')",
+                                    "name": "schema violation",
+                                    "code": 2,
+                                    "fields": { "methods": "cannot set 'methods' when 'protocols' is 'grpc' or 'grpcs'" },
+                                })),
+                            );
+                        }
+                    }
                     obj.insert("strip_path".to_string(), json!(false));
                 }
             }
@@ -1572,6 +1720,12 @@ pub(crate) async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Normalize empty objects and validate integer fields — 归一化空对象并验证整数字段
+    let body = normalize_empty_objects_to_arrays(&body);
+    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+        return err;
+    }
 
     // Plugin unknown field validation on PATCH — PATCH 时验证插件未知字段
     if T::table_name() == "plugins" {
@@ -1722,6 +1876,11 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Validate integer fields — 验证整数字段
+    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+        return err;
+    }
 
     // Inject id/endpoint_key from URL path — 从 URL 路径注入 id 或 endpoint_key
     if let Some(obj) = body.as_object_mut() {
@@ -2064,17 +2223,102 @@ entity_handlers!(
     upsert_service,
     delete_service
 );
-entity_handlers!(
-    Route,
-    routes,
-    "routes",
-    list_routes,
-    get_route,
-    create_route,
-    update_route,
-    upsert_route,
-    delete_route
-);
+// Route handlers (custom, with service name resolution) — 路由处理器（自定义，支持 service name 解析）
+pub async fn list_routes(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    do_list::<Route>(&state.routes, &params).await
+}
+
+pub async fn get_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_get::<Route>(&state.routes, &id_or_name).await
+}
+
+pub async fn create_route(
+    State(state): State<AdminState>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_service_name_ref(&state, &mut body).await {
+        return e;
+    }
+    let result = do_create::<Route>(&state.routes, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn update_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let result = do_update::<Route>(&state.routes, &id_or_name, &body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn upsert_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_service_name_ref(&state, &mut body).await {
+        return e;
+    }
+    let result = do_upsert::<Route>(&state.routes, &id_or_name, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn delete_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let result = do_delete::<Route>(&state.routes, &id_or_name).await;
+    let _ = state.refresh_tx.send("routes");
+    result
+}
+
+/// Resolve service.name reference to service.id — 将 service.name 引用解析为 service.id
+async fn resolve_service_name_ref(state: &AdminState, body: &mut Value) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Some(svc_obj) = body.as_object_mut().and_then(|o| o.get_mut("service")).and_then(|v| v.as_object_mut()) {
+        if svc_obj.contains_key("name") && !svc_obj.contains_key("id") {
+            if let Some(name) = svc_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                let pk = PrimaryKey::EndpointKey(name.clone());
+                match state.services.select(&pk).await {
+                    Ok(Some(svc)) => {
+                        let svc_json = serde_json::to_value(&svc).unwrap_or(json!(null));
+                        if let Some(id) = svc_json.get("id").and_then(|v| v.as_str()) {
+                            svc_obj.remove("name");
+                            svc_obj.insert("id".to_string(), json!(id));
+                        }
+                    }
+                    _ => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": "schema violation: missing field `id`",
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": {},
+                            })),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 entity_handlers!(
     Consumer,
     consumers,
@@ -2168,6 +2412,64 @@ entity_handlers!(
 );
 // ============ Certificate handlers (custom, with SNI embedding) — 证书处理器（自定义，嵌入 SNI） ============
 
+/// Percent-decode PEM fields (cert, key, cert_alt, key_alt) that may be URL-encoded from form-urlencoded bodies
+/// 对可能来自 form-urlencoded 的 PEM 字段进行百分号解码
+fn percent_decode_pem_fields(body: &mut Value) {
+    let pem_fields = ["cert", "key", "cert_alt", "key_alt"];
+    if let Some(obj) = body.as_object_mut() {
+        for field in &pem_fields {
+            if let Some(val) = obj.get_mut(*field) {
+                if let Some(s) = val.as_str() {
+                    if s.contains('%') {
+                        if let Ok(decoded) = url::form_urlencoded::parse(s.as_bytes())
+                            .into_owned()
+                            .next()
+                            .map(|(k, _)| k)
+                            .ok_or(()) {
+                            // form_urlencoded::parse treats the whole string as key if no = — 如果没有 = 号则整个字符串作为 key
+                            *val = Value::String(decoded);
+                        } else {
+                            // Fallback: manual percent decode — 后备：手动百分号解码
+                            let decoded = percent_decode_str(s);
+                            *val = Value::String(decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn percent_decode_str(s: &str) -> String {
+    // Proper percent decoding — 百分号解码
+    let mut result = Vec::new();
+    let input = s.as_bytes();
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            let hi = hex_val(input[i + 1]);
+            let lo = hex_val(input[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                result.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Fetch SNI names associated with a certificate — 获取关联证书的 SNI 名称列表
 async fn fetch_sni_names_for_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_id: &uuid::Uuid) -> Vec<String> {
     let all_params = PageParams { size: 10000, ..Default::default() };
@@ -2177,20 +2479,135 @@ async fn fetch_sni_names_for_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_id: &uuid::
     }
 }
 
-/// Embed snis array into a certificate JSON value — 将 snis 数组嵌入证书 JSON 值
+/// Embed snis array into a certificate JSON value (sorted alphabetically) — 将 snis 数组嵌入证书 JSON 值（按字母排序）
 async fn embed_snis_in_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_json: &mut Value) {
     if let Some(id_str) = cert_json.get("id").and_then(|v| v.as_str()) {
         if let Ok(cert_id) = uuid::Uuid::parse_str(id_str) {
-            let sni_names = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+            let mut sni_names = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+            sni_names.sort();
             cert_json.as_object_mut().unwrap().insert("snis".to_string(), json!(sni_names));
         }
     }
 }
 
-/// Extract snis field from request body, returning (cleaned body, snis list) — 从请求体提取 snis 字段，返回 (清理后的 body, snis 列表)
+/// Validate SNI name: wildcards must be only at start or end, not both — 验证 SNI 名称通配符
+fn validate_sni_name(name: &str) -> Result<(), String> {
+    let wildcard_count = name.matches('*').count();
+    if wildcard_count > 1 {
+        return Err("only one wildcard must be specified".to_string());
+    }
+    if wildcard_count == 1 {
+        if !name.starts_with("*.") && !name.ends_with(".*") {
+            return Err("wildcard must be leftmost or rightmost character".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Validate SNI names: check for duplicates, wildcard format, and pre-existing SNIs — 验证 SNI 名称
+async fn validate_sni_names_for_create(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    sni_names: &[String],
+    exclude_cert_id: Option<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let mut seen = std::collections::HashSet::new();
+    for name in sni_names {
+        if !seen.insert(name.as_str()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (snis: {} is duplicated)", name),
+                "name": "schema violation", "code": 2,
+                "fields": { "snis": format!("{} is duplicated", name) },
+            }))));
+        }
+        if let Err(msg) = validate_sni_name(name) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (name: {})", msg),
+                "name": "schema violation", "code": 2,
+                "fields": { "name": msg },
+            }))));
+        }
+    }
+    for name in sni_names {
+        let sni_pk = PrimaryKey::EndpointKey(name.clone());
+        if let Ok(Some(existing_sni)) = snis_dao.select(&sni_pk).await {
+            let is_same_cert = exclude_cert_id.map_or(false, |id| existing_sni.certificate.id == id);
+            if !is_same_cert {
+                let cert_id_str = existing_sni.certificate.id.to_string();
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
+                    "message": format!("schema violation (snis: {} already associated with existing certificate '{}')", name, cert_id_str),
+                    "name": "schema violation", "code": 2,
+                    "fields": { "snis": format!("{} already associated with existing certificate '{}'", name, cert_id_str) },
+                }))));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate certificate PEM: cert/key match, cert_alt/key_alt pairing, non-distinct certs — 验证证书 PEM
+fn validate_certificate_pem(body: &Value) -> Result<(), (StatusCode, Json<Value>)> {
+    use openssl::x509::X509;
+    use openssl::pkey::PKey;
+
+    let cert_str = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+    let key_str = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let cert_alt_str = body.get("cert_alt").and_then(|v| v.as_str());
+    let key_alt_str = body.get("key_alt").and_then(|v| v.as_str());
+
+    if cert_str.is_empty() || key_str.is_empty() {
+        return Ok(());
+    }
+
+    let cert = X509::from_pem(cert_str.as_bytes()).map_err(|_| cert_schema_violation("certificate is not valid PEM format"))?;
+    let key = PKey::private_key_from_pem(key_str.as_bytes()).map_err(|_| cert_schema_violation("key is not valid PEM format"))?;
+
+    if cert.public_key().ok().and_then(|pk| pk.public_eq(&key).then_some(())).is_none() {
+        return Err(cert_schema_violation("certificate does not match key"));
+    }
+
+    let has_cert_alt = cert_alt_str.map_or(false, |s| !s.is_empty()) && !body.get("cert_alt").map_or(false, |v| v.is_null());
+    let has_key_alt = key_alt_str.map_or(false, |s| !s.is_empty()) && !body.get("key_alt").map_or(false, |v| v.is_null());
+
+    if has_cert_alt != has_key_alt {
+        return Err(cert_schema_violation("all or none of these fields must be set: 'cert_alt', 'key_alt'"));
+    }
+
+    if has_cert_alt && has_key_alt {
+        let cert_alt_pem = cert_alt_str.unwrap();
+        let key_alt_pem = key_alt_str.unwrap();
+
+        let cert_alt = X509::from_pem(cert_alt_pem.as_bytes()).map_err(|_| cert_schema_violation("alternative certificate is not valid PEM format"))?;
+        let key_alt = PKey::private_key_from_pem(key_alt_pem.as_bytes()).map_err(|_| cert_schema_violation("alternative key is not valid PEM format"))?;
+
+        if cert_alt.public_key().ok().and_then(|pk| pk.public_eq(&key_alt).then_some(())).is_none() {
+            return Err(cert_schema_violation("alternative certificate does not match key"));
+        }
+
+        let cert_key_type = cert.public_key().ok().map(|pk| pk.id());
+        let cert_alt_key_type = cert_alt.public_key().ok().map(|pk| pk.id());
+        if cert_key_type == cert_alt_key_type {
+            return Err(cert_schema_violation("certificate and alternative certificate need to have different type (e.g. RSA and ECDSA), the provided certificates were both of the same type"));
+        }
+    }
+
+    Ok(())
+}
+
+fn cert_schema_violation(msg: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({
+        "message": format!("schema violation ({})", msg),
+        "name": "schema violation", "code": 2,
+        "fields": { "@entity": [msg] },
+    })))
+}
+
+/// Extract snis field from request body, returning (cleaned body, snis list) — 从请求体提取 snis 字段
 fn extract_snis_from_body(body: &mut Value) -> Option<Vec<String>> {
     if let Some(obj) = body.as_object_mut() {
         if let Some(snis_val) = obj.remove("snis") {
+            if snis_val.is_null() {
+                return Some(vec![]);
+            }
             if let Some(arr) = snis_val.as_array() {
                 let names: Vec<String> = arr.iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -2235,13 +2652,11 @@ async fn replace_snis_for_cert(
     cert_id: uuid::Uuid,
     sni_names: &[String],
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    // Delete existing SNIs — 删除已有 SNI
     let existing = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
     for name in &existing {
         let pk = PrimaryKey::EndpointKey(name.clone());
         let _ = snis_dao.delete(&pk).await;
     }
-    // Create new SNIs — 创建新 SNI
     create_snis_for_cert(snis_dao, cert_id, sni_names).await
 }
 
@@ -2256,7 +2671,6 @@ pub async fn list_certificates(
     match state.certificates.page(&params.to_page_params()).await {
         Ok(page) => {
             let mut resp = build_page_response_with_tags(&page, params.tags.as_deref());
-            // Embed snis for each certificate — 为每个证书嵌入 snis
             if let Some(data_arr) = resp.get_mut("data").and_then(|v| v.as_array_mut()) {
                 for cert_json in data_arr.iter_mut() {
                     embed_snis_in_cert(&state.snis, cert_json).await;
@@ -2276,7 +2690,6 @@ pub async fn get_certificate(
     State(state): State<AdminState>,
     Path(id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    // First try direct lookup by ID/UUID — 先尝试按 ID/UUID 直接查找
     let pk = PrimaryKey::from_str_or_uuid(&id_or_name);
     let cert_opt = match &pk {
         PrimaryKey::Id(_) => {
@@ -2288,42 +2701,25 @@ pub async fn get_certificate(
                 }
             }
         }
-        PrimaryKey::EndpointKey(_) => None, // Certificate has no endpoint_key, try SNI lookup below — 证书无 endpoint_key，尝试下面的 SNI 查找
+        PrimaryKey::EndpointKey(_) => None,
     };
 
-    // If not found by ID, try SNI name lookup — 如果按 ID 未找到，尝试 SNI 名称查找
     let cert = if let Some(c) = cert_opt {
         c
     } else {
-        // Lookup SNI by name — 按名称查找 SNI
         let sni_pk = PrimaryKey::EndpointKey(id_or_name.clone());
         match state.snis.select(&sni_pk).await {
             Ok(Some(sni)) => {
-                // Found SNI, now fetch the certificate — 找到 SNI，获取关联的证书
                 let cert_pk = PrimaryKey::Id(sni.certificate.id);
                 match state.certificates.select(&cert_pk).await {
                     Ok(Some(c)) => c,
                     Ok(None) | Err(_) => {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(json!({
-                                "message": "certificates not found",
-                                "name": "not found",
-                                "code": 3,
-                            })),
-                        );
+                        return (StatusCode::NOT_FOUND, Json(json!({"message": "certificates not found", "name": "not found", "code": 3})));
                     }
                 }
             }
             Ok(None) | Err(_) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "message": "certificates not found",
-                        "name": "not found",
-                        "code": 3,
-                    })),
-                );
+                return (StatusCode::NOT_FOUND, Json(json!({"message": "certificates not found", "name": "not found", "code": 3})));
             }
         }
     };
@@ -2339,14 +2735,24 @@ pub async fn create_certificate(
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let mut body = body;
+    percent_decode_pem_fields(&mut body);
     let sni_names = extract_snis_from_body(&mut body);
+
+    // Validate certificate PEM — 验证证书 PEM
+    if let Err(err) = validate_certificate_pem(&body) {
+        return err;
+    }
+    // Pre-validate SNI names — 预验证 SNI 名称
+    if let Some(ref names) = sni_names {
+        if let Err(err) = validate_sni_names_for_create(&state.snis, names, None).await {
+            return err;
+        }
+    }
 
     let result = do_create::<Certificate>(&state.certificates, body).await;
     if result.0.is_success() {
-        // Create SNI records if provided — 如果提供了 snis 则创建 SNI 记录
         if let Some(ref names) = sni_names {
             if !names.is_empty() {
-                // Extract certificate ID from created response — 从创建响应中提取证书 ID
                 if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
                     if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
                         if let Err(err) = create_snis_for_cert(&state.snis, cert_id, names).await {
@@ -2359,7 +2765,6 @@ pub async fn create_certificate(
         let _ = state.refresh_tx.send("certificates");
         let _ = state.refresh_tx.send("snis");
 
-        // Re-fetch and embed snis — 重新获取并嵌入 snis
         let mut cert_json = result.1.0;
         embed_snis_in_cert(&state.snis, &mut cert_json).await;
         (StatusCode::CREATED, Json(cert_json))
@@ -2375,23 +2780,27 @@ pub async fn update_certificate(
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let mut body = body;
+    percent_decode_pem_fields(&mut body);
     let sni_names = extract_snis_from_body(&mut body);
 
-    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
+    // Pre-validate SNI names for PATCH — PATCH 时预验证 SNI 名称
     let cert_id_or_name = resolve_cert_id_or_name(&state, &id_or_name).await;
     let resolved = match cert_id_or_name {
         Some(id) => id,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "certificates not found", "name": "not found", "code": 3 })),
-            );
+            return (StatusCode::NOT_FOUND, Json(json!({ "message": "certificates not found", "name": "not found", "code": 3 })));
         }
     };
 
+    let exclude_cert_id = uuid::Uuid::parse_str(&resolved).ok();
+    if let Some(ref names) = sni_names {
+        if let Err(err) = validate_sni_names_for_create(&state.snis, names, exclude_cert_id).await {
+            return err;
+        }
+    }
+
     let result = do_update::<Certificate>(&state.certificates, &resolved, &body).await;
     if result.0.is_success() {
-        // Replace SNIs if provided — 如果提供了 snis 则替换
         if let Some(ref names) = sni_names {
             if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
                 if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
@@ -2421,18 +2830,61 @@ pub async fn upsert_certificate(
     let mut body = body;
     let sni_names = extract_snis_from_body(&mut body);
 
-    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
+    // Validate required fields for PUT — 验证 PUT 必填字段
+    {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        let cert_val = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+        let key_val = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        if cert_val.is_empty() {
+            violations.push("cert: required field missing");
+            fields.insert("cert".to_string(), json!("required field missing"));
+        }
+        if key_val.is_empty() {
+            violations.push("key: required field missing");
+            fields.insert("key".to_string(), json!("required field missing"));
+        }
+        if !violations.is_empty() {
+            let msg = if violations.len() > 1 {
+                format!("{} schema violations ({})", violations.len(), violations.join("; "))
+            } else {
+                format!("schema violation ({})", violations[0])
+            };
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": msg, "name": "schema violation", "code": 2, "fields": Value::Object(fields)})));
+        }
+    }
+
+    // Validate certificate PEM — 验证证书 PEM
+    if let Err(err) = validate_certificate_pem(&body) {
+        return err;
+    }
+
+    // Check if the URL path is an SNI name (not UUID) — 检查 URL 路径是否为 SNI 名称
+    let url_is_sni_name = uuid::Uuid::parse_str(&id_or_name).is_err();
+
+    // Build combined SNI list: URL SNI + body snis (deduplicated) — 构建合并 SNI 列表
+    let mut combined_snis: Vec<String> = Vec::new();
+    if url_is_sni_name {
+        combined_snis.push(id_or_name.clone());
+    }
+    if let Some(ref names) = sni_names {
+        for name in names {
+            if !combined_snis.contains(name) {
+                combined_snis.push(name.clone());
+            }
+        }
+    }
+
     let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
         .unwrap_or_else(|| id_or_name.clone());
 
     let result = do_upsert::<Certificate>(&state.certificates, &resolved, body).await;
     if result.0.is_success() {
-        if let Some(ref names) = sni_names {
-            if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
-                if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
-                    if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, names).await {
-                        return err;
-                    }
+        if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+            if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                // PUT always replaces SNIs (full replacement semantics) — PUT 始终替换 SNI（全量替换语义）
+                if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, &combined_snis).await {
+                    return err;
                 }
             }
         }
@@ -2452,9 +2904,17 @@ pub async fn delete_certificate(
     State(state): State<AdminState>,
     Path(id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
     let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
         .unwrap_or_else(|| id_or_name.clone());
+
+    // Delete associated SNIs first (DB CASCADE as backup) — 先删 SNI（DB CASCADE 作为后备）
+    if let Ok(cert_id) = uuid::Uuid::parse_str(&resolved) {
+        let existing_snis = fetch_sni_names_for_cert(&state.snis, &cert_id).await;
+        for name in &existing_snis {
+            let pk = PrimaryKey::EndpointKey(name.clone());
+            let _ = state.snis.delete(&pk).await;
+        }
+    }
 
     let result = do_delete::<Certificate>(&state.certificates, &resolved).await;
     let _ = state.refresh_tx.send("certificates");
@@ -2495,6 +2955,12 @@ pub async fn create_certificate_sni(
         Some(id) => id,
         None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
     };
+    // Verify the certificate actually exists — 验证证书是否确实存在
+    let cert_pk = PrimaryKey::Id(cert_id);
+    match state.certificates.select(&cert_pk).await {
+        Ok(Some(_)) => {}
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    }
     let mut body = body.0;
     // Force certificate FK to the path cert — 强制 certificate 外键指向路径中的证书
     if let Some(obj) = body.as_object_mut() {
@@ -2611,9 +3077,61 @@ async fn resolve_cert_id_or_name(state: &AdminState, id_or_name: &str) -> Option
     }
     None
 }
-entity_handlers!(
-    Sni, snis, "snis", list_snis, get_sni, create_sni, update_sni, upsert_sni, delete_sni
-);
+// Custom SNI handlers with wildcard validation — 自定义 SNI handler 含通配符验证
+pub async fn list_snis(State(state): State<AdminState>, Query(params): Query<ListParams>) -> impl IntoResponse {
+    do_list::<Sni>(&state.snis, &params).await
+}
+pub async fn get_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>) -> impl IntoResponse {
+    do_get::<Sni>(&state.snis, &id_or_name).await
+}
+pub async fn create_sni(State(state): State<AdminState>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_create::<Sni>(&state.snis, body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn update_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_update::<Sni>(&state.snis, &id_or_name, &body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn upsert_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    // Validate required fields for PUT SNI — PUT SNI 必填字段验证
+    {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        let has_cert = body.get("certificate").and_then(|v| v.as_object()).and_then(|o| o.get("id")).is_some();
+        let has_name = body.get("name").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty());
+        if !has_cert { violations.push("certificate: required field missing"); fields.insert("certificate".to_string(), json!("required field missing")); }
+        if !has_name { violations.push("name: required field missing"); fields.insert("name".to_string(), json!("required field missing")); }
+        if !violations.is_empty() {
+            let msg = if violations.len() > 1 { format!("{} schema violations ({})", violations.len(), violations.join("; ")) } else { format!("schema violation ({})", violations[0]) };
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": msg, "name": "schema violation", "code": 2, "fields": Value::Object(fields)})));
+        }
+    }
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_upsert::<Sni>(&state.snis, &id_or_name, body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn delete_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>) -> impl IntoResponse {
+    let result = do_delete::<Sni>(&state.snis, &id_or_name).await;
+    let _ = state.refresh_tx.send("snis");
+    result
+}
 entity_handlers!(
     CaCertificate,
     ca_certificates,
@@ -3899,43 +4417,108 @@ pub async fn create_nested_route(
     result
 }
 
+/// Validate target hostname — 验证 target 主机名
+fn validate_target_host(target_val: &str) -> Result<(), &'static str> {
+    let host = if target_val.starts_with('[') {
+        target_val.split(']').next().unwrap_or(target_val)
+    } else {
+        target_val.split(':').next().unwrap_or(target_val)
+    };
+    if host.contains(' ') || host.contains('\t') || host.is_empty() {
+        return Err("Invalid target; not a valid hostname or ip address");
+    }
+    for ch in host.chars() {
+        if ch == '[' || ch == ']' { continue; }
+        if !(ch.is_alphanumeric() || ch == '-' || ch == '.' || ch == '_' || ch == ':') {
+            return Err("Invalid target; not a valid hostname or ip address");
+        }
+    }
+    Ok(())
+}
+
+/// Find a target within an upstream by name or UUID — 在 upstream 中按名称或 UUID 查找 target
+async fn find_target_in_upstream(
+    targets_dao: &Arc<dyn Dao<Target>>,
+    upstream_id: &uuid::Uuid,
+    target_id_or_name: &str,
+) -> Result<Option<Target>, (StatusCode, Json<Value>)> {
+    if let Ok(uuid) = uuid::Uuid::parse_str(target_id_or_name) {
+        match targets_dao.select(&PrimaryKey::Id(uuid)).await {
+            Ok(Some(t)) => {
+                if t.upstream.id == *upstream_id { return Ok(Some(t)); }
+                return Ok(None);
+            }
+            Ok(None) => return Ok(None),
+            Err(e) => return Err((
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )),
+        }
+    }
+    let page_params = PageParams { size: 10000, ..Default::default() };
+    match targets_dao.select_by_foreign_key("upstream", upstream_id, &page_params).await {
+        Ok(page) => {
+            for t in page.data {
+                if t.target == target_id_or_name { return Ok(Some(t)); }
+            }
+            Ok(None)
+        }
+        Err(e) => Err((
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        )),
+    }
+}
+
+/// Resolve upstream from path — 解析路径中的 upstream
+async fn resolve_upstream(
+    state: &AdminState,
+    upstream_id_or_name: &str,
+) -> Result<Upstream, (StatusCode, Json<Value>)> {
+    let upstream_pk = PrimaryKey::from_str_or_uuid(upstream_id_or_name);
+    match state.upstreams.select(&upstream_pk).await {
+        Ok(Some(u)) => Ok(u),
+        Ok(None) => Err((StatusCode::NOT_FOUND, Json(json!({"message": "upstream not found"})))),
+        Err(e) => Err((
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        )),
+    }
+}
+
+/// Build paginated response with custom next URL prefix — 构建自定义 next URL 前缀的分页响应
+fn build_nested_page_response<T: Serialize>(page: &Page<T>, next_prefix: &str) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("data".to_string(), json!(page.data));
+    body.insert("next".to_string(), match &page.offset {
+        Some(o) => json!(format!("{}?offset={}", next_prefix, o)),
+        None => Value::Null,
+    });
+    if let Some(ref offset) = page.offset {
+        body.insert("offset".to_string(), json!(offset));
+    }
+    Value::Object(body)
+}
+
 /// GET /upstreams/:upstream_id/targets
 pub async fn list_nested_targets(
     State(state): State<AdminState>,
     Path(upstream_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    // Validate tags before query — 查询前验证 tags 参数
     if let Err(err) = params.validate_tags() {
         return err;
     }
-
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    let upstream = match state.upstreams.select(&upstream_pk).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "upstream not found"})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                Json(json!({"message": e.to_string()})),
-            );
-        }
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
     };
-
-    match state
-        .targets
-        .select_by_foreign_key("upstream", &upstream.id, &params.to_page_params())
-        .await
-    {
-        Ok(page) => (
-            StatusCode::OK,
-            Json(build_page_response(&page)),
-        ),
+    match state.targets.select_by_foreign_key("upstream", &upstream.id, &params.to_page_params()).await {
+        Ok(page) => {
+            let path = req.uri().path().trim_end_matches('/');
+            (StatusCode::OK, Json(build_nested_page_response(&page, path)))
+        }
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"message": e.to_string()})),
@@ -3981,6 +4564,14 @@ pub async fn create_nested_target(
                 "message": "schema violation (target: required field missing)",
                 "name": "schema violation", "code": 2,
                 "fields": { "target": "required field missing" },
+            })));
+        }
+        // Validate target hostname — 验证 target 主机名
+        if let Err(msg) = validate_target_host(target_val) {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (target: {})", msg),
+                "name": "schema violation", "code": 2,
+                "fields": { "target": msg },
             })));
         }
         // Validate weight range — 验证 weight 范围
@@ -4032,40 +4623,36 @@ pub async fn get_nested_target(
     State(state): State<AdminState>,
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    // Verify upstream exists — 验证 upstream 存在
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    if let Ok(None) = state.upstreams.select(&upstream_pk).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"message": "upstream not found"})),
-        );
-    }
-
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
-    match state.targets.select(&pk).await {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
         Ok(Some(target)) => {
             let body = serde_json::to_value(&target).unwrap_or(json!(null));
             (StatusCode::OK, Json(body))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"message": "target not found"})),
-        ),
-        Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(json!({"message": e.to_string()})))
-        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))),
+        Err(e) => e,
     }
 }
 
 /// PATCH /upstreams/:upstream_id/targets/:id
 pub async fn update_nested_target(
     State(state): State<AdminState>,
-    Path((_upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))),
+        Err(e) => return e,
+    };
+    let pk = PrimaryKey::Id(target.id);
     match state.targets.update(&pk, &body).await {
         Ok(updated) => {
             let _ = state.refresh_tx.send("targets");
@@ -4073,8 +4660,7 @@ pub async fn update_nested_target(
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status, Json(json!({"message": e.to_string()})))
         }
     }
@@ -4083,17 +4669,25 @@ pub async fn update_nested_target(
 /// DELETE /upstreams/:upstream_id/targets/:id
 pub async fn delete_nested_target(
     State(state): State<AdminState>,
-    Path((_upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))).into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let pk = PrimaryKey::Id(target.id);
     match state.targets.delete(&pk).await {
         Ok(_) => {
             let _ = state.refresh_tx.send("targets");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = json!({"message": e.to_string()});
             (status, Json(body)).into_response()
         }
@@ -4106,55 +4700,72 @@ pub async fn upsert_nested_target(
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
     FlexibleBody(mut body): FlexibleBody,
 ) -> impl IntoResponse {
-    // Resolve upstream — 解析 upstream
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    let upstream = match state.upstreams.select(&upstream_pk).await {
-        Ok(Some(u)) => u,
-        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "upstream not found"}))),
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    // Find existing target scoped to this upstream — 在此 upstream 范围内查找已有 target
+    let existing = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     if let Some(obj) = body.as_object_mut() {
         obj.insert("upstream".to_string(), json!({"id": upstream.id.to_string()}));
-        // Default port + cache_key
         if let Some(t) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
             let t = if !t.contains(':') { format!("{}:8000", t) } else { t };
             obj.insert("target".to_string(), json!(t));
             obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
         }
+        if let Some(ref t) = existing {
+            obj.insert("id".to_string(), json!(t.id));
+        }
     }
-    let result = do_upsert::<Target>(&state.targets, &target_id_or_name, body).await;
+    let upsert_key = if let Some(ref t) = existing { t.id.to_string() } else { target_id_or_name };
+    let result = do_upsert::<Target>(&state.targets, &upsert_key, body).await;
     let _ = state.refresh_tx.send("targets");
     result
 }
 
-/// GET /upstreams/{upstream_id}/health — upstream health status (stub) — 上游健康状态（基础实现）
+/// GET /upstreams/{upstream_id}/health — upstream health status — 上游健康状态
 pub async fn upstream_health(
     State(state): State<AdminState>,
     Path(upstream_id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    let upstream: Upstream = match state.upstreams.select(&upstream_pk).await {
-        Ok(Some(u)) => u,
-        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
     };
-    // Get all targets for this upstream — 获取该 upstream 的所有 target
     let page_params = PageParams { size: 10000, ..Default::default() };
     let targets = match state.targets.select_by_foreign_key("upstream", &upstream.id, &page_params).await {
         Ok(page) => page.data,
         Err(_) => vec![],
     };
-    let health_data: Vec<Value> = targets.iter().map(|t| {
+    // Build health data in reverse order (newest first, like Kong) — 按反向顺序构建健康数据（最新的在前，与 Kong 一致）
+    let mut health_data: Vec<Value> = targets.iter().map(|t| {
+        let health_status = "HEALTHCHECKS_OFF";
         json!({
             "id": t.id,
             "target": t.target,
             "weight": t.weight,
             "upstream": { "id": upstream.id },
-            "health": "HEALTHCHECKS_OFF",
+            "health": health_status,
             "created_at": t.created_at,
+            "data": {
+                "addresses": [{
+                    "ip": t.target.split(':').next().unwrap_or(""),
+                    "port": t.target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0),
+                    "health": health_status,
+                    "weight": t.weight,
+                }]
+            },
         })
     }).collect();
+    // Reverse to match Kong behavior (newest first) — 反转顺序以匹配 Kong 行为（最新在前）
+    health_data.reverse();
     (StatusCode::OK, Json(json!({
         "id": upstream.id,
         "name": upstream.name,
+        "node_id": state.node_id.to_string(),
         "data": health_data,
     })))
 }

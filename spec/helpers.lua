@@ -887,12 +887,24 @@ function Blueprint:new(admin_client)
                 data = data or {}
 
                 local actual_endpoint = endpoint
-                if key == "targets" and data.upstream then
-                    local uid = type(data.upstream) == "table"
-                        and (data.upstream.id or data.upstream.name)
-                        or data.upstream
-                    actual_endpoint = string.format(endpoint, uid)
-                    data.upstream = nil
+                if key == "targets" then
+                    if data.upstream then
+                        local uid = type(data.upstream) == "table"
+                            and (data.upstream.id or data.upstream.name)
+                            or data.upstream
+                        actual_endpoint = string.format(endpoint, uid)
+                        data.upstream = nil
+                    else
+                        -- Create a temporary upstream for standalone target — 为独立 target 创建临时 upstream
+                        local tmp_res = bp.admin:post("/upstreams", {
+                            body = { name = "tmp-ups-" .. math.random(100000, 999999) },
+                            headers = { ["Content-Type"] = "application/json" },
+                        })
+                        if tmp_res and tmp_res.status == 201 then
+                            local tmp = cjson.decode(tmp_res.body)
+                            actual_endpoint = string.format(endpoint, tmp.id)
+                        end
+                    end
                 end
                 local res, err = bp.admin:post(actual_endpoint, {
                     body = data,
@@ -1178,18 +1190,23 @@ function _M.get_db_utils(strategy, tables, plugins)
         end
     end
 
-    -- truncate specified tables or all — 清空指定表或所有表
+    -- truncate specified tables or all (reverse order for FK deps, with pagination) — 清空指定表或所有表（逆序处理外键依赖，含分页）
     if tables then
-        for _, tbl in ipairs(tables) do
+        local ordered = {}
+        for i = #tables, 1, -1 do
+            table.insert(ordered, tables[i])
+        end
+        for _, tbl in ipairs(ordered) do
             local endpoint = "/" .. tbl:gsub("_", "-")
-            local res = admin:get(endpoint)
-            if res and res.status == 200 then
+            for _ = 1, 100 do
+                local res = admin:get(endpoint .. "?size=1000")
+                if not res or res.status ~= 200 then break end
                 local ok, body = pcall(cjson.decode, res.body)
-                if ok and body and body.data then
-                    for _, item in ipairs(body.data) do
-                        admin:delete(endpoint .. "/" .. item.id)
-                    end
+                if not ok or not body or not body.data or #body.data == 0 then break end
+                for _, item in ipairs(body.data) do
+                    admin:delete(endpoint .. "/" .. item.id)
                 end
+                if #body.data < 1000 then break end
             end
         end
     end

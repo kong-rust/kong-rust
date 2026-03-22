@@ -27,3 +27,4 @@ gethostname = { workspace = true }
 mime = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
+openssl = "0.10"
