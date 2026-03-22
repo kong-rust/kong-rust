@@ -150,7 +150,9 @@ async fn parse_form_urlencoded(req: Request) -> Result<FlexibleBody, FlexibleBod
         })
         .collect();
 
-    let value = form_pairs_to_json(&pairs);
+    let mut value = form_pairs_to_json(&pairs);
+    // Revert Number→String for non-numeric entity fields — 将非数字字段的 Number 还原为 String
+    revert_non_numeric_form_values(&mut value);
     Ok(FlexibleBody(value))
 }
 
@@ -182,7 +184,9 @@ async fn parse_multipart<S: Send + Sync>(
         pairs.push((name, value));
     }
 
-    let value = form_pairs_to_json(&pairs);
+    let mut value = form_pairs_to_json(&pairs);
+    // Revert Number→String for non-numeric entity fields — 将非数字字段的 Number 还原为 String
+    revert_non_numeric_form_values(&mut value);
     Ok(FlexibleBody(value))
 }
 
@@ -301,6 +305,47 @@ fn smart_parse_value(s: &str) -> Value {
     }
     // Keep as string — 保持为字符串
     Value::String(s.to_string())
+}
+
+/// Known entity fields that should remain numeric after form data parsing — 表单数据解析后应保持为数字类型的已知实体字段
+///
+/// Form-urlencoded values are always strings. `smart_parse_value` auto-converts numeric-looking strings
+/// to JSON numbers, which is correct for integer/float model fields but WRONG for String fields
+/// (e.g. `custom_id=12345` should stay "12345", not become Number(12345)).
+/// This function reverts Number→String for top-level fields NOT in the known numeric set.
+/// Nested objects (e.g. plugin `config.*`) are left as-is since their types are schema-dependent.
+/// 表单值都是字符串。smart_parse_value 会将数字字符串转为 JSON Number，对整数字段正确但对 String 字段错误。
+/// 此函数将非数字字段的 Number 还原为 String。嵌套对象（如插件 config.*）不处理。
+fn revert_non_numeric_form_values(value: &mut Value) {
+    if let Value::Object(map) = value {
+        for (key, val) in map.iter_mut() {
+            if let Value::Number(n) = val {
+                if !is_known_numeric_field(key) {
+                    *val = Value::String(n.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Check if a field name is a known numeric (integer/float) entity field — 检查字段名是否为已知的数字类型实体字段
+fn is_known_numeric_field(field: &str) -> bool {
+    matches!(
+        field,
+        // Service fields
+        "port" | "retries" | "connect_timeout" | "write_timeout" | "read_timeout" | "tls_verify_depth"
+        // Route fields
+        | "regex_priority" | "https_redirect_status_code" | "priority"
+        // Target fields
+        | "weight"
+        // Upstream fields
+        | "slots"
+        // Timestamps (all entities)
+        | "created_at" | "updated_at"
+        // Upstream health check sub-fields
+        | "concurrency" | "successes" | "timeouts" | "http_failures" | "tcp_failures"
+        | "interval" | "threshold"
+    )
 }
 
 /// Expand dotted keys into nested objects — 将点号分隔的 key 展开为嵌套对象

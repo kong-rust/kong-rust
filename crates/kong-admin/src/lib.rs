@@ -49,6 +49,9 @@ pub struct AdminState {
     /// Configuration hash for db-less mode — db-less 模式下的配置哈希值
     /// Default is all zeros (empty config); updated via POST /config — 默认全零（空配置）；通过 POST /config 更新
     pub configuration_hash: Arc<RwLock<String>>,
+    /// DB-less store reference for hot-reloading via POST /config — DB-less 存储引用，用于 POST /config 热重载
+    /// None in PostgreSQL mode — PostgreSQL 模式下为 None
+    pub dbless_store: Option<Arc<kong_db::dbless::DblessStore>>,
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
