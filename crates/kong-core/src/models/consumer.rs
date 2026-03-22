@@ -11,12 +11,9 @@ pub struct Consumer {
     pub created_at: i64,
     pub updated_at: i64,
     /// Unique username (at least one of username or custom_id must be provided) — 唯一用户名（至少提供 username 或 custom_id 之一）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// External unique ID (at least one of username or custom_id must be provided) — 外部唯一 ID（至少提供 username 或 custom_id 之一）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
     #[serde(skip_serializing_if = "Option::is_none")]

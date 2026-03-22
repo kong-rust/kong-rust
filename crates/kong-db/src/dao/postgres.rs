@@ -638,6 +638,13 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         let select_exprs = build_select_exprs(&self.schema);
         let limit = params.size + 1; // Fetch one extra to determine if there's a next page — 多取一条用于判断是否有下一页
 
+        // Choose SQL operator based on tag filter mode — 根据标签过滤模式选择 SQL 操作符
+        // AND mode: @> (contains all) / OR mode: && (overlap, any match) — AND 模式: @>（包含全部）/ OR 模式: &&（重叠，任一匹配）
+        let tag_op = match params.tags_mode {
+            kong_core::traits::TagFilterMode::And => "@>",
+            kong_core::traits::TagFilterMode::Or => "&&",
+        };
+
         let (sql, offset_uuid) = if let Some(ref offset_token) = params.offset {
             let offset_id = decode_offset(offset_token)?;
             let mut where_parts = vec!["\"id\" > $1".to_string()];
@@ -645,7 +652,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             // Tag filtering — 标签过滤
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push(format!("\"tags\" @> $2::text[]"));
+                    where_parts.push(format!("\"tags\" {} $2::text[]", tag_op));
                 }
             }
 
@@ -662,7 +669,7 @@ impl<T: Entity> Dao<T> for PgDao<T> {
 
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push("\"tags\" @> $1::text[]".to_string());
+                    where_parts.push(format!("\"tags\" {} $1::text[]", tag_op));
                 }
             }
 
@@ -717,7 +724,16 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{entity}?offset={o}", entity = T::table_name())),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let entity = T::table_name();
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{entity}?offset={o}&size={}", params.size)
+                } else {
+                    format!("/{entity}?offset={o}")
+                }
+            }),
         })
     }
 
@@ -820,9 +836,36 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         let entity_json = serde_json::to_value(entity)
             .map_err(|e| KongError::SerializationError(format!("序列化失败: {}", e)))?;
 
-        let params = entity_to_params(&entity_json, &self.schema)?;
+        let mut params = entity_to_params(&entity_json, &self.schema)?;
         let table = &self.schema.table_name;
         let select_exprs = build_select_exprs(&self.schema);
+
+        // When upserting by endpoint_key (e.g. instance_name), first look up existing entity
+        // to get its real id, since the endpoint_key column may not have a UNIQUE constraint.
+        // 当通过 endpoint_key（如 instance_name）执行 upsert 时，先查找已有实体以获取其真实 id，
+        // 因为 endpoint_key 列可能没有 UNIQUE 约束。
+        if let PrimaryKey::EndpointKey(key) = pk {
+            if let Some(ek) = T::endpoint_key() {
+                let lookup_sql = format!(
+                    "SELECT \"id\" FROM \"{}\" WHERE \"{}\" = $1 LIMIT 1",
+                    table, ek
+                );
+                if let Ok(row) = sqlx::query(&lookup_sql)
+                    .bind(key)
+                    .fetch_one(self.db.pool())
+                    .await
+                {
+                    // Replace id in params with the existing entity's id — 用已有实体的 id 替换 params 中的 id
+                    let existing_id: Uuid = row.get("id");
+                    for (col, param) in &mut params {
+                        if col == "id" {
+                            *param = SqlParam::Uuid(Some(existing_id));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         let columns: Vec<&str> = params.iter().map(|(col, _)| col.as_str()).collect();
 
@@ -844,11 +887,8 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             .map(|(col, _)| format!("\"{}\" = EXCLUDED.\"{}\"", col, col))
             .collect();
 
-        // Determine conflict constraint — 确定冲突约束
-        let conflict_column = match pk {
-            PrimaryKey::Id(_) => "id".to_string(),
-            PrimaryKey::EndpointKey(_) => T::endpoint_key().unwrap_or("id").to_string(),
-        };
+        // Always use ON CONFLICT("id") — id has a PRIMARY KEY constraint — 始终使用 ON CONFLICT("id") — id 有主键约束
+        let conflict_column = "id".to_string();
 
         let sql = format!(
             "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT (\"{}\") DO UPDATE SET {} RETURNING {}",
@@ -978,7 +1018,16 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         Ok(Page {
             data,
             offset: offset.clone(),
-            next: offset.map(|o| format!("/{entity}?offset={o}", entity = T::table_name())),
+            next: offset.map(|o| {
+                // Include size param in next URL if non-default — 非默认 size 时在 next URL 中包含 size 参数
+                let entity = T::table_name();
+                let default_size = PageParams::default().size;
+                if params.size != default_size {
+                    format!("/{entity}?offset={o}&size={}", params.size)
+                } else {
+                    format!("/{entity}?offset={o}")
+                }
+            }),
         })
     }
 }
@@ -1040,8 +1089,26 @@ fn map_sqlx_error(err: sqlx::Error, entity_type: &str) -> KongError {
             let message = db_err.message();
 
             match code.as_ref() {
-                // 23505: unique_violation
-                "23505" => KongError::UniqueViolation(format!("{}: {}", entity_type, message)),
+                // 23505: unique_violation — parse constraint name to extract field
+                "23505" => {
+                    // PostgreSQL constraint name format: {table}_{field}_key
+                    // e.g. "consumers_username_key" → field = "username"
+                    let constraint = db_err
+                        .constraint()
+                        .unwrap_or("");
+                    let field = if !constraint.is_empty() {
+                        // Strip table prefix and "_key" suffix
+                        let without_prefix = constraint
+                            .strip_prefix(&format!("{}_", entity_type))
+                            .unwrap_or(constraint);
+                        without_prefix
+                            .strip_suffix("_key")
+                            .unwrap_or(without_prefix)
+                    } else {
+                        entity_type
+                    };
+                    KongError::UniqueViolation(format!("{{{field}=\"...\"}}"))
+                }
                 // 23503: foreign_key_violation
                 "23503" => KongError::ForeignKeyViolation(format!("{}: {}", entity_type, message)),
                 // 23502: not_null_violation

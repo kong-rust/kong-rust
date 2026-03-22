@@ -13,9 +13,7 @@ pub struct CaCertificate {
     /// CA certificate content (PEM format), required — CA 证书内容（PEM 格式），必填
     pub cert: String,
     /// Certificate digest (SHA256 hex), auto-computed, unique — 证书摘要（SHA256 hex），自动计算，唯一
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Workspace ID (foreign key to workspaces) — 工作空间 ID（外键引用 workspaces）
     #[serde(skip_serializing_if = "Option::is_none")]

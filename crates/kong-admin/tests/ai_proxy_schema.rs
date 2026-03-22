@@ -41,6 +41,7 @@ fn create_test_app() -> axum::Router {
         proxy,
         refresh_tx,
         stream_router: None,
+        configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
     };
 
     build_admin_router(state)

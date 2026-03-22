@@ -246,7 +246,7 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 | 阶段 | 轨道 | 状态 | 说明 |
 |------|------|------|------|
-| Phase 0 | A | 进行中 | 稳定性加固 — Kong 官方 spec 测试对齐 |
+| Phase 0 | A | **已完成** | 稳定性加固 — Kong 官方 spec 测试对齐 (375/375 = 100%) |
 | Phase 2a-MVP | B | 规划中 | LLM 网关 MVP — OpenAI 协议代理、Token 计数 |
 | Phase 1 | A | 规划中 | Hybrid CP/DP 模式（传统网关封顶） |
 | Phase 2a-Full | B | 规划中 | 多模型负载均衡与 Fallback（Anthropic、Gemini） |

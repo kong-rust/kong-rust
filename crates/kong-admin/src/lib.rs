@@ -7,13 +7,15 @@
 //! - Nested endpoints (e.g. /services/{service}/routes) — 嵌套端点（如 /services/{service}/routes）
 //! - Special endpoints (/, /status, /config) — 特殊端点（/, /status, /config）
 
+pub mod extractors;
 pub mod handlers;
 
 use std::sync::Arc;
 
 use std::sync::RwLock;
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -21,7 +23,6 @@ use serde_json::{json, Value};
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_router::stream::StreamRouter;
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 /// Admin API application state — Admin API 应用状态
@@ -45,6 +46,9 @@ pub struct AdminState {
     pub refresh_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
     /// Stream router reference (shared with Stream Proxy), synced on route changes — Stream 路由器引用（与 Stream Proxy 共享），路由变更时同步更新
     pub stream_router: Option<Arc<RwLock<StreamRouter>>>,
+    /// Configuration hash for db-less mode — db-less 模式下的配置哈希值
+    /// Default is all zeros (empty config); updated via POST /config — 默认全零（空配置）；通过 POST /config 更新
+    pub configuration_hash: Arc<RwLock<String>>,
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
@@ -85,6 +89,125 @@ pub async fn run_cache_refresher(
     }
 }
 
+/// Admin headers middleware — inject X-Kong-Admin-Latency and Server headers based on config — 根据配置注入 X-Kong-Admin-Latency 和 Server 响应头
+async fn admin_headers_middleware(
+    axum::extract::State(state): axum::extract::State<AdminState>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let start = std::time::Instant::now();
+    let mut response = next.run(req).await;
+    let headers_config = &state.config.headers;
+
+    // Check if admin latency should be included — 检查是否应包含 admin 延迟头
+    let has_latency = headers_config.iter().any(|h| {
+        h.eq_ignore_ascii_case("latency_tokens") || h.eq_ignore_ascii_case("x-kong-admin-latency")
+    });
+    if has_latency {
+        let latency_ms = start.elapsed().as_millis();
+        if let Ok(val) = axum::http::HeaderValue::from_str(&latency_ms.to_string()) {
+            response.headers_mut().insert("X-Kong-Admin-Latency", val);
+        }
+    }
+
+    // Check if Server header should be included — 检查是否应包含 Server 头
+    let has_server = headers_config.iter().any(|h| {
+        h.eq_ignore_ascii_case("server_tokens") || h.eq_ignore_ascii_case("server")
+    });
+    if has_server {
+        response.headers_mut().insert(
+            axum::http::header::SERVER,
+            axum::http::HeaderValue::from_static("kong/3.10.0"),
+        );
+    } else {
+        response.headers_mut().remove(axum::http::header::SERVER);
+    }
+
+    response
+}
+
+/// Check if a request path matches a known Admin API route pattern — 检查请求路径是否匹配已知的 Admin API 路由模式
+fn is_known_route(path: &str) -> bool {
+    // Static routes — 静态路由
+    let static_routes = [
+        "/", "/status", "/config", "/endpoints", "/plugins/enabled", "/plugins",
+        "/services", "/routes", "/consumers", "/upstreams",
+        "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
+    ];
+    if static_routes.contains(&path) {
+        return true;
+    }
+
+    // Dynamic route patterns: split path segments and match — 动态路由模式：按路径段匹配
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        // /entity/{id}
+        [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
+            | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags") => true,
+        // /schemas/{entity}
+        ["schemas", _] => true,
+        // /schemas/{entity}/validate or /schemas/plugins/validate
+        ["schemas", _, "validate"] => true,
+        // /services/{id}/routes, /services/{id}/plugins
+        ["services", _, sub] if matches!(*sub, "routes" | "plugins") => true,
+        // /services/{id}/plugins/{id}
+        ["services", _, "plugins", _] => true,
+        // /routes/{id}/plugins
+        ["routes", _, "plugins"] => true,
+        // /routes/{id}/plugins/{id}
+        ["routes", _, "plugins", _] => true,
+        // /consumers/{id}/plugins
+        ["consumers", _, "plugins"] => true,
+        // /consumers/{id}/plugins/{id}
+        ["consumers", _, "plugins", _] => true,
+        // /upstreams/{id}/targets
+        ["upstreams", _, "targets"] => true,
+        // /upstreams/{id}/targets/{id}
+        ["upstreams", _, "targets", _] => true,
+        _ => false,
+    }
+}
+
+/// Issue 4: OPTIONS middleware — return 204 for known routes, 404 for unknown (Kong-compatible)
+/// OPTIONS 中间件 — 已知路由返回 204，未知路由返回 404（兼容 Kong）
+async fn options_middleware(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    if req.method() == Method::OPTIONS {
+        let path = req.uri().path().to_string();
+
+        // Unknown routes return 404 — 未知路由返回 404
+        if !is_known_route(&path) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": "Not found",
+                    "name": "not found",
+                    "code": 3,
+                })),
+            ).into_response();
+        }
+
+        // Read-only endpoints only support GET/HEAD — 只读端点只支持 GET/HEAD
+        let allow = match path.as_str() {
+            "/" | "/status" | "/endpoints" | "/plugins/enabled" => "GET, HEAD, OPTIONS",
+            _ => "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
+        };
+
+        return axum::http::Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header("Allow", allow)
+            .header("Access-Control-Allow-Methods", allow)
+            .header("Access-Control-Allow-Headers", "Content-Type")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(axum::body::Body::empty())
+            .unwrap()
+            .into_response();
+    }
+    next.run(req).await
+}
+
 /// Build the Admin API router — 构建 Admin API 路由
 pub fn build_admin_router(state: AdminState) -> Router {
     use handlers::*;
@@ -93,7 +216,17 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Root info endpoint — 根信息端点
         .route("/", get(root_info))
         .route("/status", get(status_info))
+        .route("/config", axum::routing::post(post_config))
+        .route("/endpoints", get(list_endpoints))
+        .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
+        .route("/schemas/vaults/validate", axum::routing::post(validate_vault_schema))
+        .route("/schemas/vaults/{name}", get(get_vault_schema))
+        .route("/schemas/{entity_name}", get(get_entity_schema))
+        .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))
+        // Tags — 标签 API
+        .route("/tags", get(list_all_tags))
+        .route("/tags/{tag}", get(list_by_tag))
         // Services
         .route("/services", get(list_services).post(create_service))
         .route(
@@ -234,18 +367,23 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(delete_vault),
         )
         .fallback(admin_fallback)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::mirror_request())
-                .allow_methods(AllowMethods::mirror_request())
-                .allow_headers(AllowHeaders::mirror_request())
-                .allow_credentials(true)
-                .expose_headers(tower_http::cors::ExposeHeaders::list([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::CONTENT_LENGTH,
-                ])),
-        )
+        // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
+        .method_not_allowed_fallback(method_not_allowed_handler)
+        // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
+        .layer(middleware::from_fn(options_middleware))
+        // Admin headers — Server + Admin 延迟响应头（最外层，确保所有请求都包含此头）
+        .layer(middleware::from_fn_with_state(state.clone(), admin_headers_middleware))
         .with_state(state)
+}
+
+/// Admin API 405 handler — Kong 兼容的 405 Method Not Allowed JSON 响应
+async fn method_not_allowed_handler() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "message": "Method not allowed",
+        })),
+    )
 }
 
 /// Admin API 404 fallback — Kong 兼容的 404 JSON 响应

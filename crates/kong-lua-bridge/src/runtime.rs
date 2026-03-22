@@ -231,8 +231,12 @@ package.preload["prometheus_resty_counter"] = function()
 end
 
 package.preload["kong.meta"] = function()
+  local ver = (kong and kong.version) or "3.10.0"
   return {
-    version = (kong and kong.version) or "3.0.0",
+    version = ver,
+    _VERSION = ver,
+    _VERSION_TABLE = { major = 3, minor = 10, patch = 0 },
+    _SERVER_TOKENS = "kong/" .. ver,
   }
 end
 

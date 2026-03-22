@@ -462,8 +462,7 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
             use kong_core::traits::PageParams;
             let params = PageParams {
                 size: 10000,
-                offset: None,
-                tags: None,
+                ..Default::default()
             };
             match admin_state.routes.page(&params).await {
                 Ok(page) => page.data,
@@ -547,7 +546,11 @@ async fn init_proxy_and_admin(
     use kong_db::*;
 
     let plugin_registry = build_plugin_registry(config);
-    let node_id = uuid::Uuid::new_v4();
+    // Use configured node_id if provided, otherwise generate a new one — 如果配置了 node_id 则使用，否则生成新的
+    let node_id = match &config.node_id {
+        Some(id) => uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        None => uuid::Uuid::new_v4(),
+    };
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Create shared async DNS resolver — 创建共享异步 DNS 解析器
@@ -588,6 +591,7 @@ async fn init_proxy_and_admin(
             proxy: kong_proxy.clone(),
             refresh_tx,
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
+            configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
@@ -629,8 +633,7 @@ async fn init_proxy_and_admin(
         // Full data load from DB — 从 DB 全量加载初始数据
         let all_params = PageParams {
             size: 1000,
-            offset: None,
-            tags: None,
+            ..Default::default()
         };
 
         let routes_dao = PgDao::<Route>::new(db.clone(), route_schema());
@@ -699,6 +702,8 @@ async fn init_proxy_and_admin(
             proxy: kong_proxy.clone(),
             refresh_tx,
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
+            // DB mode: empty string = no configuration_hash in /status — DB 模式：空字符串 = /status 不返回 configuration_hash
+            configuration_hash: Arc::new(std::sync::RwLock::new(String::new())),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))

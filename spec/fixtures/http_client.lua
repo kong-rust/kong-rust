@@ -25,14 +25,26 @@ function Client:_url(path)
     return string.format("%s://%s:%d%s", self.scheme, self.host, self.port, path or "/")
 end
 
+-- check if value is cjson.null — 检查值是否为 cjson.null
+local cjson_null
+do
+    local ok, cj = pcall(require, "cjson")
+    if ok then cjson_null = cj.null end
+end
+
 -- encode_args: encode table to application/x-www-form-urlencoded — 编码表为 form-urlencoded 格式
 local function encode_args(args)
     local parts = {}
     for k, v in pairs(args) do
-        if type(v) == "table" then
+        -- cjson.null values → encode as key= (empty value) so server receives empty string — cjson.null 值 → 编码为 key=（空值）以便服务端收到空字符串
+        if v == cjson_null then
+            parts[#parts + 1] = url_mod.escape(tostring(k)) .. "="
+        elseif type(v) == "table" then
             -- multi-value: key=v1&key=v2 — 多值
             for _, item in ipairs(v) do
-                parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
+                if item ~= cjson_null then
+                    parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
+                end
             end
         else
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(v))
@@ -50,9 +62,23 @@ end
 local function encode_multipart(body, boundary)
     local parts = {}
     for k, v in pairs(body) do
-        parts[#parts + 1] = string.format(
-            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
-            boundary, k, tostring(v))
+        -- skip cjson.null values — 跳过 cjson.null 值
+        if v ~= cjson_null then
+            if type(v) == "table" then
+                -- multi-value array — 多值数组
+                for _, item in ipairs(v) do
+                    if item ~= cjson_null then
+                        parts[#parts + 1] = string.format(
+                            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
+                            boundary, k, tostring(item))
+                    end
+                end
+            else
+                parts[#parts + 1] = string.format(
+                    "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s",
+                    boundary, k, tostring(v))
+            end
+        end
     end
     parts[#parts + 1] = "--" .. boundary .. "--"
     return table.concat(parts, "\r\n") .. "\r\n"
@@ -149,13 +175,34 @@ function Client:send(opts)
         return nil, status_code
     end
 
-    -- normalize response headers (lowercase keys) — 标准化响应头（小写键）
-    local norm_headers = {}
+    -- normalize response headers (lowercase keys, case-insensitive lookup)
+    -- 标准化响应头（小写键，大小写无关查找）
+    local norm_headers_raw = {}
     if response_headers then
         for k, v in pairs(response_headers) do
-            norm_headers[k:lower()] = v
+            norm_headers_raw[k:lower()] = v
         end
     end
+    -- Case-insensitive header access: res.headers["Allow"] → lookup "allow"
+    -- 大小写无关的头部访问：res.headers["Allow"] → 查找 "allow"
+    local norm_headers = setmetatable({}, {
+        __index = function(_, key)
+            if type(key) == "string" then
+                return norm_headers_raw[key:lower()]
+            end
+            return norm_headers_raw[key]
+        end,
+        __newindex = function(_, key, value)
+            if type(key) == "string" then
+                norm_headers_raw[key:lower()] = value
+            else
+                norm_headers_raw[key] = value
+            end
+        end,
+        __pairs = function(_)
+            return pairs(norm_headers_raw)
+        end,
+    })
 
     -- build response object — 构建响应对象
     local body_str = table.concat(response_body)
@@ -219,6 +266,11 @@ function Client:head(path, opts)
     opts = opts or {}
     opts.method = "HEAD"
     opts.path = path
+    return self:send(opts)
+end
+
+-- request: alias for send (Kong spec compatibility) — send 的别名（Kong spec 兼容）
+function Client:request(opts)
     return self:send(opts)
 end
 

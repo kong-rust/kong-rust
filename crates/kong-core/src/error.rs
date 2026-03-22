@@ -4,66 +4,66 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum KongError {
     /// Database operation error — 数据库操作错误
-    #[error("数据库错误: {0}")]
+    #[error("database error: {0}")]
     DatabaseError(String),
 
     /// Entity not found — 实体未找到
-    #[error("{entity_type} 未找到: {id}")]
+    #[error("{entity_type} not found: {id}")]
     NotFound { entity_type: String, id: String },
 
     /// Schema validation error — Schema 验证错误
-    #[error("schema 验证失败: {0}")]
+    #[error("schema violation: {0}")]
     ValidationError(String),
 
     /// Unique constraint violation — 唯一约束冲突
-    #[error("唯一约束冲突: {0}")]
+    #[error("UNIQUE violation detected on '{0}'")]
     UniqueViolation(String),
 
     /// Foreign key constraint violation — 外键约束错误
-    #[error("外键约束错误: {0}")]
+    #[error("foreign key violation: {0}")]
     ForeignKeyViolation(String),
 
     /// Plugin execution error — 插件执行错误
-    #[error("插件错误 [{plugin_name}]: {message}")]
+    #[error("plugin error [{plugin_name}]: {message}")]
     PluginError {
         plugin_name: String,
         message: String,
     },
 
     /// Lua runtime error — Lua 运行时错误
-    #[error("Lua 运行时错误: {0}")]
+    #[error("Lua runtime error: {0}")]
     LuaError(String),
 
     /// Configuration error — 配置错误
-    #[error("配置错误: {0}")]
+    #[error("configuration error: {0}")]
     ConfigError(String),
 
     /// Router matching error — 路由匹配错误
-    #[error("路由错误: {0}")]
+    #[error("router error: {0}")]
     RouterError(String),
 
     /// Upstream connection error — 上游连接错误
-    #[error("上游连接错误: {0}")]
+    #[error("upstream connection error: {0}")]
     UpstreamError(String),
 
     /// TLS error — TLS 错误
-    #[error("TLS 错误: {0}")]
+    #[error("TLS error: {0}")]
     TlsError(String),
 
     /// Cache error — 缓存错误
-    #[error("缓存错误: {0}")]
+    #[error("cache error: {0}")]
     CacheError(String),
 
     /// Serialization/deserialization error — 序列化/反序列化错误
-    #[error("序列化错误: {0}")]
+    #[error("serialization error: {0}")]
     SerializationError(String),
 
     /// IO error — IO 错误
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
     /// Internal error — 内部错误
-    #[error("内部错误: {0}")]
+    #[error("internal error: {0}")]
     InternalError(String),
 }
 

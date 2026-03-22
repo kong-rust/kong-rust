@@ -4,8 +4,106 @@
 local http_client = require("spec.fixtures.http_client")
 local cjson = require("cjson")
 local socket = require("socket")
+local url_mod = require("socket.url")
 
 math.randomseed(socket.gettime() * 1000)
+
+---------------------------------------------------------------------------
+-- ngx shim — ngx 全局变量兼容层
+---------------------------------------------------------------------------
+if not ngx then
+    ngx = {
+        null = cjson.null,
+        escape_uri = function(str)
+            return url_mod.escape(str)
+        end,
+        unescape_uri = function(str)
+            return url_mod.unescape(str)
+        end,
+        re = {
+            match = function(subject, regex)
+                return string.match(subject, regex)
+            end,
+            find = function(subject, regex)
+                return string.find(subject, regex)
+            end,
+        },
+        log = function() end,
+        NOTICE = 5,
+        WARN = 4,
+        ERR = 3,
+        DEBUG = 8,
+        INFO = 7,
+        OK = 0,
+        ERROR = -1,
+        HTTP_OK = 200,
+        HTTP_CREATED = 201,
+        HTTP_NO_CONTENT = 204,
+        HTTP_NOT_FOUND = 404,
+        HTTP_BAD_REQUEST = 400,
+        HTTP_INTERNAL_SERVER_ERROR = 500,
+        config = {
+            subsystem = function() return "http" end,
+        },
+        shared = {},
+        now = function() return socket.gettime() end,
+        time = function() return math.floor(socket.gettime()) end,
+        update_time = function() end,
+        sleep = function(seconds) socket.sleep(seconds) end,
+        say = function() end,
+        print = function() end,
+        exit = function() end,
+        var = {},
+        ctx = {},
+        header = {},
+        req = {
+            get_headers = function() return {} end,
+            read_body = function() end,
+            get_body_data = function() return "" end,
+        },
+        resp = {
+            get_headers = function() return {} end,
+        },
+        timer = {
+            at = function(delay, fn) return true end,
+            every = function(delay, fn) return true end,
+        },
+        worker = {
+            id = function() return 0 end,
+            count = function() return 1 end,
+            exiting = function() return false end,
+        },
+        encode_base64 = function(str)
+            -- simple base64 encoding — 简单 base64 编码
+            local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+            return ((str:gsub('.', function(x)
+                local r, b_val = '', x:byte()
+                for i = 8, 1, -1 do r = r .. (b_val % 2^i - b_val % 2^(i-1) > 0 and '1' or '0') end
+                return r
+            end) .. '0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+                if (#x < 6) then return '' end
+                local c = 0
+                for i = 1, 6 do c = c + (x:sub(i, i) == '1' and 2^(6-i) or 0) end
+                return b:sub(c + 1, c + 1)
+            end) .. ({ '', '==', '=' })[#str % 3 + 1])
+        end,
+        decode_base64 = function(str)
+            local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+            str = str:gsub('[^' .. b .. '=]', '')
+            return (str:gsub('.', function(x)
+                if x == '=' then return '' end
+                local r, f = '', (b:find(x) - 1)
+                for i = 6, 1, -1 do r = r .. (f % 2^i - f % 2^(i-1) > 0 and '1' or '0') end
+                return r
+            end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+                if #x ~= 8 then return '' end
+                local c = 0
+                for i = 1, 8 do c = c + (x:sub(i, i) == '1' and 2^(8-i) or 0) end
+                return string.char(c)
+            end))
+        end,
+    }
+end
 
 local _M = {}
 
@@ -55,6 +153,7 @@ _M.test_conf = {
     proxy_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_PROXY_SSL_PORT")) or 9443,
     admin_port       = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_PORT")) or 9001,
     admin_ssl_port   = tonumber(os.getenv("KONG_SPEC_TEST_ADMIN_SSL_PORT")) or 9444,
+    status_port      = tonumber(os.getenv("KONG_SPEC_TEST_STATUS_PORT")) or 8007,
     -- hosts — 主机
     proxy_host       = os.getenv("KONG_SPEC_TEST_PROXY_HOST") or "127.0.0.1",
     admin_host       = os.getenv("KONG_SPEC_TEST_ADMIN_HOST") or "127.0.0.1",
@@ -78,12 +177,56 @@ _M.test_conf = {
     log_level        = "warn",
     -- plugins
     plugins          = "bundled",
+    -- loaded_plugins — 已加载的插件列表（用于 test_conf.loaded_plugins 查询）
+    loaded_plugins   = {
+        ["key-auth"] = true,
+        ["basic-auth"] = true,
+        ["rate-limiting"] = true,
+        ["cors"] = true,
+        ["tcp-log"] = true,
+        ["file-log"] = true,
+        ["http-log"] = true,
+        ["ip-restriction"] = true,
+        ["request-transformer"] = true,
+        ["response-transformer"] = true,
+        ["pre-function"] = true,
+        ["post-function"] = true,
+        ["acl"] = true,
+        ["bot-detection"] = true,
+        ["correlation-id"] = true,
+        ["jwt"] = true,
+        ["hmac-auth"] = true,
+        ["oauth2"] = true,
+        ["ldap-auth"] = true,
+        ["session"] = true,
+        ["request-size-limiting"] = true,
+        ["request-termination"] = true,
+        ["response-ratelimiting"] = true,
+        ["syslog"] = true,
+        ["loggly"] = true,
+        ["datadog"] = true,
+        ["udp-log"] = true,
+        ["statsd"] = true,
+        ["prometheus"] = true,
+    },
 }
+
+---------------------------------------------------------------------------
+-- db shim — 数据库对象兼容层（供 helpers.db.daos 使用）
+---------------------------------------------------------------------------
+_M.db = {
+    daos = {}
+}
+-- Populate with entity objects that have schema.name — 填充具有 schema.name 的实体对象
+for _, name in ipairs({"services", "routes", "consumers", "plugins", "upstreams",
+                        "targets", "certificates", "snis", "ca_certificates", "vaults"}) do
+    _M.db.daos[name] = { schema = { name = name } }
+end
 
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 
 local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
-local MOCK_UPSTREAM_PID_FILE = "/tmp/kong-rust-mock-upstream.pid"
+local MOCK_UPSTREAM_PID_FILE = os.getenv("KONG_SPEC_MOCK_UPSTREAM_PID_FILE") or "/tmp/kong-rust-mock-upstream.pid"
 
 ---------------------------------------------------------------------------
 -- Mock upstream constants — Mock 上游服务常量
@@ -118,7 +261,7 @@ function _M.start_mock_upstream()
     end
 
     local cmd = string.format(
-        "nohup %s mock-upstream --port %d > /tmp/kong-rust-mock-upstream.log 2>&1 & echo $! > %s",
+        "nohup %s mock-upstream --port %d > /tmp/gw-mock-upstream.log 2>&1 & echo $! > %s",
         KONG_RUST_BIN, _M.mock_upstream_port, MOCK_UPSTREAM_PID_FILE)
     os.execute(cmd)
 
@@ -185,18 +328,42 @@ local function build_env_str(conf)
     env.KONG_PG_HOST = conf.pg_host or _M.test_conf.pg_host
     env.KONG_PG_PORT = tostring(conf.pg_port or _M.test_conf.pg_port)
     env.KONG_PG_USER = conf.pg_user or _M.test_conf.pg_user
-    env.KONG_PG_PASSWORD = conf.pg_password or _M.test_conf.pg_password
+    -- Always use test_conf pg_password for actual DB connection — 始终使用 test_conf 的密码连接数据库
+    -- conf.pg_password (e.g. "hide_me") is only for configuration display testing — conf.pg_password 仅用于配置展示测试
+    env.KONG_PG_PASSWORD = _M.test_conf.pg_password
+    -- Store display password separately if different — 存储展示用密码（如 "hide_me"）
+    if conf.pg_password and conf.pg_password ~= _M.test_conf.pg_password then
+        env.KONG_PG_PASSWORD_DISPLAY = conf.pg_password
+    end
     env.KONG_PG_DATABASE = conf.pg_database or _M.test_conf.pg_database
     env.KONG_PROXY_LISTEN = conf.proxy_listen
         or string.format("0.0.0.0:%d", _M.test_conf.proxy_port)
     env.KONG_ADMIN_LISTEN = conf.admin_listen
         or string.format("0.0.0.0:%d", _M.test_conf.admin_port)
+    env.KONG_STATUS_LISTEN = conf.status_listen
+        or string.format("127.0.0.1:%d", _M.test_conf.status_port)
     env.KONG_LOG_LEVEL = conf.log_level or _M.test_conf.log_level
 
     if conf.plugins then
-        env.KONG_PLUGINS = type(conf.plugins) == "table"
+        local plugins_str = type(conf.plugins) == "table"
             and table.concat(conf.plugins, ",")
             or tostring(conf.plugins)
+        -- Append extra plugins from get_db_utils — 追加 get_db_utils 中指定的额外插件
+        if _M._extra_plugins then
+            for _, ep in ipairs(_M._extra_plugins) do
+                if not plugins_str:find(ep, 1, true) then
+                    plugins_str = plugins_str .. "," .. ep
+                end
+            end
+        end
+        env.KONG_PLUGINS = plugins_str
+    elseif _M._extra_plugins then
+        -- No explicit plugins config but extra plugins specified — 没有显式插件配置但指定了额外插件
+        local parts = { "bundled" }
+        for _, ep in ipairs(_M._extra_plugins) do
+            parts[#parts + 1] = ep
+        end
+        env.KONG_PLUGINS = table.concat(parts, ",")
     end
 
     -- pass through any KONG_* keys from conf — 透传 conf 中的 KONG_* 键
@@ -211,13 +378,36 @@ local function build_env_str(conf)
 
     local env_parts = {}
     for k, v in pairs(env) do
-        env_parts[#env_parts + 1] = string.format("%s=%s", k, v)
+        env_parts[#env_parts + 1] = string.format("%s='%s'", k, v)
     end
     return table.concat(env_parts, " "), env
 end
 
 function _M.start_kong(conf)
     conf = conf or {}
+
+    -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
+    _M.stop_kong()
+
+    -- Kill any orphaned kong processes matching our binary — 清理匹配我们 binary 的残留 kong 进程
+    os.execute(string.format("pkill -f '%s' 2>/dev/null || true", KONG_RUST_BIN))
+
+    -- Wait for ALL kong ports to be released — 等待所有 kong 端口释放
+    local ports_to_check = {
+        _M.test_conf.admin_port,
+        _M.test_conf.proxy_port,
+        _M.test_conf.status_port,
+    }
+    _M.wait_until(function()
+        for _, port in ipairs(ports_to_check) do
+            local s = socket.tcp()
+            local ok = s:connect("127.0.0.1", port)
+            s:close()
+            if ok then return false end
+        end
+        return true
+    end, 10)
+    socket.sleep(0.5)
 
     local env_str, env = build_env_str(conf)
 
@@ -227,7 +417,7 @@ function _M.start_kong(conf)
     end
 
     local cmd = string.format(
-        "%s nohup %s start > /tmp/kong-rust-spec.log 2>&1 & echo $! > %s",
+        "%s nohup %s start > /tmp/gw-spec.log 2>&1 & echo $! > %s",
         env_str, KONG_RUST_BIN, PID_FILE)
     os.execute(cmd)
 
@@ -236,11 +426,11 @@ function _M.start_kong(conf)
         if not client then return false end
         local res = client:get("/status")
         return res and res.status == 200
-    end, 15)
+    end, 30)
 
     if not ok then
         _M.stop_kong()
-        error("Kong-Rust failed to start within 15 seconds. Check /tmp/kong-rust-spec.log")
+        error("Kong-Rust failed to start within 30 seconds. Check /tmp/kong-rust-spec.log")
     end
 
     return true
@@ -361,8 +551,63 @@ end
 
 local Blueprint = {}
 
+-- sequence counter for generating unique names — 生成唯一名称的序列计数器
+local seq_counter = 0
+local function next_seq()
+    seq_counter = seq_counter + 1
+    return seq_counter
+end
+
 function Blueprint:new(admin_client)
-    local bp = { admin = admin_client }
+    -- ensure_admin: auto-start kong if needed and return a working admin client — 确保 admin 客户端可用，必要时自动启动 kong
+    local last_check_time = 0
+    local function ensure_admin()
+        -- Rate-limit connectivity checks to at most once per second — 限制连通性检查频率，最多每秒一次
+        local now = os.time()
+        if admin_client and (now - last_check_time) < 1 then
+            return admin_client
+        end
+        -- Try existing client first — 先尝试现有客户端
+        if admin_client then
+            local ok, res = pcall(function() return admin_client:get("/status") end)
+            if ok and res and res.status == 200 then
+                last_check_time = now
+                return admin_client
+            end
+            pcall(function() admin_client:close() end)
+            admin_client = nil
+        end
+        -- Try a fresh client (kong might have restarted) — 尝试新客户端（kong 可能已重启）
+        admin_client = _M.admin_client()
+        if admin_client then
+            local ok, res = pcall(function() return admin_client:get("/status") end)
+            if ok and res and res.status == 200 then
+                last_check_time = now
+                return admin_client
+            end
+            pcall(function() admin_client:close() end)
+            admin_client = nil
+        end
+        -- Kong not running, auto-start — Kong 未运行，自动启动
+        _M.start_kong()
+        admin_client = _M.admin_client()
+        last_check_time = os.time()
+        return admin_client
+    end
+
+    -- Create a proxy that auto-reconnects the admin client — 创建自动重连的 admin 客户端代理
+    local admin_proxy = setmetatable({}, {
+        __index = function(_, key)
+            return function(_, ...)
+                local client = ensure_admin()
+                if not client then
+                    return nil, "connection refused"
+                end
+                return client[key](client, ...)
+            end
+        end,
+    })
+    local bp = { admin = admin_proxy }
 
     local entity_endpoints = {
         services     = "/services",
@@ -374,62 +619,471 @@ function Blueprint:new(admin_client)
         certificates = "/certificates",
         snis         = "/snis",
         ca_certificates = "/ca-certificates",
+        vaults       = "/vaults",
     }
+
+    -- Standard entity default value generators (like Kong's blueprints.lua)
+    -- 标准实体默认值生成器（对齐 Kong 的 blueprints.lua）
+    local standard_defaults = {}
+    standard_defaults.services = function(overrides)
+        overrides = overrides or {}
+        return {
+            protocol = overrides.protocol or "http",
+            host = overrides.host or "127.0.0.1",
+            port = overrides.port or 15555,
+            name = overrides.name,
+            path = overrides.path,
+            tags = overrides.tags,
+            enabled = overrides.enabled,
+            connect_timeout = overrides.connect_timeout,
+            read_timeout = overrides.read_timeout,
+            write_timeout = overrides.write_timeout,
+            retries = overrides.retries,
+            client_certificate = overrides.client_certificate,
+            tls_verify = overrides.tls_verify,
+            tls_verify_depth = overrides.tls_verify_depth,
+            ca_certificates = overrides.ca_certificates,
+            url = overrides.url,
+        }
+    end
+    standard_defaults.consumers = function(overrides)
+        overrides = overrides or {}
+        local n = next_seq()
+        -- Add random suffix to avoid unique constraint violations across test runs — 添加随机后缀避免跨测试运行的唯一约束冲突
+        local rand_suffix = math.random(100000, 999999)
+        return {
+            custom_id = overrides.custom_id or ("consumer-cid-" .. n .. "-" .. rand_suffix),
+            username = overrides.username or ("consumer-" .. n .. "-" .. rand_suffix),
+            tags = overrides.tags,
+        }
+    end
+    standard_defaults.routes = function(overrides)
+        overrides = overrides or {}
+        local service = overrides.service
+        if not service and not overrides.no_service then
+            local svc_data = standard_defaults.services()
+            local res = bp.admin:post("/services", {
+                body = svc_data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if res and res.status >= 200 and res.status < 300 then
+                service = { id = cjson.decode(res.body).id }
+            end
+        end
+        local out = {}
+        for k, v in pairs(overrides) do
+            if k ~= "no_service" then out[k] = v end
+        end
+        out.service = service
+        return out
+    end
+    standard_defaults.upstreams = function(overrides)
+        overrides = overrides or {}
+        local n = next_seq()
+        return {
+            name = overrides.name or ("upstream-" .. n),
+            slots = overrides.slots or 100,
+            host_header = overrides.host_header,
+            tags = overrides.tags,
+        }
+    end
+    standard_defaults.targets = function(overrides)
+        overrides = overrides or {}
+        return {
+            weight = overrides.weight or 10,
+            target = overrides.target or "127.0.0.1:15555",
+            upstream = overrides.upstream,
+            tags = overrides.tags,
+        }
+    end
+
+    -- default data generators for "named_*" entities — "named_*" 实体的默认数据生成器
+    local defaults_generators = {
+        named_services = function(overrides)
+            local n = next_seq()
+            local defaults = {
+                protocol = "http",
+                name = "service-" .. n,
+                host = "service" .. n .. ".test",
+                port = 15555,
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/services"
+        end,
+        named_routes = function(overrides)
+            local n = next_seq()
+            local defaults = {
+                name = "route-" .. n,
+                hosts = { "route" .. n .. ".test" },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            -- auto-create a service if not specified — 如果未指定则自动创建 service
+            if not defaults.service then
+                local gen, ep = defaults_generators.named_services()
+                local res = bp.admin:post(ep, {
+                    body = gen,
+                    headers = { ["Content-Type"] = "application/json" },
+                })
+                if res and res.status >= 200 and res.status < 300 then
+                    local svc = cjson.decode(res.body)
+                    defaults.service = { id = svc.id }
+                end
+            end
+            return defaults, "/routes"
+        end,
+        key_auth_plugins = function(overrides)
+            local defaults = {
+                name = "key-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        acl_plugins = function(overrides)
+            local defaults = {
+                name = "acl",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        hmac_auth_plugins = function(overrides)
+            local defaults = {
+                name = "hmac-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        basic_auth_plugins = function(overrides)
+            local defaults = {
+                name = "basic-auth",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        rate_limiting_plugins = function(overrides)
+            local defaults = {
+                name = "rate-limiting",
+                config = { minute = 100 },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        cors_plugins = function(overrides)
+            local defaults = {
+                name = "cors",
+                config = {},
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        rewriter_plugins = function(overrides)
+            local defaults = {
+                name = "pre-function",
+                config = { access = { "kong.response.exit(200, '{\"message\":\"rewrite\"}')" } },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        tcp_log_plugins = function(overrides)
+            local defaults = {
+                name = "tcp-log",
+                config = { host = "127.0.0.1", port = 35001 },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        file_log_plugins = function(overrides)
+            local defaults = {
+                name = "file-log",
+                config = { path = os.tmpname() },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+        http_log_plugins = function(overrides)
+            local defaults = {
+                name = "http-log",
+                config = { http_endpoint = "http://127.0.0.1:35001" },
+            }
+            if overrides then
+                for k, v in pairs(overrides) do defaults[k] = v end
+            end
+            return defaults, "/plugins"
+        end,
+    }
+
+    -- make_entity_inserter: create insert/truncate/remove for an endpoint — 为 endpoint 创建 insert/truncate/remove
+    local function make_entity_ops(key, endpoint, defaults_fn)
+        return {
+            insert = function(_, data, opts)
+                -- if defaults_fn exists, merge defaults with data — 如果有 defaults_fn，将默认值与 data 合并
+                if defaults_fn then
+                    local defaults, ep = defaults_fn(data)
+                    endpoint = ep or endpoint
+                    data = defaults
+                end
+                data = data or {}
+
+                local actual_endpoint = endpoint
+                if key == "targets" and data.upstream then
+                    local uid = type(data.upstream) == "table"
+                        and (data.upstream.id or data.upstream.name)
+                        or data.upstream
+                    actual_endpoint = string.format(endpoint, uid)
+                    data.upstream = nil
+                end
+                local res, err = bp.admin:post(actual_endpoint, {
+                    body = data,
+                    headers = { ["Content-Type"] = "application/json" },
+                })
+                if not res then
+                    error("Failed to create entity at " .. actual_endpoint
+                        .. ": " .. tostring(err))
+                end
+                if res.status < 200 or res.status >= 300 then
+                    error(string.format(
+                        "Failed to create entity at %s: HTTP %d - %s",
+                        actual_endpoint, res.status, res.body))
+                end
+                return cjson.decode(res.body)
+            end,
+
+            truncate = function(_)
+                local res = bp.admin:get(endpoint)
+                if res and res.status == 200 then
+                    local body = cjson.decode(res.body)
+                    if body and body.data then
+                        for _, entity in ipairs(body.data) do
+                            bp.admin:delete(endpoint .. "/" .. entity.id)
+                        end
+                    end
+                end
+            end,
+
+            -- insert_n: batch insert N entities with optional defaults — 批量插入 N 个实体，可选默认值
+            insert_n = function(self, count, defaults)
+                local entities = {}
+                for i = 1, count do
+                    entities[i] = self:insert(defaults)
+                end
+                return entities
+            end,
+
+            -- remove: alias for delete by id — remove: 按 id 删除的别名
+            remove = function(_, data)
+                if data and data.id then
+                    bp.admin:delete(endpoint .. "/" .. data.id)
+                end
+            end,
+        }
+    end
 
     setmetatable(bp, {
         __index = function(_, key)
+            -- check named entity generators first — 先检查命名实体生成器
+            local gen = defaults_generators[key]
+            if gen then
+                return make_entity_ops(key, nil, gen)
+            end
+
             local endpoint = entity_endpoints[key]
             if not endpoint then return nil end
 
-            return {
-                insert = function(_, data)
-                    local actual_endpoint = endpoint
-                    if key == "targets" and data and data.upstream then
-                        local uid = type(data.upstream) == "table"
-                            and (data.upstream.id or data.upstream.name)
-                            or data.upstream
-                        actual_endpoint = string.format(endpoint, uid)
-                        data.upstream = nil
-                    end
-                    local res, err = bp.admin:post(actual_endpoint, {
-                        body = data,
-                        headers = { ["Content-Type"] = "application/json" },
-                    })
-                    if not res then
-                        error("Failed to create entity at " .. actual_endpoint
-                            .. ": " .. tostring(err))
-                    end
-                    if res.status < 200 or res.status >= 300 then
-                        error(string.format(
-                            "Failed to create entity at %s: HTTP %d - %s",
-                            actual_endpoint, res.status, res.body))
-                    end
-                    return cjson.decode(res.body)
-                end,
-
-                truncate = function(_)
-                    local res = bp.admin:get(endpoint)
-                    if res and res.status == 200 then
-                        local body = cjson.decode(res.body)
-                        if body and body.data then
-                            for _, entity in ipairs(body.data) do
-                                bp.admin:delete(endpoint .. "/" .. entity.id)
-                            end
-                        end
-                    end
-                end,
-
-                -- remove: alias for delete by id — remove: 按 id 删除的别名
-                remove = function(_, data)
-                    if data and data.id then
-                        bp.admin:delete(endpoint .. "/" .. data.id)
-                    end
-                end,
-            }
+            -- use standard defaults if available — 使用标准默认值（如果有）
+            local std_gen = standard_defaults[key]
+            return make_entity_ops(key, endpoint, std_gen)
         end,
     })
 
     return bp
+end
+
+---------------------------------------------------------------------------
+-- DB proxy — 数据库代理对象（通过 Admin API 模拟直接 DB 访问）
+---------------------------------------------------------------------------
+local DbProxy = {}
+
+function DbProxy:new(admin_client_fn)
+    local db = {}
+
+    local entity_endpoints = {
+        services     = "/services",
+        routes       = "/routes",
+        consumers    = "/consumers",
+        plugins      = "/plugins",
+        upstreams    = "/upstreams",
+        targets      = "/upstreams/%s/targets",
+        certificates = "/certificates",
+        snis         = "/snis",
+        ca_certificates = "/ca-certificates",
+        vaults       = "/vaults",
+    }
+
+    -- truncate: delete all entities of a type — 清空某类型的所有实体
+    function db:truncate(entity_name)
+        local endpoint = entity_endpoints[entity_name]
+        if not endpoint then
+            endpoint = "/" .. entity_name:gsub("_", "-")
+        end
+        if endpoint:find("%%s") then return true end
+
+        local admin = admin_client_fn()
+        if not admin then return true end
+
+        -- paginate through all and delete — 分页遍历并删除
+        local deleted = true
+        while deleted do
+            deleted = false
+            local res = admin:get(endpoint)
+            if res and res.status == 200 then
+                local ok, body = pcall(cjson.decode, res.body)
+                if ok and body and body.data and #body.data > 0 then
+                    for _, item in ipairs(body.data) do
+                        admin:delete(endpoint .. "/" .. item.id)
+                        deleted = true
+                    end
+                end
+            end
+        end
+        return true
+    end
+
+    -- entity proxy maker — 实体代理构造器
+    local function make_entity_proxy(entity_name, endpoint)
+        local proxy = {}
+
+        function proxy:insert(data)
+            local admin = admin_client_fn()
+            local actual_endpoint = endpoint
+            if entity_name == "targets" and data and data.upstream then
+                local uid = type(data.upstream) == "table"
+                    and (data.upstream.id or data.upstream.name)
+                    or data.upstream
+                actual_endpoint = string.format(endpoint, uid)
+                data.upstream = nil
+            end
+            local res = admin:post(actual_endpoint, {
+                body = data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if not res then
+                return nil, "failed to connect to Admin API"
+            end
+            if res.status >= 200 and res.status < 300 then
+                return cjson.decode(res.body)
+            end
+            return nil, cjson.decode(res.body) or res.body
+        end
+
+        function proxy:select(pk_or_filter, opts)
+            local admin = admin_client_fn()
+            local id
+            if type(pk_or_filter) == "table" then
+                id = pk_or_filter.id
+            else
+                id = pk_or_filter
+            end
+            if not id then return nil, "primary key required" end
+            local res = admin:get(endpoint .. "/" .. id)
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil
+        end
+
+        function proxy:select_by_name(name, opts)
+            local admin = admin_client_fn()
+            local res = admin:get(endpoint .. "/" .. name)
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil
+        end
+
+        function proxy:update(pk, data, opts)
+            local admin = admin_client_fn()
+            local id = type(pk) == "table" and pk.id or pk
+            local res = admin:patch(endpoint .. "/" .. id, {
+                body = data,
+                headers = { ["Content-Type"] = "application/json" },
+            })
+            if res and res.status == 200 then
+                return cjson.decode(res.body)
+            end
+            return nil, res and res.body or "update failed"
+        end
+
+        function proxy:delete(pk)
+            local admin = admin_client_fn()
+            local id = type(pk) == "table" and pk.id or pk
+            admin:delete(endpoint .. "/" .. id)
+            return true
+        end
+
+        function proxy:truncate()
+            return db:truncate(entity_name)
+        end
+
+        function proxy:page(size, offset, opts)
+            local admin = admin_client_fn()
+            local query = {}
+            if size then query.size = size end
+            if offset then query.offset = offset end
+            local path = endpoint
+            if next(query) then
+                local parts = {}
+                for k, v in pairs(query) do
+                    parts[#parts + 1] = k .. "=" .. tostring(v)
+                end
+                path = path .. "?" .. table.concat(parts, "&")
+            end
+            local res = admin:get(path)
+            if res and res.status == 200 then
+                local body = cjson.decode(res.body)
+                return body.data, nil, body.offset
+            end
+            return {}, nil, nil
+        end
+
+        return proxy
+    end
+
+    setmetatable(db, {
+        __index = function(_, key)
+            local endpoint = entity_endpoints[key]
+            if endpoint then
+                return make_entity_proxy(key, endpoint)
+            end
+            return nil
+        end,
+    })
+
+    return db
 end
 
 function _M.get_db_utils(strategy, tables, plugins)
@@ -440,9 +1094,29 @@ function _M.get_db_utils(strategy, tables, plugins)
         return nil, "strategy '" .. strategy .. "' not supported"
     end
 
+    -- Store extra plugins for subsequent start_kong calls — 存储额外插件供后续 start_kong 调用使用
+    if plugins and type(plugins) == "table" and #plugins > 0 then
+        _M._extra_plugins = plugins
+    else
+        _M._extra_plugins = nil
+    end
+
+    -- Ensure Kong is running (auto-start if not) — 确保 Kong 正在运行（如果没有则自动启动）
     local admin = _M.admin_client()
     if not admin then
-        error("Failed to connect to Admin API, is Kong-Rust running?")
+        -- Kong not running yet, start it — Kong 尚未运行，启动它
+        _M.start_kong({ database = strategy or "postgres" })
+        admin = _M.admin_client()
+        if not admin then
+            error("Failed to connect to Admin API after starting Kong-Rust")
+        end
+    else
+        -- Check if connection works — 检查连接是否正常
+        local res = admin:get("/status")
+        if not res or res.status ~= 200 then
+            _M.start_kong({ database = strategy or "postgres" })
+            admin = _M.admin_client()
+        end
     end
 
     -- truncate specified tables or all — 清空指定表或所有表
@@ -462,7 +1136,8 @@ function _M.get_db_utils(strategy, tables, plugins)
     end
 
     local bp = Blueprint:new(admin)
-    return bp, nil
+    local db = DbProxy:new(function() return _M.admin_client() end)
+    return bp, db
 end
 
 ---------------------------------------------------------------------------
@@ -1488,6 +2163,17 @@ function _M.generate_keys(key_type)
     os.remove(tmpfile)
     os.remove(pubfile)
     return private_key, public_key
+end
+
+---------------------------------------------------------------------------
+-- get_available_port — 获取可用端口
+-- Binds to port 0, reads the assigned port, then closes the socket.
+---------------------------------------------------------------------------
+function _M.get_available_port()
+  local server = assert(socket.bind("127.0.0.1", 0))
+  local _, port = server:getsockname()
+  server:close()
+  return tonumber(port)
 end
 
 return _M

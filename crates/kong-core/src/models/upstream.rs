@@ -54,13 +54,11 @@ pub struct ActiveHealthcheck {
     #[serde(default = "default_http_path")]
     pub http_path: String,
     /// HTTPS SNI — HTTPS SNI
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub https_sni: Option<String>,
     /// Whether to verify HTTPS certificate, default true — 是否验证 HTTPS 证书，默认 true
     #[serde(default = "default_true")]
     pub https_verify_certificate: bool,
     /// Custom request headers — 自定义请求头
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::HashMap<String, Vec<String>>>,
     /// Healthy threshold configuration — 健康阈值配置
     #[serde(default)]
@@ -209,34 +207,23 @@ pub struct Upstream {
     /// Hash fallback method, default none — 哈希回退方式，默认 none
     #[serde(default)]
     pub hash_fallback: HashOn,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_on_header: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_fallback_header: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_on_cookie: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_on_cookie_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_on_query_arg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_fallback_query_arg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_on_uri_capture: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_fallback_uri_capture: Option<String>,
     /// Consistent hashing slot count, default 10000, range 10-65536 — 一致性哈希槽位数，默认 10000，范围 10-65536
     pub slots: i32,
     /// Healthcheck configuration — 健康检查配置
     #[serde(default)]
     pub healthchecks: HealthcheckConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Custom Host header (used when sending to upstream) — 自定义 Host 头（发送到上游时使用）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub host_header: Option<String>,
     /// Client certificate (foreign key to certificates) — 客户端证书（外键引用 certificates）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_certificate: Option<ForeignKey>,
     /// Whether to use SRV hostname, default false — 是否使用 SRV 主机名，默认 false
     #[serde(default)]

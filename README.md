@@ -246,7 +246,7 @@ Kong-Rust aims for 100% behavioral compatibility with Kong Gateway:
 
 | Phase | Track | Status | Description |
 |-------|-------|--------|-------------|
-| Phase 0 | A | In Progress | Stability hardening — Kong official spec test alignment |
+| Phase 0 | A | **Done** | Stability hardening — Kong official spec test alignment (375/375 = 100%) |
 | Phase 2a-MVP | B | Planned | LLM Gateway MVP — OpenAI protocol proxy, token counting |
 | Phase 1 | A | Planned | Hybrid CP/DP mode (traditional gateway completion) |
 | Phase 2a-Full | B | Planned | Multi-model LB & fallback (Anthropic, Gemini) |

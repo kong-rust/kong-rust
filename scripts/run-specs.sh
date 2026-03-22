@@ -24,7 +24,7 @@ echo "=== 编译 kong ==="
 cargo build --quiet 2>&1 || cargo build 2>&1
 
 # Set up Lua paths — 设置 Lua 路径
-export LUA_PATH="${ROOT}/spec/?.lua;${ROOT}/spec/?/init.lua;${ROOT}/?.lua;${LUA_PATH:-}"
+export LUA_PATH="${ROOT}/spec/?.lua;${ROOT}/spec/?/init.lua;${ROOT}/?.lua;${ROOT}/?/?.lua;${ROOT}/?.lua;${ROOT}/?/init.lua;${LUA_PATH:-}"
 export KONG_RUST_BIN="${ROOT}/target/debug/kong"
 
 # Run specs — 运行测试

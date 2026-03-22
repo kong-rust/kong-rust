@@ -13,7 +13,6 @@ pub struct Sni {
     pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Associated certificate (foreign key to certificates), required — 关联的证书（外键引用 certificates），必填
     pub certificate: ForeignKey,
