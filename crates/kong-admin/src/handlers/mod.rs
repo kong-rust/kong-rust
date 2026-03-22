@@ -195,6 +195,7 @@ impl ListParams {
             offset: self.offset.clone(),
             tags,
             tags_mode: if is_or { TagFilterMode::Or } else { TagFilterMode::And },
+            filters: Vec::new(),
         }
     }
 }
@@ -546,14 +547,37 @@ pub async fn post_config(
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Accept POST /config in all modes — in DB mode it just updates the hash without loading config
-    // 在所有模式下接受 POST /config — DB 模式下只更新哈希，不加载配置
+    // Parse the config body as JSON — 将配置内容解析为 JSON
+    let config: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": format!("failed to parse declarative config: {}", e),
+                })),
+            ).into_response();
+        }
+    };
 
-    // Compute hash of the config body using DefaultHasher — 使用 DefaultHasher 计算配置内容的哈希
+    // In db-less mode, load the config into the in-memory store — db-less 模式下将配置加载到内存存储
+    if let Some(ref store) = state.dbless_store {
+        if let Err(e) = store.load_from_json(&config) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": format!("failed to load declarative config: {}", e),
+                })),
+            ).into_response();
+        }
+        // Trigger proxy cache refresh — 触发代理缓存刷新
+        let _ = state.refresh_tx.send("config");
+    }
+
+    // Compute hash of the config body — 计算配置内容的哈希
     let mut hasher = DefaultHasher::new();
     body.hash(&mut hasher);
     let h1 = hasher.finish();
-    // Generate a second hash with a different seed for 32 hex chars — 用不同种子再生成一个哈希以凑 32 位十六进制
     let mut hasher2 = DefaultHasher::new();
     h1.hash(&mut hasher2);
     let h2 = hasher2.finish();
@@ -1753,29 +1777,18 @@ pub async fn list_consumers(
         return err;
     }
 
-    match state.consumers.page(&params.to_page_params()).await {
-        Ok(page) => {
-            // Post-filter by custom_id and/or username — 按 custom_id 和/或 username 后置过滤
-            let filtered_data: Vec<_> = page.data.into_iter().filter(|c: &Consumer| {
-                if let Some(ref cid) = params.custom_id {
-                    if c.custom_id.as_deref() != Some(cid.as_str()) {
-                        return false;
-                    }
-                }
-                if let Some(ref uname) = params.username {
-                    if c.username.as_deref() != Some(uname.as_str()) {
-                        return false;
-                    }
-                }
-                true
-            }).collect();
+    // Push custom_id/username filters to the DAO layer — 将 custom_id/username 过滤下推到 DAO 层
+    let mut page_params = params.to_page_params();
+    if let Some(ref cid) = params.custom_id {
+        page_params.filters.push(("custom_id".to_string(), cid.clone()));
+    }
+    if let Some(ref uname) = params.username {
+        page_params.filters.push(("username".to_string(), uname.clone()));
+    }
 
-            let filtered_page = Page {
-                data: filtered_data,
-                offset: page.offset,
-                next: page.next,
-            };
-            let resp = build_page_response_with_tags(&filtered_page, params.tags.as_deref());
+    match state.consumers.page(&page_params).await {
+        Ok(page) => {
+            let resp = build_page_response_with_tags(&page, params.tags.as_deref());
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
@@ -1985,7 +1998,7 @@ async fn create_scoped_plugin(
 fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String, Value>) {
     match name {
         "key-auth" => {
-            config.entry("key_names".to_string()).or_insert_with(|| json!(["apikey", "key"]));
+            config.entry("key_names".to_string()).or_insert_with(|| json!(["apikey"]));
             config.entry("key_in_body".to_string()).or_insert(json!(false));
             config.entry("key_in_header".to_string()).or_insert(json!(true));
             config.entry("key_in_query".to_string()).or_insert(json!(true));

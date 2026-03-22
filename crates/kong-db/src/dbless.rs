@@ -357,18 +357,56 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
 
         let offset_uuid = params.offset.as_ref().and_then(|s| decode_offset(s).ok());
 
-        let (entities_json, next_offset) =
-            self.store
-                .list_entities(table_name, offset_uuid.as_ref(), params.size)?;
+        // For db-less mode, fetch extra to account for post-filtering — db-less 模式下多取数据以补偿过滤
+        let fetch_size = if params.filters.is_empty() {
+            params.size
+        } else {
+            // Fetch more to ensure enough results after filtering — 多取以确保过滤后有足够结果
+            params.size * 10
+        };
 
-        let mut data = Vec::with_capacity(entities_json.len());
-        for v in entities_json {
-            let entity: T = serde_json::from_value(v)
+        let (entities_json, _next_offset) =
+            self.store
+                .list_entities(table_name, offset_uuid.as_ref(), fetch_size)?;
+
+        // Apply field equality filters — 应用字段等值过滤
+        let filtered_json: Vec<Value> = if params.filters.is_empty() {
+            entities_json
+        } else {
+            entities_json.into_iter().filter(|v| {
+                params.filters.iter().all(|(field, expected)| {
+                    v.get(field).and_then(|val| val.as_str()) == Some(expected.as_str())
+                })
+            }).collect()
+        };
+
+        // Re-apply pagination to filtered results — 对过滤结果重新分页
+        let has_next = filtered_json.len() > params.size;
+        let page_data = if has_next {
+            &filtered_json[..params.size]
+        } else {
+            &filtered_json[..]
+        };
+
+        let mut data = Vec::with_capacity(page_data.len());
+        for v in page_data {
+            let entity: T = serde_json::from_value(v.clone())
                 .map_err(|e| KongError::SerializationError(format!("反序列化失败: {}", e)))?;
             data.push(entity);
         }
 
-        let offset = next_offset.map(|id| encode_offset(&id));
+        // Compute next offset from the last item in the filtered page — 从过滤后页面的最后一项计算下一页偏移量
+        let filtered_next = if has_next {
+            data.last()
+                .and_then(|e| {
+                    let v = serde_json::to_value(e).unwrap_or_default();
+                    v.get("id").and_then(|id| id.as_str()).and_then(|s| Uuid::parse_str(s).ok())
+                })
+        } else {
+            None
+        };
+
+        let offset = filtered_next.map(|id| encode_offset(&id));
 
         Ok(Page {
             data,

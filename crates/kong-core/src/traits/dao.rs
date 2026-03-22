@@ -41,6 +41,8 @@ pub struct PageParams {
     pub tags: Option<Vec<String>>,
     /// Tag filter mode (AND or OR) — 标签过滤模式（AND 或 OR）
     pub tags_mode: TagFilterMode,
+    /// Field equality filters (e.g. custom_id, username) — 字段等值过滤（如 custom_id, username）
+    pub filters: Vec<(String, String)>,
 }
 
 impl Default for PageParams {
@@ -50,6 +52,7 @@ impl Default for PageParams {
             offset: None,
             tags: None,
             tags_mode: TagFilterMode::And,
+            filters: Vec::new(),
         }
     }
 }

@@ -50,6 +50,7 @@ fn create_test_app() -> axum::Router {
         refresh_tx,
         stream_router: None,
         configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        dbless_store: None,
     };
 
     build_admin_router(state)
@@ -92,6 +93,7 @@ fn create_test_status_app() -> axum::Router {
         refresh_tx,
         stream_router: None,
         configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        dbless_store: None,
     };
 
     build_status_router(state)
@@ -155,6 +157,7 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         refresh_tx,
         stream_router: None,
         configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        dbless_store: None,
     };
 
     build_status_router(state)
@@ -293,6 +296,7 @@ fn create_test_app_with_data() -> axum::Router {
         refresh_tx,
         stream_router: None,
         configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        dbless_store: None,
     };
 
     build_admin_router(state)

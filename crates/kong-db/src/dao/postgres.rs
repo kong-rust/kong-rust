@@ -645,15 +645,31 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             kong_core::traits::TagFilterMode::Or => "&&",
         };
 
+        // Whitelist of filterable columns to prevent SQL injection — 可过滤列白名单，防止 SQL 注入
+        const ALLOWED_FILTER_COLUMNS: &[&str] = &["custom_id", "username", "name", "host"];
+
+        // Validate filter field names — 验证过滤字段名
+        let valid_filters: Vec<&(String, String)> = params.filters.iter()
+            .filter(|(field, _)| ALLOWED_FILTER_COLUMNS.contains(&field.as_str()))
+            .collect();
+
         let (sql, offset_uuid) = if let Some(ref offset_token) = params.offset {
             let offset_id = decode_offset(offset_token)?;
             let mut where_parts = vec!["\"id\" > $1".to_string()];
+            let mut param_idx = 2;
 
             // Tag filtering — 标签过滤
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push(format!("\"tags\" {} $2::text[]", tag_op));
+                    where_parts.push(format!("\"tags\" {} ${}::text[]", tag_op, param_idx));
+                    param_idx += 1;
                 }
+            }
+
+            // Field equality filters — 字段等值过滤
+            for (field, _) in &valid_filters {
+                where_parts.push(format!("\"{}\" = ${}", field, param_idx));
+                param_idx += 1;
             }
 
             let sql = format!(
@@ -666,11 +682,19 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             (sql, Some(offset_id))
         } else {
             let mut where_parts = Vec::new();
+            let mut param_idx = 1;
 
             if let Some(ref tags) = params.tags {
                 if !tags.is_empty() {
-                    where_parts.push(format!("\"tags\" {} $1::text[]", tag_op));
+                    where_parts.push(format!("\"tags\" {} ${}::text[]", tag_op, param_idx));
+                    param_idx += 1;
                 }
+            }
+
+            // Field equality filters — 字段等值过滤
+            for (field, _) in &valid_filters {
+                where_parts.push(format!("\"{}\" = ${}", field, param_idx));
+                param_idx += 1;
             }
 
             let where_clause = if where_parts.is_empty() {
@@ -696,6 +720,11 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             if !tags.is_empty() {
                 query = query.bind(tags);
             }
+        }
+
+        // Bind filter values — 绑定过滤值
+        for (_, value) in &valid_filters {
+            query = query.bind(value.as_str());
         }
 
         let rows = query
