@@ -1105,6 +1105,12 @@ function DbProxy:new(admin_client_fn)
             return {}, nil, nil
         end
 
+        -- select_with_name_list: Kong-specific method for certificates — Kong 特有的证书查询方法
+        -- In Kong-Rust, GET /certificates/{id} already includes snis — 在 Kong-Rust 中，GET /certificates/{id} 已包含 snis
+        function proxy:select_with_name_list(pk_or_filter, opts)
+            return proxy:select(pk_or_filter, opts)
+        end
+
         return proxy
     end
 
