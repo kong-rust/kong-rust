@@ -147,7 +147,7 @@ impl AiDriver for OpenAiDriver {
 }
 
 /// 解析 endpoint URL 为 (scheme, host, port, path)
-fn parse_endpoint_url(url: &str) -> Result<(String, String, u16, String)> {
+pub fn parse_endpoint_url(url: &str) -> Result<(String, String, u16, String)> {
     // 简单解析，不引入 url crate
     let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
         ("https".to_string(), rest)

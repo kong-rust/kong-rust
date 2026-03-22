@@ -1,7 +1,10 @@
 //! AI Provider 抽象层 — 统一的 AiDriver trait 和 DriverRegistry
 //! 每个 provider（OpenAI、Anthropic、Gemini 等）实现 AiDriver trait
 
+pub mod anthropic;
+pub mod gemini;
 pub mod openai;
+pub mod openai_compat;
 
 use crate::codec::{ChatRequest, ChatResponse, SseEvent};
 use crate::models::{AiModel, AiProviderConfig};
@@ -92,6 +95,9 @@ impl DriverRegistry {
             drivers: HashMap::new(),
         };
         r.register("openai", Arc::new(openai::OpenAiDriver));
+        r.register("anthropic", Arc::new(anthropic::AnthropicDriver));
+        r.register("gemini", Arc::new(gemini::GeminiDriver));
+        r.register("openai_compat", Arc::new(openai_compat::OpenAiCompatDriver::new()));
         r
     }
 
