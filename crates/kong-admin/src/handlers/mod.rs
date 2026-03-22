@@ -1718,6 +1718,23 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
         }
     }
 
+    // Route: validate service has id or name — 路由：验证 service 有 id 或 name
+    if T::table_name() == "routes" {
+        if let Some(svc) = body.as_object().and_then(|o| o.get("service")).and_then(|v| v.as_object()) {
+            if !svc.contains_key("id") && !svc.contains_key("name") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (service.id: missing primary key)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": { "service": { "id": "missing primary key" } },
+                    })),
+                );
+            }
+        }
+    }
+
     // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
     let body_for_err = body.clone();
 
