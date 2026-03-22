@@ -18,7 +18,7 @@ use axum::extract::State;
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use kong_core::models::*;
@@ -379,6 +379,14 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .patch(update_nested_target)
                 .put(upsert_nested_target)
                 .delete(delete_nested_target),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets/{id_or_name}/healthy",
+            put(handlers::set_target_health),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets/{id_or_name}/unhealthy",
+            put(handlers::set_target_health),
         )
         .route(
             "/upstreams/{upstream_id_or_name}/health",

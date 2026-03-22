@@ -738,10 +738,11 @@ function Blueprint:new(admin_client)
     defaults_generators = {
         named_services = function(overrides)
             local n = next_seq()
+            local rand = math.random(100000, 999999)
             local defaults = {
                 protocol = "http",
-                name = "service-" .. n,
-                host = "service" .. n .. ".test",
+                name = "service-" .. n .. "-" .. rand,
+                host = "service" .. n .. "-" .. rand .. ".test",
                 port = 15555,
             }
             if overrides then

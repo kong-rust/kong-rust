@@ -218,8 +218,16 @@ fn error_response(err: KongError) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Validate integer fields in request body — 验证请求体中的整数字段
+/// Validate integer fields and required fields in request body — 验证请求体中的整数字段和必填字段
 fn validate_integer_fields(table_name: &str, body: &Value) -> Option<(StatusCode, Json<Value>)> {
+    validate_integer_fields_ext(table_name, body, false)
+}
+
+fn validate_integer_fields_create(table_name: &str, body: &Value) -> Option<(StatusCode, Json<Value>)> {
+    validate_integer_fields_ext(table_name, body, true)
+}
+
+fn validate_integer_fields_ext(table_name: &str, body: &Value, check_required: bool) -> Option<(StatusCode, Json<Value>)> {
     let int_fields: &[&str] = match table_name {
         "routes" => &["regex_priority", "https_redirect_status_code", "priority"],
         "services" => &["port", "retries", "connect_timeout", "write_timeout", "read_timeout", "tls_verify_depth"],
@@ -236,6 +244,18 @@ fn validate_integer_fields(table_name: &str, body: &Value) -> Option<(StatusCode
                     violations.push(format!("{}: expected an integer", field));
                     fields.insert(field.to_string(), json!("expected an integer"));
                 }
+            }
+        }
+        // Also check required fields for service on create/upsert — 创建/upsert 时也检查 service 必填字段
+        if table_name == "services" && check_required {
+            let host_missing = match obj.get("host") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(h) => h.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if host_missing && !violations.is_empty() {
+                violations.push("host: required field missing".to_string());
+                fields.insert("host".to_string(), json!("required field missing"));
             }
         }
         if !violations.is_empty() {
@@ -1102,7 +1122,7 @@ pub(crate) async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "code": 8,
+                    "code": 9,
                     "name": "invalid size",
                     "message": "size must be a number",
                 })),
@@ -1111,9 +1131,10 @@ pub(crate) async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     }
     // Validate offset parameter — 验证 offset 参数
     if let Some(ref offset) = params.offset {
-        let valid_b64 = !offset.is_empty() && offset.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
-        });
+        // base64 strings must have length >= 4 and valid chars — base64 字符串长度须 >= 4 且字符有效
+        let valid_b64 = offset.len() >= 4
+            && offset.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+            && offset.trim_end_matches('=').len() >= 2;
         if !valid_b64 {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1592,23 +1613,51 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                     arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
                 });
 
-                // Validate protocol values — 验证协议值
-                if let Some(Value::Array(protos)) = obj.get("protocols") {
+                // Validate protocol values and service.protocol — 验证协议值和 service.protocol
+                {
                     let valid_protos = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
-                    for (i, p) in protos.iter().enumerate() {
-                        if let Some(ps) = p.as_str() {
-                            if !valid_protos.contains(&ps) {
-                                return (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({
-                                        "message": format!("schema violation (protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)", i + 1),
-                                        "name": "schema violation",
-                                        "code": 2,
-                                        "fields": { "protocols": ["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"] },
-                                    })),
-                                );
+                    let mut proto_violations = Vec::new();
+                    let mut proto_fields = serde_json::Map::new();
+
+                    if let Some(Value::Array(protos)) = obj.get("protocols") {
+                        for (i, p) in protos.iter().enumerate() {
+                            if let Some(ps) = p.as_str() {
+                                if !valid_protos.contains(&ps) {
+                                    proto_violations.push(format!("protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp", i + 1));
+                                    proto_fields.insert("protocols".to_string(), json!(["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"]));
+                                    break; // only report first bad protocol — 只报告第一个坏协议
+                                }
                             }
                         }
+                    }
+
+                    // Also check service.protocol — 也检查 service.protocol
+                    if let Some(svc) = obj.get("service").and_then(|v| v.as_object()) {
+                        if let Some(proto) = svc.get("protocol").and_then(|v| v.as_str()) {
+                            if !valid_protos.contains(&proto) {
+                                proto_violations.push("service.protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp".to_string());
+                                let mut svc_fields = serde_json::Map::new();
+                                svc_fields.insert("protocol".to_string(), json!("expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"));
+                                proto_fields.insert("service".to_string(), Value::Object(svc_fields));
+                            }
+                        }
+                    }
+
+                    if !proto_violations.is_empty() {
+                        let msg = if proto_violations.len() == 1 {
+                            format!("schema violation ({})", proto_violations[0])
+                        } else {
+                            format!("{} schema violations ({})", proto_violations.len(), proto_violations.join("; "))
+                        };
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": msg,
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": Value::Object(proto_fields),
+                            })),
+                        );
                     }
                 }
 
@@ -1877,8 +1926,8 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
         Err(e) => return e,
     };
 
-    // Validate integer fields — 验证整数字段
-    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+    // Validate integer fields (with required field check for create/upsert) — 验证整数字段（含必填字段检查）
+    if let Some(err) = validate_integer_fields_create(T::table_name(), &body) {
         return err;
     }
 
@@ -2051,26 +2100,56 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
             };
             let has_routing = has_field("methods") || has_field("hosts") || has_field("headers")
                 || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
+
+            let protocols = obj.get("protocols").and_then(|v| v.as_array());
+            let is_grpc = protocols.map_or(false, |arr| {
+                arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
+            });
+
+            // Validate protocol values in upsert — upsert 中验证协议值
+            if let Some(Value::Array(protos)) = obj.get("protocols") {
+                let valid_protos = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                for (i, p) in protos.iter().enumerate() {
+                    if let Some(ps) = p.as_str() {
+                        if !valid_protos.contains(&ps) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": format!("schema violation (protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)", i + 1),
+                                    "name": "schema violation",
+                                    "code": 2,
+                                    "fields": { "protocols": ["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"] },
+                                })),
+                            );
+                        }
+                    }
+                }
+            }
+
             if !has_routing {
-                let protocols = obj.get("protocols").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("', '"))
-                    .unwrap_or_else(|| "grpcs', 'https', 'http', 'grpc".to_string());
+                let proto_display = if let Some(arr) = protocols {
+                    let pl: Vec<&str> = arr.iter().filter_map(|p| p.as_str()).collect();
+                    if pl.contains(&"grpcs") { "grpcs".to_string() }
+                    else if pl.contains(&"https") { "https".to_string() }
+                    else if pl.contains(&"tls") { "tls".to_string() }
+                    else { pl.join("', '") }
+                } else {
+                    "https".to_string()
+                };
+                let rf = if is_grpc { "'hosts', 'headers', 'paths', 'snis'" }
+                         else { "'methods', 'hosts', 'headers', 'paths', 'snis'" };
+                let emsg = format!("must set one of {} when 'protocols' is '{}'", rf, proto_display);
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "message": format!("schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}')", protocols),
+                        "message": format!("schema violation ({})", emsg),
                         "name": "schema violation",
                         "code": 2,
-                        "fields": {
-                            "@entity": [format!("must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}'", protocols)]
-                        },
+                        "fields": { "@entity": [emsg] },
                     })),
                 );
             }
             // gRPC routes: strip_path forced to false — gRPC 路由：strip_path 强制为 false
-            let is_grpc = obj.get("protocols").and_then(|v| v.as_array()).map_or(false, |arr| {
-                arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
-            });
             if is_grpc {
                 obj.insert("strip_path".to_string(), json!(false));
             }
@@ -2291,8 +2370,22 @@ pub async fn delete_route(
 /// Resolve service.name reference to service.id — 将 service.name 引用解析为 service.id
 async fn resolve_service_name_ref(state: &AdminState, body: &mut Value) -> Result<(), (StatusCode, Json<Value>)> {
     if let Some(svc_obj) = body.as_object_mut().and_then(|o| o.get_mut("service")).and_then(|v| v.as_object_mut()) {
-        if svc_obj.contains_key("name") && !svc_obj.contains_key("id") {
-            if let Some(name) = svc_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+        if !svc_obj.contains_key("id") && svc_obj.contains_key("name") {
+            let name_val = svc_obj.get("name").cloned();
+            let name_str = name_val.as_ref().and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            if name_str.is_none() {
+                // name is null/empty → missing primary key — name 为 null/空 → 缺少主键
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (service.id: missing primary key)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": { "service": { "id": "missing primary key" } },
+                    })),
+                ));
+            }
+            if let Some(name) = name_str.map(|s| s.to_string()) {
                 let pk = PrimaryKey::EndpointKey(name.clone());
                 match state.services.select(&pk).await {
                     Ok(Some(svc)) => {
@@ -2303,13 +2396,14 @@ async fn resolve_service_name_ref(state: &AdminState, body: &mut Value) -> Resul
                         }
                     }
                     _ => {
+                        let fk_msg = String::from("the foreign key cannot be resolved with '{name=\"") + &name + "\"}' for an existing 'services' entity";
                         return Err((
                             StatusCode::BAD_REQUEST,
                             Json(json!({
-                                "message": "schema violation: missing field `id`",
-                                "name": "schema violation",
-                                "code": 2,
-                                "fields": {},
+                                "message": format!("foreign key unresolved (service.name: {})", fk_msg),
+                                "name": "foreign keys unresolved",
+                                "code": 13,
+                                "fields": { "service": { "name": fk_msg } },
                             })),
                         ));
                     }
@@ -4592,6 +4686,17 @@ pub async fn create_nested_target(
         let final_target = obj.get("target").and_then(|v| v.as_str()).unwrap_or("");
         let cache_key = format!("{}:{}:", upstream.id, final_target);
         obj.insert("cache_key".to_string(), json!(cache_key));
+        // Inject id (UUIDv7 for natural time-ordering) and timestamps — 注入 id（UUIDv7 保证时间顺序）和时间戳
+        if !obj.contains_key("id") {
+            obj.insert("id".to_string(), json!(uuid::Uuid::now_v7()));
+        }
+        let now = chrono::Utc::now().timestamp();
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), json!(now));
+        }
+        if !obj.contains_key("updated_at") {
+            obj.insert("updated_at".to_string(), json!(now));
+        }
     }
 
     let target: Target = match serde_json::from_value(body) {
@@ -4726,6 +4831,21 @@ pub async fn upsert_nested_target(
     result
 }
 
+/// PUT /upstreams/{upstream_id}/targets/{target_id}/healthy or /unhealthy — set target health status — 设置 target 健康状态
+pub async fn set_target_health(
+    State(state): State<AdminState>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))).into_response(),
+    }
+}
+
 /// GET /upstreams/{upstream_id}/health — upstream health status — 上游健康状态
 pub async fn upstream_health(
     State(state): State<AdminState>,
@@ -4736,11 +4856,12 @@ pub async fn upstream_health(
         Err(e) => return e,
     };
     let page_params = PageParams { size: 10000, ..Default::default() };
-    let targets = match state.targets.select_by_foreign_key("upstream", &upstream.id, &page_params).await {
+    let mut targets = match state.targets.select_by_foreign_key("upstream", &upstream.id, &page_params).await {
         Ok(page) => page.data,
         Err(_) => vec![],
     };
-    // Build health data in reverse order (newest first, like Kong) — 按反向顺序构建健康数据（最新的在前，与 Kong 一致）
+    // Sort by created_at DESC (newest first, like Kong) — 按 created_at 降序排列（最新在前，与 Kong 一致）
+    targets.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
     let mut health_data: Vec<Value> = targets.iter().map(|t| {
         let health_status = "HEALTHCHECKS_OFF";
         json!({
@@ -4760,8 +4881,6 @@ pub async fn upstream_health(
             },
         })
     }).collect();
-    // Reverse to match Kong behavior (newest first) — 反转顺序以匹配 Kong 行为（最新在前）
-    health_data.reverse();
     (StatusCode::OK, Json(json!({
         "id": upstream.id,
         "name": upstream.name,
