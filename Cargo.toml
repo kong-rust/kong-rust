@@ -36,7 +36,7 @@ bytes = "1"
 # HTTP / Web
 axum = { version = "0.8", features = ["json", "multipart"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "normalize-path"] }
 hyper = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 

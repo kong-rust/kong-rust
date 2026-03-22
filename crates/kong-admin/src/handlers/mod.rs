@@ -295,9 +295,10 @@ fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Val
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
+                        let fields = json!({ field_name: val_str });
                         return (
                             format!("UNIQUE violation detected on '{{{field_name}=\"{val_str}\"}}'"),
-                            None,
+                            Some(fields),
                         );
                     }
                 }
@@ -1282,6 +1283,28 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 );
             }
         }
+
+        // Upstream.name is required — Upstream.name 必填
+        if T::table_name() == "upstreams" {
+            let name_missing = match obj.get("name") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(n) => n.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if name_missing {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (name: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": "required field missing"
+                        },
+                    })),
+                );
+            }
+        }
     }
 
     // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
@@ -1585,6 +1608,30 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
         }
     }
 
+    // Upstream.name is required for upsert — upsert 时 Upstream.name 必填
+    if T::table_name() == "upstreams" {
+        if let Some(obj) = body.as_object() {
+            let name_missing = match obj.get("name") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(n) => n.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if name_missing {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (name: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": "required field missing"
+                        },
+                    })),
+                );
+            }
+        }
+    }
+
     // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
     let body_for_err = body.clone();
 
@@ -1833,17 +1880,316 @@ entity_handlers!(
     upsert_upstream,
     delete_upstream
 );
-entity_handlers!(
-    Certificate,
-    certificates,
-    "certificates",
-    list_certificates,
-    get_certificate,
-    create_certificate,
-    update_certificate,
-    upsert_certificate,
-    delete_certificate
-);
+// ============ Certificate handlers (custom, with SNI embedding) — 证书处理器（自定义，嵌入 SNI） ============
+
+/// Fetch SNI names associated with a certificate — 获取关联证书的 SNI 名称列表
+async fn fetch_sni_names_for_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_id: &uuid::Uuid) -> Vec<String> {
+    let all_params = PageParams { size: 10000, ..Default::default() };
+    match snis_dao.select_by_foreign_key("certificate_id", cert_id, &all_params).await {
+        Ok(page) => page.data.into_iter().map(|s| s.name).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Embed snis array into a certificate JSON value — 将 snis 数组嵌入证书 JSON 值
+async fn embed_snis_in_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_json: &mut Value) {
+    if let Some(id_str) = cert_json.get("id").and_then(|v| v.as_str()) {
+        if let Ok(cert_id) = uuid::Uuid::parse_str(id_str) {
+            let sni_names = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+            cert_json.as_object_mut().unwrap().insert("snis".to_string(), json!(sni_names));
+        }
+    }
+}
+
+/// Extract snis field from request body, returning (cleaned body, snis list) — 从请求体提取 snis 字段，返回 (清理后的 body, snis 列表)
+fn extract_snis_from_body(body: &mut Value) -> Option<Vec<String>> {
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(snis_val) = obj.remove("snis") {
+            if let Some(arr) = snis_val.as_array() {
+                let names: Vec<String> = arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                return Some(names);
+            }
+        }
+    }
+    None
+}
+
+/// Create SNI records for a certificate — 为证书创建 SNI 记录
+async fn create_snis_for_cert(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    cert_id: uuid::Uuid,
+    sni_names: &[String],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now().timestamp();
+    for name in sni_names {
+        let sni = Sni {
+            id: uuid::Uuid::new_v4(),
+            name: name.clone(),
+            created_at: now,
+            updated_at: now,
+            tags: None,
+            certificate: ForeignKey::new(cert_id),
+            ws_id: None,
+        };
+        if let Err(e) = snis_dao.insert(&sni).await {
+            return Err((
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({ "message": e.to_string(), "name": e.error_name(), "code": e.error_code() })),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Replace all SNIs for a certificate (delete existing, create new) — 替换证书的所有 SNI（删除已有，创建新的）
+async fn replace_snis_for_cert(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    cert_id: uuid::Uuid,
+    sni_names: &[String],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    // Delete existing SNIs — 删除已有 SNI
+    let existing = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+    for name in &existing {
+        let pk = PrimaryKey::EndpointKey(name.clone());
+        let _ = snis_dao.delete(&pk).await;
+    }
+    // Create new SNIs — 创建新 SNI
+    create_snis_for_cert(snis_dao, cert_id, sni_names).await
+}
+
+/// GET /certificates — list all certificates with embedded snis — 列出所有证书（嵌入 snis）
+pub async fn list_certificates(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+    match state.certificates.page(&params.to_page_params()).await {
+        Ok(page) => {
+            let mut resp = build_page_response_with_tags(&page, params.tags.as_deref());
+            // Embed snis for each certificate — 为每个证书嵌入 snis
+            if let Some(data_arr) = resp.get_mut("data").and_then(|v| v.as_array_mut()) {
+                for cert_json in data_arr.iter_mut() {
+                    embed_snis_in_cert(&state.snis, cert_json).await;
+                }
+            }
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status, Json(json!({"message": e.to_string()})))
+        }
+    }
+}
+
+/// GET /certificates/{id_or_sni} — get certificate by ID, UUID, or SNI name — 按 ID、UUID 或 SNI 名称获取证书
+pub async fn get_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    // First try direct lookup by ID/UUID — 先尝试按 ID/UUID 直接查找
+    let pk = PrimaryKey::from_str_or_uuid(&id_or_name);
+    let cert_opt = match &pk {
+        PrimaryKey::Id(_) => {
+            match state.certificates.select(&pk).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    return (status, Json(json!({"message": e.to_string()})));
+                }
+            }
+        }
+        PrimaryKey::EndpointKey(_) => None, // Certificate has no endpoint_key, try SNI lookup below — 证书无 endpoint_key，尝试下面的 SNI 查找
+    };
+
+    // If not found by ID, try SNI name lookup — 如果按 ID 未找到，尝试 SNI 名称查找
+    let cert = if let Some(c) = cert_opt {
+        c
+    } else {
+        // Lookup SNI by name — 按名称查找 SNI
+        let sni_pk = PrimaryKey::EndpointKey(id_or_name.clone());
+        match state.snis.select(&sni_pk).await {
+            Ok(Some(sni)) => {
+                // Found SNI, now fetch the certificate — 找到 SNI，获取关联的证书
+                let cert_pk = PrimaryKey::Id(sni.certificate.id);
+                match state.certificates.select(&cert_pk).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) | Err(_) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({
+                                "message": "certificates not found",
+                                "name": "not found",
+                                "code": 3,
+                            })),
+                        );
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "message": "certificates not found",
+                        "name": "not found",
+                        "code": 3,
+                    })),
+                );
+            }
+        }
+    };
+
+    let mut body = serde_json::to_value(&cert).unwrap_or(json!(null));
+    embed_snis_in_cert(&state.snis, &mut body).await;
+    (StatusCode::OK, Json(body))
+}
+
+/// POST /certificates — create certificate with optional snis — 创建证书（可选带 snis）
+pub async fn create_certificate(
+    State(state): State<AdminState>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    let sni_names = extract_snis_from_body(&mut body);
+
+    let result = do_create::<Certificate>(&state.certificates, body).await;
+    if result.0.is_success() {
+        // Create SNI records if provided — 如果提供了 snis 则创建 SNI 记录
+        if let Some(ref names) = sni_names {
+            if !names.is_empty() {
+                // Extract certificate ID from created response — 从创建响应中提取证书 ID
+                if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+                    if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                        if let Err(err) = create_snis_for_cert(&state.snis, cert_id, names).await {
+                            return err;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        // Re-fetch and embed snis — 重新获取并嵌入 snis
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::CREATED, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// PATCH /certificates/{id_or_sni} — update certificate with optional snis replacement — 更新证书（可选替换 snis）
+pub async fn update_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    let sni_names = extract_snis_from_body(&mut body);
+
+    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
+    let cert_id_or_name = resolve_cert_id_or_name(&state, &id_or_name).await;
+    let resolved = match cert_id_or_name {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "certificates not found", "name": "not found", "code": 3 })),
+            );
+        }
+    };
+
+    let result = do_update::<Certificate>(&state.certificates, &resolved, &body).await;
+    if result.0.is_success() {
+        // Replace SNIs if provided — 如果提供了 snis 则替换
+        if let Some(ref names) = sni_names {
+            if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+                if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                    if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, names).await {
+                        return err;
+                    }
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::OK, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// PUT /certificates/{id_or_sni} — upsert certificate with optional snis replacement — upsert 证书（可选替换 snis）
+pub async fn upsert_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    let sni_names = extract_snis_from_body(&mut body);
+
+    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
+    let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
+        .unwrap_or_else(|| id_or_name.clone());
+
+    let result = do_upsert::<Certificate>(&state.certificates, &resolved, body).await;
+    if result.0.is_success() {
+        if let Some(ref names) = sni_names {
+            if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+                if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                    if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, names).await {
+                        return err;
+                    }
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::OK, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// DELETE /certificates/{id_or_sni} — delete certificate (SNIs cascade-deleted) — 删除证书（SNI 级联删除）
+pub async fn delete_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    // Resolve actual certificate ID (may be SNI name) — 解析实际证书 ID（可能是 SNI 名称）
+    let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
+        .unwrap_or_else(|| id_or_name.clone());
+
+    let result = do_delete::<Certificate>(&state.certificates, &resolved).await;
+    let _ = state.refresh_tx.send("certificates");
+    let _ = state.refresh_tx.send("snis");
+    result
+}
+
+/// Resolve a certificate identifier that may be a UUID or an SNI name — 解析可能是 UUID 或 SNI 名称的证书标识符
+/// Returns the UUID string if resolved, None if not found — 如果解析成功返回 UUID 字符串，未找到返回 None
+async fn resolve_cert_id_or_name(state: &AdminState, id_or_name: &str) -> Option<String> {
+    // If it's a valid UUID, return as-is — 如果是有效 UUID，直接返回
+    if uuid::Uuid::parse_str(id_or_name).is_ok() {
+        return Some(id_or_name.to_string());
+    }
+    // Try SNI name lookup — 尝试 SNI 名称查找
+    let sni_pk = PrimaryKey::EndpointKey(id_or_name.to_string());
+    if let Ok(Some(sni)) = state.snis.select(&sni_pk).await {
+        return Some(sni.certificate.id.to_string());
+    }
+    None
+}
 entity_handlers!(
     Sni, snis, "snis", list_snis, get_sni, create_sni, update_sni, upsert_sni, delete_sni
 );

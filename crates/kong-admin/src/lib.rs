@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use std::sync::RwLock;
 
+use axum::extract::State;
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use axum::response::IntoResponse;
@@ -180,6 +181,42 @@ fn is_known_route(path: &str) -> bool {
     }
 }
 
+/// Determine allowed HTTP methods based on endpoint type — 根据端点类型确定允许的 HTTP 方法
+fn determine_allowed_methods(path: &str) -> &'static str {
+    // Read-only endpoints — 只读端点
+    match path {
+        "/" | "/status" | "/endpoints" | "/plugins/enabled" => return "GET, HEAD, OPTIONS",
+        _ => {}
+    }
+
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.len() {
+        // Collection endpoints: /services, /routes, etc. — 集合端点
+        1 => "GET, HEAD, OPTIONS, POST",
+        2 => {
+            match segments[0] {
+                // /schemas/{entity} — read-only
+                "schemas" => "GET, HEAD, OPTIONS",
+                // /tags/{value} — read-only
+                "tags" => "GET, HEAD, OPTIONS",
+                // /entity/{id} — entity endpoints support CRUD
+                _ => "DELETE, GET, HEAD, OPTIONS, PATCH, PUT",
+            }
+        }
+        3 => {
+            match segments[2] {
+                // /schemas/{entity}/validate — POST only
+                "validate" => "OPTIONS, POST",
+                // /entity/{id}/sub-collection — collection endpoint
+                _ => "GET, HEAD, OPTIONS, POST",
+            }
+        }
+        // /entity/{id}/sub/{id} — entity endpoint
+        4 => "DELETE, GET, HEAD, OPTIONS, PATCH, PUT",
+        _ => "GET, HEAD, OPTIONS",
+    }
+}
+
 /// Issue 4: OPTIONS middleware — return 204 for known routes, 404 for unknown (Kong-compatible)
 /// OPTIONS 中间件 — 已知路由返回 204，未知路由返回 404（兼容 Kong）
 async fn options_middleware(
@@ -201,11 +238,8 @@ async fn options_middleware(
             ).into_response();
         }
 
-        // Read-only endpoints only support GET/HEAD — 只读端点只支持 GET/HEAD
-        let allow = match path.as_str() {
-            "/" | "/status" | "/endpoints" | "/plugins/enabled" => "GET, HEAD, OPTIONS",
-            _ => "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
-        };
+        // Determine allowed methods based on endpoint type — 根据端点类型确定允许的方法
+        let allow = determine_allowed_methods(&path);
 
         return axum::http::Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -407,7 +441,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(handlers::ai_virtual_keys::delete_one),
         )
         .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
-        .fallback(admin_fallback)
+        .fallback(admin_fallback_with_trailing_slash)
         // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
         .method_not_allowed_fallback(method_not_allowed_handler)
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
@@ -427,8 +461,30 @@ async fn method_not_allowed_handler() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Admin API 404 fallback — Kong 兼容的 404 JSON 响应
-async fn admin_fallback() -> (StatusCode, Json<Value>) {
+/// Admin API 404 fallback with trailing slash normalization — 带尾部斜杠归一化的 404 fallback
+/// If path ends with '/', retry without it — 如果路径以 '/' 结尾，去掉后重试
+async fn admin_fallback_with_trailing_slash(
+    State(state): State<AdminState>,
+    mut req: axum::extract::Request,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if path.len() > 1 && path.ends_with('/') {
+        let trimmed = path.trim_end_matches('/');
+        let new_uri = if let Some(q) = req.uri().query() {
+            format!("{}?{}", trimmed, q)
+        } else {
+            trimmed.to_string()
+        };
+        if let Ok(uri) = new_uri.parse::<axum::http::Uri>() {
+            *req.uri_mut() = uri;
+            // Re-route through the admin router — 通过 admin router 重新路由
+            let router = build_admin_router(state);
+            let mut svc = router.into_service();
+            return tower::Service::<axum::extract::Request>::call(&mut svc, req).await.unwrap_or_else(|e| {
+                match e {}
+            });
+        }
+    }
     (
         StatusCode::NOT_FOUND,
         Json(json!({
@@ -436,7 +492,7 @@ async fn admin_fallback() -> (StatusCode, Json<Value>) {
             "name": "not found",
             "code": 3,
         })),
-    )
+    ).into_response()
 }
 
 /// Build the Status API router — 构建 Status API 路由
