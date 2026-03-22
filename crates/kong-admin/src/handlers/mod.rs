@@ -1305,6 +1305,44 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 );
             }
         }
+
+        // Route must have at least one of methods/hosts/headers/paths/snis — Route 至少需要一个路由匹配字段
+        if T::table_name() == "routes" {
+            if let Some(obj) = body.as_object_mut() {
+                let has_field = |name: &str| -> bool {
+                    match obj.get(name) {
+                        Some(Value::Array(a)) => !a.is_empty(),
+                        Some(Value::Object(o)) => !o.is_empty(),
+                        Some(Value::Null) | None => false,
+                        Some(_) => true,
+                    }
+                };
+                let has_routing_field = has_field("methods") || has_field("hosts") || has_field("headers")
+                    || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
+                if !has_routing_field {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is 'grpcs', 'https', 'http', 'grpc')",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "@entity": ["must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is 'grpcs', 'https', 'http', 'grpc'"]
+                            },
+                        })),
+                    );
+                }
+
+                // gRPC routes: strip_path must be false — gRPC 路由：strip_path 必须为 false
+                let protocols = obj.get("protocols").and_then(|v| v.as_array());
+                let is_grpc = protocols.map_or(false, |arr| {
+                    arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
+                });
+                if is_grpc {
+                    obj.insert("strip_path".to_string(), json!(false));
+                }
+            }
+        }
     }
 
     // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值

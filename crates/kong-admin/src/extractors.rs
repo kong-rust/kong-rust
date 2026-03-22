@@ -225,6 +225,9 @@ fn form_pairs_to_json(pairs: &[(String, String)]) -> Value {
         // Determine if this should be an array — 判断是否应该为数组
         let is_array = entries.len() > 1 || entries.iter().any(|(idx, _)| idx.is_some());
 
+        // Also treat known array fields as arrays even with single value — 已知数组字段即使单值也当数组处理
+        let is_array = is_array || is_known_array_field(key);
+
         if is_array {
             // Build array, respecting dotted indices if present — 构建数组，如有点号索引则按索引排列
             let has_indices = entries.iter().any(|(idx, _)| idx.is_some());
@@ -340,6 +343,20 @@ fn revert_non_numeric_form_values(value: &mut Value) {
             }
         }
     }
+}
+
+/// Check if a field should always be an array even with single value — 检查字段是否应始终为数组（即使只有单个值）
+/// These are entity fields typed as Vec/Array in the model — 这些是模型中类型为 Vec/Array 的实体字段
+fn is_known_array_field(field: &str) -> bool {
+    matches!(
+        field,
+        // Route fields
+        "protocols" | "methods" | "hosts" | "paths" | "snis" | "sources" | "destinations"
+        // Service fields
+        | "ca_certificates"
+        // Plugin fields
+        | "tags"
+    )
 }
 
 /// Check if a field name is a known numeric (integer/float) entity field — 检查字段名是否为已知的数字类型实体字段
