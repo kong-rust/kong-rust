@@ -1024,7 +1024,8 @@ impl ProxyHttp for KongProxy {
             let _ = upstream_request.insert_header("content-length", body.len().to_string());
         }
 
-        // 6. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，默认全部注入）
+        // 6. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，实现 Kong trusted_ips 信任模型）
+        // Kong trust model: if client IP is in trusted_ips, preserve original headers; otherwise replace them.
         if !self.config.proxy_real_ip_headers.is_empty() {
             let headers_set: std::collections::HashSet<String> = self
                 .config
@@ -1041,13 +1042,42 @@ impl ProxyHttp for KongProxy {
                 })
                 .unwrap_or_default();
 
+            // Check if client IP is trusted — 检查客户端 IP 是否可信
+            let is_trusted = !self.config.trusted_ips.is_empty()
+                && self.config.trusted_ips.iter().any(|tip| {
+                    let tip = tip.trim();
+                    if tip.contains('/') {
+                        // CIDR match (simple: 0.0.0.0/0 matches all) — CIDR 匹配
+                        tip == "0.0.0.0/0" || tip == "::/0"
+                    } else {
+                        tip == client_ip
+                    }
+                });
+
             if !client_ip.is_empty() {
                 if headers_set.contains("x-real-ip") {
-                    let _ = upstream_request.insert_header("x-real-ip", &client_ip);
-                    ctx.injected_real_ip_headers
-                        .push(("X-Real-IP".to_string(), client_ip.clone()));
+                    if is_trusted {
+                        // Trusted: preserve original X-Real-IP if present — 可信客户端：保留原始 X-Real-IP
+                        let existing = session
+                            .req_header()
+                            .headers
+                            .get("x-real-ip")
+                            .and_then(|v| v.to_str().ok());
+                        if existing.is_none() {
+                            let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                        }
+                        let val = existing.unwrap_or(&client_ip).to_string();
+                        ctx.injected_real_ip_headers
+                            .push(("X-Real-IP".to_string(), val));
+                    } else {
+                        // Untrusted: always replace with real client IP — 不可信客户端：替换为真实 IP
+                        let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                        ctx.injected_real_ip_headers
+                            .push(("X-Real-IP".to_string(), client_ip.clone()));
+                    }
                 }
                 if headers_set.contains("x-forwarded-for") {
+                    // X-Forwarded-For: always append (trusted or not) — X-Forwarded-For：始终追加
                     let existing_xff = session
                         .req_header()
                         .headers
@@ -1074,14 +1104,28 @@ impl ProxyHttp for KongProxy {
                 } else {
                     "http"
                 };
-                let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                if is_trusted {
+                    // Trusted: preserve original if present — 可信客户端：保留原值
+                    if session.req_header().headers.get("x-forwarded-proto").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Proto".to_string(), proto.to_string()));
             }
 
             if headers_set.contains("x-forwarded-host") {
                 if let Some(host) = session.req_header().headers.get("host") {
-                    let _ = upstream_request.insert_header("x-forwarded-host", host);
+                    if is_trusted {
+                        // Trusted: preserve original if present — 可信客户端：保留原值
+                        if session.req_header().headers.get("x-forwarded-host").is_none() {
+                            let _ = upstream_request.insert_header("x-forwarded-host", host);
+                        }
+                    } else {
+                        let _ = upstream_request.insert_header("x-forwarded-host", host);
+                    }
                     if let Ok(v) = host.to_str() {
                         ctx.injected_real_ip_headers
                             .push(("X-Forwarded-Host".to_string(), v.to_string()));
@@ -1102,7 +1146,13 @@ impl ProxyHttp for KongProxy {
                     },
                 );
                 let port_str = port.to_string();
-                let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                if is_trusted {
+                    if session.req_header().headers.get("x-forwarded-port").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Port".to_string(), port_str));
             }
@@ -1114,15 +1164,40 @@ impl ProxyHttp for KongProxy {
                     .path_and_query()
                     .map(|pq| pq.as_str())
                     .unwrap_or("/");
-                let _ = upstream_request.insert_header("x-forwarded-path", path);
+                if is_trusted {
+                    if session.req_header().headers.get("x-forwarded-path").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-path", path);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-path", path);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Path".to_string(), path.to_string()));
             }
 
             if headers_set.contains("x-forwarded-prefix") {
-                let _ = upstream_request.insert_header("x-forwarded-prefix", "");
-                ctx.injected_real_ip_headers
-                    .push(("X-Forwarded-Prefix".to_string(), String::new()));
+                if is_trusted {
+                    // Trusted: preserve original X-Forwarded-Prefix — 可信客户端：保留原值
+                } else {
+                    // Untrusted: set to matched path prefix if strip_path is active — 不可信客户端：若 strip_path 生效则设置为匹配路径前缀
+                    if let Some(ref rm) = ctx.route_match {
+                        if rm.strip_path {
+                            if let Some(ref matched) = rm.matched_path {
+                                if matched != "/" {
+                                    let _ = upstream_request.insert_header("x-forwarded-prefix", matched.as_str());
+                                    ctx.injected_real_ip_headers
+                                        .push(("X-Forwarded-Prefix".to_string(), matched.clone()));
+                                } else {
+                                    // Root path: remove prefix header — 根路径：移除前缀头
+                                    upstream_request.remove_header("x-forwarded-prefix");
+                                }
+                            }
+                        } else {
+                            // strip_path=false: remove prefix header — strip_path=false：移除前缀头
+                            upstream_request.remove_header("x-forwarded-prefix");
+                        }
+                    }
+                }
             }
         }
 
