@@ -266,6 +266,20 @@ fn normalize_form_key(raw: &str) -> (String, Option<usize>) {
         return (base.to_string(), Some(0)); // use 0 as placeholder, will be ordered by insertion — 用 0 占位，按插入顺序排列
     }
 
+    // Handle `key[N]` pattern (bracket index) — 处理 `key[N]` 模式（括号索引）
+    // e.g. config.key_names[1] → ("config.key_names", Some(1))
+    if let Some(bracket_pos) = raw.rfind('[') {
+        if let Some(close_pos) = raw.rfind(']') {
+            if close_pos > bracket_pos {
+                let idx_str = &raw[bracket_pos + 1..close_pos];
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    let base = &raw[..bracket_pos];
+                    return (base.to_string(), Some(idx));
+                }
+            }
+        }
+    }
+
     // Handle `key.N` pattern (only if N is a digit) — 处理 `key.N` 模式（仅当 N 是数字时）
     if let Some(dot_pos) = raw.rfind('.') {
         let (prefix, suffix) = raw.split_at(dot_pos);

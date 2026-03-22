@@ -980,6 +980,7 @@ function DbProxy:new(admin_client_fn)
     }
 
     -- truncate: delete all entities of a type — 清空某类型的所有实体
+    -- For entities with FK dependencies, delete dependents first — 对有外键依赖的实体，先删除依赖实体
     function db:truncate(entity_name)
         local endpoint = entity_endpoints[entity_name]
         if not endpoint then
@@ -989,6 +990,21 @@ function DbProxy:new(admin_client_fn)
 
         local admin = admin_client_fn()
         if not admin then return true end
+
+        -- Delete dependents first to avoid FK constraint failures — 先删除依赖实体，避免外键约束失败
+        local dependents = {
+            services = { "routes", "plugins" },
+            routes = { "plugins" },
+            consumers = { "plugins" },
+            upstreams = {},  -- targets handled via nested endpoint
+            certificates = { "snis" },
+        }
+        local deps = dependents[entity_name]
+        if deps then
+            for _, dep in ipairs(deps) do
+                db:truncate(dep)
+            end
+        end
 
         -- paginate through all and delete — 分页遍历并删除
         local deleted = true
