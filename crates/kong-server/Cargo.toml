@@ -16,6 +16,7 @@ kong-proxy = { workspace = true }
 kong-plugin-system = { workspace = true }
 kong-lua-bridge = { workspace = true }
 kong-admin = { workspace = true }
+kong-ai = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

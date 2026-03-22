@@ -86,6 +86,8 @@ pub struct RequestCtx {
     pub uri_captures_named: std::collections::HashMap<String, String>,
     /// Unnamed URI captures (positional) — 未命名的 URI 捕获（按位置）
     pub uri_captures_unnamed: Vec<String>,
+    /// Typed extension map for plugins to share typed data (e.g. AI context) — 供插件共享类型化数据的扩展 map（如 AI 上下文）
+    pub extensions: anymap2::SendSyncAnyMap,
 }
 
 impl RequestCtx {
@@ -131,6 +133,7 @@ impl RequestCtx {
             matched_route_json: None,
             uri_captures_named: std::collections::HashMap::new(),
             uri_captures_unnamed: Vec::new(),
+            extensions: anymap2::SendSyncAnyMap::new(),
         }
     }
 

@@ -12,3 +12,4 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }
+anymap2 = { workspace = true }
