@@ -99,6 +99,8 @@ pub struct KongProxy {
     pub dns_resolver: SharedDnsResolver,
     /// Pre-computed plugin chains: (route_id, service_id) -> sorted plugin list — 预计算插件链
     pub plugin_chains: Arc<RwLock<HashMap<(Option<Uuid>, Option<Uuid>), Arc<Vec<ResolvedPlugin>>>>>,
+    /// Route cache (route_id -> Route) for kong.router.get_route() — 路由缓存，用于 kong.router.get_route()
+    pub routes_by_id: Arc<RwLock<HashMap<Uuid, Route>>>,
 }
 
 impl KongProxy {
@@ -123,6 +125,13 @@ impl KongProxy {
             access_log_writer: None,
             dns_resolver,
             plugin_chains: Arc::new(RwLock::new(HashMap::new())),
+            routes_by_id: {
+                let mut map = HashMap::new();
+                for route in routes {
+                    map.insert(route.id, route.clone());
+                }
+                Arc::new(RwLock::new(map))
+            },
         }
     }
 
@@ -130,6 +139,13 @@ impl KongProxy {
     pub fn update_routes(&self, routes: &[Route]) {
         if let Ok(mut router) = self.router.write() {
             router.rebuild(routes);
+        }
+        // Update routes_by_id cache for kong.router.get_route() — 更新 routes_by_id 缓存
+        if let Ok(mut cache) = self.routes_by_id.write() {
+            cache.clear();
+            for route in routes {
+                cache.insert(route.id, route.clone());
+            }
         }
         self.rebuild_plugin_chains();
     }
@@ -222,7 +238,8 @@ impl KongProxy {
     }
 
     /// Populate RequestCtx and build RequestContext in a single header scan — 单次头遍历同时填充 RequestCtx 和构建 RequestContext
-    fn populate_and_build_route_ctx(session: &Session, ctx: &mut RequestCtx) -> RequestContext {
+    /// `default_port`: the actual proxy listening port (from config) — 实际的代理监听端口（来自配置）
+    fn populate_and_build_route_ctx(session: &Session, ctx: &mut RequestCtx, default_port: u16) -> RequestContext {
         let req = session.req_header();
         let method = req.method.as_str().to_string();
         let uri_path = req.uri.path().to_string();
@@ -256,14 +273,15 @@ impl KongProxy {
             .unwrap_or_else(|| "localhost".to_string());
 
         // Parse host and port from Host header — 从 Host 头解析 host 和 port
+        // When Host header has no port, use the actual server listening port — 当 Host 头没有端口时，使用实际的服务器监听端口
         let (host_no_port, port) = if let Some(colon_pos) = host_header.rfind(':') {
             let (h, p) = host_header.split_at(colon_pos);
             (
                 h.to_string(),
-                p[1..].parse().unwrap_or(if is_tls { 443 } else { 80 }),
+                p[1..].parse().unwrap_or(default_port),
             )
         } else {
-            (host_header.to_string(), if is_tls { 443 } else { 80 })
+            (host_header.to_string(), default_port)
         };
 
         // Single header scan — build both RequestCtx.request_headers and route headers — 单次头遍历 — 同时构建 RequestCtx.request_headers 和路由匹配 headers
@@ -374,8 +392,11 @@ impl KongProxy {
         body_len: usize,
     ) -> pingora_core::Result<ResponseHeader> {
         let mut resp = ResponseHeader::build(status_code, Some(8))?;
-        resp.insert_header("content-length", body_len.to_string())?;
-        resp.insert_header("content-type", "application/json; charset=utf-8")?;
+        // 204 No Content: RFC 7230 forbids Content-Length — 204 无内容：RFC 7230 禁止 Content-Length
+        if status_code != 204 {
+            resp.insert_header("content-length", body_len.to_string())?;
+            resp.insert_header("content-type", "application/json; charset=utf-8")?;
+        }
 
         // Server 头：仅当配置中包含 server_tokens 或 Server 时添加
         // Server header: only add when server_tokens or Server is in headers config
@@ -610,7 +631,12 @@ impl ProxyHttp for KongProxy {
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<bool> {
         // 1. Populate request context + build route matching context (single header scan) — 填充请求上下文 + 构建路由匹配上下文（单次头遍历）
-        let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx);
+        // Get default proxy port from config — 从配置获取默认代理端口
+        let default_port = self.config.proxy_listen.first()
+            .and_then(|l| l.address.rsplit(':').next())
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8000);
+        let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx, default_port);
 
         // 2. Route matching — 路由匹配
         let route_match = {
@@ -630,7 +656,7 @@ impl ProxyHttp for KongProxy {
             }
         };
 
-        // 3. Find Service — 查找 Service
+        // 3. Find Service (optional — serviceless routes are allowed) — 查找 Service（可选 — 允许无服务路由）
         let service = if let Some(service_id) = route_match.service_id {
             let services = self
                 .services
@@ -641,31 +667,20 @@ impl ProxyHttp for KongProxy {
             None
         };
 
-        let service = match service {
-            Some(s) => s,
-            None => {
-                return self
-                    .send_error_response(session, 503, "no Service found for the requested route", Some(&ctx.request_id))
-                    .await;
-            }
-        };
-
-        if !service.enabled {
-            return self
-                .send_error_response(session, 503, "Service unavailable", Some(&ctx.request_id))
-                .await;
-        }
-
-        // 4. Resolve upstream address — 解析上游地址
-        let (mut upstream_addr, mut upstream_tls, mut upstream_sni) = self
-            .resolve_upstream(&service)
-            .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
-
-        // 5. Set up plugin context — 设置插件上下文
+        // 4. Set up plugin context (before service check so plugins can short-circuit serviceless routes) — 设置插件上下文（在服务检查之前，以便插件可以短路无服务路由）
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
         ctx.plugin_ctx.service_id = route_match.service_id;
 
-        // 6. Resolve plugin chain (from pre-computed cache) — 解析插件链（从预计算缓存）
+        // Populate matched route JSON for kong.router.get_route() — 填充匹配路由 JSON 供 kong.router.get_route() 使用
+        if let Ok(routes_cache) = self.routes_by_id.read() {
+            if let Some(route) = routes_cache.get(&route_match.route_id) {
+                if let Ok(route_json) = serde_json::to_value(route) {
+                    ctx.plugin_ctx.matched_route_json = Some(route_json);
+                }
+            }
+        }
+
+        // 5. Resolve plugin chain (from pre-computed cache) — 解析插件链（从预计算缓存）
         let resolved_plugins = {
             let key = (Some(route_match.route_id), route_match.service_id);
             let chains = self
@@ -734,6 +749,29 @@ impl ProxyHttp for KongProxy {
                 .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id, &plugins_ref)
                 .await;
         }
+
+        // After plugins executed: if no service, return 503 — 插件执行完后：如果没有 service，返回 503
+        let service = match service {
+            Some(s) => s,
+            None => {
+                ctx.resolved_plugins = resolved_plugins;
+                return self
+                    .send_error_response(session, 503, "no Service found for the requested route", Some(&ctx.request_id))
+                    .await;
+            }
+        };
+
+        if !service.enabled {
+            ctx.resolved_plugins = resolved_plugins;
+            return self
+                .send_error_response(session, 503, "Service unavailable", Some(&ctx.request_id))
+                .await;
+        }
+
+        // Resolve upstream address — 解析上游地址
+        let (mut upstream_addr, mut upstream_tls, mut upstream_sni) = self
+            .resolve_upstream(&service)
+            .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
 
         self.apply_plugin_upstream_overrides(
             &mut upstream_addr,

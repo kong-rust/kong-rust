@@ -80,6 +80,12 @@ pub struct RequestCtx {
     pub log_serialize: Option<serde_json::Value>,
     /// Response source reported by kong.response.get_source()
     pub response_source: Option<String>,
+    /// Matched route JSON for kong.router.get_route() — 匹配的路由 JSON，用于 kong.router.get_route()
+    pub matched_route_json: Option<serde_json::Value>,
+    /// URI captures from route matching — 路由匹配的 URI 捕获
+    pub uri_captures_named: std::collections::HashMap<String, String>,
+    /// Unnamed URI captures (positional) — 未命名的 URI 捕获（按位置）
+    pub uri_captures_unnamed: Vec<String>,
 }
 
 impl RequestCtx {
@@ -122,6 +128,9 @@ impl RequestCtx {
             service_response_body: None,
             log_serialize: None,
             response_source: None,
+            matched_route_json: None,
+            uri_captures_named: std::collections::HashMap::new(),
+            uri_captures_unnamed: Vec::new(),
         }
     }
 

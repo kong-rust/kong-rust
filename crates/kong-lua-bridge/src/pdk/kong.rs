@@ -5,13 +5,39 @@ use std::collections::HashMap;
 
 use crate::metrics;
 
+/// Simple percent-decode (URL decode) — 简单的百分比解码（URL 解码）
+fn percent_decode(input: &str) -> String {
+    let mut result = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            result.push(b' ');
+            i += 1;
+            continue;
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
 fn parse_query_string(query: &str) -> HashMap<String, String> {
     query
         .split('&')
         .filter(|segment| !segment.is_empty())
         .map(|segment| match segment.split_once('=') {
-            Some((key, value)) => (key.to_string(), value.to_string()),
-            None => (segment.to_string(), String::new()),
+            Some((key, value)) => (percent_decode(key), percent_decode(value)),
+            None => (percent_decode(segment), String::new()),
         })
         .collect()
 }
@@ -262,10 +288,16 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     request.set(
         "get_uri_captures",
         lua.create_function(|lua, _: ()| -> LuaResult<LuaTable> {
-            let captures = lua.create_table()?;
-            captures.set("unnamed", lua.create_table()?)?;
-            captures.set("named", lua.create_table()?)?;
-            Ok(captures)
+            // Return URI captures from context if available — 如果上下文中有 URI 捕获则返回
+            match lua.globals().get::<LuaTable>("__kong_uri_captures") {
+                Ok(captures) => Ok(captures),
+                Err(_) => {
+                    let captures = lua.create_table()?;
+                    captures.set("unnamed", lua.create_table()?)?;
+                    captures.set("named", lua.create_table()?)?;
+                    Ok(captures)
+                }
+            }
         })?,
     )?;
     kong.set("request", request)?;
@@ -659,6 +691,45 @@ pub fn inject_kong_pdk(lua: &Lua, ctx: &mut RequestCtx) -> LuaResult<()> {
     configuration.set("cluster_cert", "")?;
     configuration.set("stream_listeners", lua.create_table()?)?;
     kong.set("configuration", configuration)?;
+
+    // kong.router — 路由器 PDK
+    let router = lua.create_table()?;
+    // Populate route data from ctx if available — 如果 ctx 中有路由数据则填充
+    if let Some(ref route_json) = ctx.matched_route_json {
+        let route_table = lua.to_value(route_json)?;
+        globals.set("__kong_matched_route", route_table)?;
+    } else {
+        globals.set("__kong_matched_route", LuaValue::Nil)?;
+    }
+    router.set(
+        "get_route",
+        lua.create_function(|lua, _: ()| -> LuaResult<LuaValue> {
+            lua.globals().get("__kong_matched_route")
+        })?,
+    )?;
+    router.set(
+        "get_service",
+        lua.create_function(|_, _: ()| -> LuaResult<LuaValue> {
+            Ok(LuaValue::Nil)
+        })?,
+    )?;
+    kong.set("router", router)?;
+
+    // Populate URI captures data — 填充 URI 捕获数据
+    {
+        let named_table = lua.create_table()?;
+        for (k, v) in &ctx.uri_captures_named {
+            named_table.set(k.as_str(), v.as_str())?;
+        }
+        let unnamed_table = lua.create_table()?;
+        for (i, v) in ctx.uri_captures_unnamed.iter().enumerate() {
+            unnamed_table.set(i + 1, v.as_str())?;
+        }
+        let captures_data = lua.create_table()?;
+        captures_data.set("named", named_table)?;
+        captures_data.set("unnamed", unnamed_table)?;
+        globals.set("__kong_uri_captures", captures_data)?;
+    }
 
     globals.set("kong", kong)?;
     Ok(())

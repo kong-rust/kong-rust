@@ -19,6 +19,7 @@ return {
           { rename = {
               type = "record",
               fields = {
+                { json   = header_list },
                 { headers = header_list },
               },
             },

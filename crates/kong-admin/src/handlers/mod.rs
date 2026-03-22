@@ -1170,6 +1170,13 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                 if let Some(config) = obj.get_mut("config").and_then(|v| v.as_object_mut()) {
                     apply_plugin_config_defaults(&name, config);
                 }
+
+                // Validate plugin config (transformer colon checks, null array checks, etc.) — 验证插件 config（转换器冒号检查、null 数组检查等）
+                if let Some(config) = obj.get("config") {
+                    if let Some(err) = validate_transformer_plugin_config(&name, config) {
+                        return err;
+                    }
+                }
             }
         }
     }
@@ -1513,6 +1520,13 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
                 }
                 if let Some(config) = obj.get_mut("config").and_then(|v| v.as_object_mut()) {
                     apply_plugin_config_defaults(&name, config);
+                }
+
+                // Validate plugin config for upsert — upsert 时验证插件 config
+                if let Some(config) = obj.get("config") {
+                    if let Some(err) = validate_transformer_plugin_config(&name, config) {
+                        return err;
+                    }
                 }
             }
         }
@@ -2083,7 +2097,7 @@ fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String,
         }
         "response-transformer" => {
             config.entry("remove".to_string()).or_insert_with(|| json!({"headers": [], "json": []}));
-            config.entry("rename".to_string()).or_insert_with(|| json!({"headers": []}));
+            config.entry("rename".to_string()).or_insert_with(|| json!({"headers": [], "json": []}));
             config.entry("replace".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
             config.entry("add".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
             config.entry("append".to_string()).or_insert_with(|| json!({"headers": [], "json": [], "json_types": []}));
@@ -2151,6 +2165,265 @@ fn is_valid_plugin_name(name: &str) -> bool {
         "admin-api-method",
     ];
     TEST_PLUGINS.contains(&name)
+}
+
+/// Validate transformer plugin config (response-transformer / request-transformer) — 验证转换器插件 config
+///
+/// Checks:
+/// - add/replace/append.headers must contain colon separator (key:value) — add/replace/append.headers 必须包含冒号分隔符
+/// - rename.headers must contain colon separator (old:new) — rename.headers 必须包含冒号分隔符
+/// - rename.headers must have valid header names — rename.headers 必须包含有效的 header 名称
+/// - null arrays are rejected with "required field missing" — null 数组将被拒绝
+fn validate_transformer_plugin_config(
+    plugin_name: &str,
+    config: &Value,
+) -> Option<(StatusCode, Json<Value>)> {
+    match plugin_name {
+        "response-transformer" => validate_response_transformer_config(config),
+        "request-transformer" => validate_request_transformer_config(config),
+        _ => None,
+    }
+}
+
+/// Check if a header name is valid (no commas, spaces, or other invalid chars) — 检查 header 名称是否有效
+fn is_valid_header_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // RFC 7230: token = 1*tchar, tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+    for b in name.bytes() {
+        match b {
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
+            b'^' | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Build a "schema violation" 400 error for transformer plugins — 构建转换器插件的 schema violation 400 错误
+fn transformer_schema_violation(
+    fields: serde_json::Map<String, Value>,
+) -> (StatusCode, Json<Value>) {
+    // Build message from fields — 从 fields 构建 message
+    let mut parts = Vec::new();
+    fn collect_parts(prefix: &str, val: &Value, parts: &mut Vec<String>) {
+        match val {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
+                    collect_parts(&path, v, parts);
+                }
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        parts.push(format!("{}: {}", prefix, s));
+                    }
+                }
+            }
+            Value::String(s) => {
+                parts.push(format!("{}: {}", prefix, s));
+            }
+            _ => {}
+        }
+    }
+    for (k, v) in &fields {
+        collect_parts(k, v, &mut parts);
+    }
+    let msg = if parts.is_empty() {
+        "schema violation".to_string()
+    } else {
+        format!("schema violation ({})", parts.join("; "))
+    };
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "message": msg,
+            "name": "schema violation",
+            "code": 2,
+            "fields": Value::Object(fields),
+        })),
+    )
+}
+
+/// Validate response-transformer config — 验证 response-transformer 配置
+fn validate_response_transformer_config(config: &Value) -> Option<(StatusCode, Json<Value>)> {
+    let config_obj = config.as_object()?;
+    let mut errors = serde_json::Map::new();
+
+    // Check null arrays first — 先检查 null 数组
+    for section_name in &["remove", "rename", "replace", "add", "append"] {
+        if let Some(section) = config_obj.get(*section_name) {
+            if let Some(section_obj) = section.as_object() {
+                let mut section_errors = serde_json::Map::new();
+                let array_fields: &[&str] = match *section_name {
+                    "remove" => &["headers", "json"],
+                    "rename" => &["headers", "json"],
+                    "replace" | "add" | "append" => &["headers", "json", "json_types"],
+                    _ => &[],
+                };
+                for field in array_fields {
+                    if let Some(val) = section_obj.get(*field) {
+                        if val.is_null() {
+                            section_errors.insert(field.to_string(), json!("required field missing"));
+                        }
+                    }
+                }
+                if !section_errors.is_empty() {
+                    errors.insert(section_name.to_string(), Value::Object(section_errors));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("config".to_string(), Value::Object(errors));
+        return Some(transformer_schema_violation(fields));
+    }
+
+    // Check colon requirements — 检查冒号要求
+    // add/replace/append.headers require colon — add/replace/append.headers 需要冒号
+    for section_name in &["add", "replace", "append"] {
+        if let Some(section) = config_obj.get(*section_name).and_then(|v| v.as_object()) {
+            if let Some(headers) = section.get("headers").and_then(|v| v.as_array()) {
+                for h in headers {
+                    if let Some(s) = h.as_str() {
+                        if !s.contains(':') {
+                            let mut section_map = serde_json::Map::new();
+                            section_map.insert(
+                                "headers".to_string(),
+                                json!([format!("invalid value: {}", s)]),
+                            );
+                            let mut config_map = serde_json::Map::new();
+                            config_map
+                                .insert(section_name.to_string(), Value::Object(section_map));
+                            let mut fields = serde_json::Map::new();
+                            fields.insert("config".to_string(), Value::Object(config_map));
+                            return Some(transformer_schema_violation(fields));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // rename.headers require colon — rename.headers 需要冒号
+    if let Some(rename) = config_obj.get("rename").and_then(|v| v.as_object()) {
+        if let Some(headers) = rename.get("headers").and_then(|v| v.as_array()) {
+            for h in headers {
+                if let Some(s) = h.as_str() {
+                    if !s.contains(':') {
+                        // No colon — 没有冒号
+                        let mut section_map = serde_json::Map::new();
+                        section_map.insert(
+                            "headers".to_string(),
+                            json!([format!("invalid value: {}", s)]),
+                        );
+                        let mut config_map = serde_json::Map::new();
+                        config_map.insert("rename".to_string(), Value::Object(section_map));
+                        let mut fields = serde_json::Map::new();
+                        fields.insert("config".to_string(), Value::Object(config_map));
+                        return Some(transformer_schema_violation(fields));
+                    }
+                    // Validate both header names — 验证两个 header 名称
+                    let parts: Vec<&str> = s.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if !is_valid_header_name(parts[0]) {
+                            let mut section_map = serde_json::Map::new();
+                            section_map.insert(
+                                "headers".to_string(),
+                                json!([format!("'{}' is not a valid header", parts[0])]),
+                            );
+                            let mut config_map = serde_json::Map::new();
+                            config_map.insert("rename".to_string(), Value::Object(section_map));
+                            let mut fields = serde_json::Map::new();
+                            fields.insert("config".to_string(), Value::Object(config_map));
+                            return Some(transformer_schema_violation(fields));
+                        }
+                        if !is_valid_header_name(parts[1]) {
+                            let mut section_map = serde_json::Map::new();
+                            section_map.insert(
+                                "headers".to_string(),
+                                json!([format!("'{}' is not a valid header", parts[1])]),
+                            );
+                            let mut config_map = serde_json::Map::new();
+                            config_map.insert("rename".to_string(), Value::Object(section_map));
+                            let mut fields = serde_json::Map::new();
+                            fields.insert("config".to_string(), Value::Object(config_map));
+                            return Some(transformer_schema_violation(fields));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Validate request-transformer config — 验证 request-transformer 配置
+fn validate_request_transformer_config(config: &Value) -> Option<(StatusCode, Json<Value>)> {
+    let config_obj = config.as_object()?;
+    let mut errors = serde_json::Map::new();
+
+    // Check null arrays first — 先检查 null 数组
+    for section_name in &["remove", "rename", "replace", "add", "append"] {
+        if let Some(section) = config_obj.get(*section_name) {
+            if let Some(section_obj) = section.as_object() {
+                let mut section_errors = serde_json::Map::new();
+                for field in &["headers", "querystring", "body"] {
+                    if let Some(val) = section_obj.get(*field) {
+                        if val.is_null() {
+                            section_errors.insert(field.to_string(), json!("required field missing"));
+                        }
+                    }
+                }
+                if !section_errors.is_empty() {
+                    errors.insert(section_name.to_string(), Value::Object(section_errors));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("config".to_string(), Value::Object(errors));
+        return Some(transformer_schema_violation(fields));
+    }
+
+    // Check colon requirements for add/replace/append.headers — 检查 add/replace/append.headers 的冒号要求
+    for section_name in &["add", "replace", "append"] {
+        if let Some(section) = config_obj.get(*section_name).and_then(|v| v.as_object()) {
+            if let Some(headers) = section.get("headers").and_then(|v| v.as_array()) {
+                for h in headers {
+                    if let Some(s) = h.as_str() {
+                        if !s.contains(':') {
+                            let mut section_map = serde_json::Map::new();
+                            section_map.insert(
+                                "headers".to_string(),
+                                json!([format!("invalid value: {}", s)]),
+                            );
+                            let mut config_map = serde_json::Map::new();
+                            config_map
+                                .insert(section_name.to_string(), Value::Object(section_map));
+                            let mut fields = serde_json::Map::new();
+                            fields.insert("config".to_string(), Value::Object(config_map));
+                            return Some(transformer_schema_violation(fields));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Generate plugin cache_key from (name, route_id, service_id, consumer_id) — 从 (name, route_id, service_id, consumer_id) 生成插件 cache_key
