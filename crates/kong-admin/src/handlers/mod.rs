@@ -3785,12 +3785,40 @@ pub async fn create_nested_target(
         }
     };
 
-    // Inject upstream FK — 注入 upstream FK
+    // Inject upstream FK and validate target field — 注入 upstream FK 并验证 target 字段
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
             "upstream".to_string(),
             json!({"id": upstream.id.to_string()}),
         );
+
+        // Validate target field — 验证 target 字段
+        let target_val = obj.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        if target_val.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "message": "schema violation (target: required field missing)",
+                "name": "schema violation", "code": 2,
+                "fields": { "target": "required field missing" },
+            })));
+        }
+        // Validate weight range — 验证 weight 范围
+        if let Some(w) = obj.get("weight").and_then(|v| v.as_i64()) {
+            if w < 0 || w > 65535 {
+                return (StatusCode::BAD_REQUEST, Json(json!({
+                    "message": "schema violation (weight: value should be between 0 and 65535)",
+                    "name": "schema violation", "code": 2,
+                    "fields": { "weight": "value should be between 0 and 65535" },
+                })));
+            }
+        }
+        // Append default port :8000 if missing — 追加默认端口 :8000
+        if !target_val.contains(':') {
+            obj.insert("target".to_string(), json!(format!("{}:8000", target_val)));
+        }
+        // Generate cache_key for uniqueness — 生成 cache_key 保证唯一性
+        let final_target = obj.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        let cache_key = format!("{}:{}:", upstream.id, final_target);
+        obj.insert("cache_key".to_string(), json!(cache_key));
     }
 
     let target: Target = match serde_json::from_value(body) {
@@ -3888,6 +3916,65 @@ pub async fn delete_nested_target(
             (status, Json(body)).into_response()
         }
     }
+}
+
+/// PUT /upstreams/{upstream_id}/targets/{target_id} — upsert target
+pub async fn upsert_nested_target(
+    State(state): State<AdminState>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    // Resolve upstream — 解析 upstream
+    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
+    let upstream = match state.upstreams.select(&upstream_pk).await {
+        Ok(Some(u)) => u,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "upstream not found"}))),
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("upstream".to_string(), json!({"id": upstream.id.to_string()}));
+        // Default port + cache_key
+        if let Some(t) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            let t = if !t.contains(':') { format!("{}:8000", t) } else { t };
+            obj.insert("target".to_string(), json!(t));
+            obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
+        }
+    }
+    let result = do_upsert::<Target>(&state.targets, &target_id_or_name, body).await;
+    let _ = state.refresh_tx.send("targets");
+    result
+}
+
+/// GET /upstreams/{upstream_id}/health — upstream health status (stub) — 上游健康状态（基础实现）
+pub async fn upstream_health(
+    State(state): State<AdminState>,
+    Path(upstream_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
+    let upstream: Upstream = match state.upstreams.select(&upstream_pk).await {
+        Ok(Some(u)) => u,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    // Get all targets for this upstream — 获取该 upstream 的所有 target
+    let page_params = PageParams { size: 10000, ..Default::default() };
+    let targets = match state.targets.select_by_foreign_key("upstream", &upstream.id, &page_params).await {
+        Ok(page) => page.data,
+        Err(_) => vec![],
+    };
+    let health_data: Vec<Value> = targets.iter().map(|t| {
+        json!({
+            "id": t.id,
+            "target": t.target,
+            "weight": t.weight,
+            "upstream": { "id": upstream.id },
+            "health": "HEALTHCHECKS_OFF",
+            "created_at": t.created_at,
+        })
+    }).collect();
+    (StatusCode::OK, Json(json!({
+        "id": upstream.id,
+        "name": upstream.name,
+        "data": health_data,
+    })))
 }
 
 // ============ Tags API — 标签 API ============

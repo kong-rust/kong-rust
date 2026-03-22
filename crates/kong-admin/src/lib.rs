@@ -173,8 +173,9 @@ fn is_known_route(path: &str) -> bool {
         ["consumers", _, "plugins", _] => true,
         // /certificates/{id}/snis
         ["certificates", _, "snis"] => true,
-        // /upstreams/{id}/targets
+        // /upstreams/{id}/targets and /upstreams/{id}/health
         ["upstreams", _, "targets"] => true,
+        ["upstreams", _, "health"] => true,
         // /upstreams/{id}/targets/{id}
         ["upstreams", _, "targets", _] => true,
         // /ai-providers/{id}/ai-models
@@ -369,10 +370,19 @@ pub fn build_admin_router(state: AdminState) -> Router {
             get(list_nested_targets).post(create_nested_target),
         )
         .route(
+            "/upstreams/{upstream_id_or_name}/targets/all",
+            get(list_nested_targets),
+        )
+        .route(
             "/upstreams/{upstream_id_or_name}/targets/{id_or_name}",
             get(get_nested_target)
                 .patch(update_nested_target)
+                .put(upsert_nested_target)
                 .delete(delete_nested_target),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/health",
+            get(handlers::upstream_health),
         )
         // Certificates
         .route(
