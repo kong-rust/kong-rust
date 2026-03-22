@@ -271,7 +271,7 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 | 文档 | 说明 |
 |------|------|
-| [AI 网关使用指南](docs/ai-gateway-guide.md) | 快速开始、插件配置、Admin API、多 Provider 负载均衡 |
+| [AI 网关使用指南](docs/ai-gateway-guide_cn.md) | 快速开始、插件配置、Admin API、多 Provider 负载均衡、智能路由 |
 | [AI 网关战略](docs/designs/ai-gateway-strategy.md) | AI 网关定位与双轨并行执行计划 |
 | [产品路线图](docs/designs/kong-rust-roadmap.md) | Hybrid 模式详细设计与历史路线图 |
 | [设计文档](docs/design.md) | 架构与组件设计 |

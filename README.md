@@ -271,7 +271,7 @@ See [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md) for t
 
 | Document | Description |
 |----------|-------------|
-| [AI Gateway Guide](docs/ai-gateway-guide.md) | Usage guide: quick start, plugin config, Admin API, multi-provider LB |
+| [AI Gateway Guide](docs/ai-gateway-guide.md) | Usage guide: quick start, plugin config, Admin API, multi-provider LB, intelligent routing |
 | [AI Gateway Strategy](docs/designs/ai-gateway-strategy.md) | AI gateway positioning & dual-track execution plan |
 | [Roadmap](docs/designs/kong-rust-roadmap.md) | Hybrid mode detailed design & legacy roadmap |
 | [Design](docs/design.md) | Architecture & component design |

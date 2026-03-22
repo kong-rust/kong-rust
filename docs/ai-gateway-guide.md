@@ -1,30 +1,30 @@
-# Kong-Rust AI Gateway 使用指南
+# Kong-Rust AI Gateway Usage Guide
 
-本文档是 Kong-Rust AI Gateway 的用户面向使用指南，涵盖快速开始、插件配置参考、Admin API 以及常见部署模式。
-
----
-
-## 目录
-
-1. [快速开始](#1-快速开始)
-2. [核心概念](#2-核心概念)
-3. [插件配置参考](#3-插件配置参考)
-4. [Admin API 参考](#4-admin-api-参考)
-5. [多 Provider 负载均衡](#5-多-provider-负载均衡)
-6. [双协议支持](#6-双协议支持)
-7. [插件组合示例](#7-插件组合示例)
-8. [智能模型路由](#8-智能模型路由)
-9. [支持的 Provider](#9-支持的-provider)
+This document is the user-facing guide for Kong-Rust AI Gateway, covering quick start, plugin configuration reference, Admin API, and common deployment patterns.
 
 ---
 
-## 1. 快速开始
+## Table of Contents
 
-以下演示最简路径：通过 ai-proxy 插件把一条 Route 接入 OpenAI。
+1. [Quick Start](#1-quick-start)
+2. [Core Concepts](#2-core-concepts)
+3. [Plugin Configuration Reference](#3-plugin-configuration-reference)
+4. [Admin API Reference](#4-admin-api-reference)
+5. [Multi-Provider Load Balancing](#5-multi-provider-load-balancing)
+6. [Dual Protocol Support](#6-dual-protocol-support)
+7. [Plugin Combination Examples](#7-plugin-combination-examples)
+8. [Intelligent Model Routing](#8-intelligent-model-routing)
+9. [Supported Providers](#9-supported-providers)
 
-### 1.1 创建 AI Provider
+---
 
-AI Provider 存储 LLM 服务商的连接参数和鉴权凭证。
+## 1. Quick Start
+
+The following demonstrates the shortest path: attaching an ai-proxy plugin to a Route to connect it to OpenAI.
+
+### 1.1 Create an AI Provider
+
+An AI Provider stores the connection parameters and authentication credentials for an LLM service.
 
 ```bash
 curl -s -X POST http://localhost:8001/ai-providers \
@@ -39,7 +39,7 @@ curl -s -X POST http://localhost:8001/ai-providers \
   }'
 ```
 
-响应示例（`auth_config` 中的敏感字段被自动脱敏为 `***`）：
+Example response (sensitive fields in `auth_config` are automatically masked to `***`):
 
 ```json
 {
@@ -54,12 +54,12 @@ curl -s -X POST http://localhost:8001/ai-providers \
 }
 ```
 
-### 1.2 创建 AI Model
+### 1.2 Create an AI Model
 
-AI Model 描述使用哪个 Provider 的哪个具体模型。`name` 是逻辑名称（可被多个 Model 共用以构成 Model Group），`model_name` 是发往 Provider 的实际模型标识符。
+An AI Model describes which specific model to use from which Provider. `name` is the logical name (multiple Models can share the same `name` to form a Model Group), and `model_name` is the actual model identifier sent to the Provider.
 
 ```bash
-PROVIDER_ID="a1b2c3d4-..."   # 上一步返回的 id
+PROVIDER_ID="a1b2c3d4-..."   # id returned from the previous step
 
 curl -s -X POST http://localhost:8001/ai-models \
   -H 'Content-Type: application/json' \
@@ -72,7 +72,7 @@ curl -s -X POST http://localhost:8001/ai-models \
   }"
 ```
 
-### 1.3 创建 Route
+### 1.3 Create a Route
 
 ```bash
 curl -s -X POST http://localhost:8001/routes \
@@ -85,10 +85,10 @@ curl -s -X POST http://localhost:8001/routes \
   }'
 ```
 
-### 1.4 为 Route 挂载 ai-proxy 插件
+### 1.4 Attach the ai-proxy Plugin to the Route
 
 ```bash
-ROUTE_ID="<上一步返回的 route id>"
+ROUTE_ID="<route id returned from the previous step>"
 
 curl -s -X POST http://localhost:8001/plugins \
   -H 'Content-Type: application/json' \
@@ -111,9 +111,9 @@ curl -s -X POST http://localhost:8001/plugins \
   }"
 ```
 
-> **注意**：当前 MVP 阶段 ai-proxy 的 Provider 凭证直接内联在插件 `config.provider` 中（`model_source=config` 路径）。后续版本将支持通过 `model` 字段引用已创建的 AI Provider / AI Model 实体。
+> **Note**: In the current MVP phase, ai-proxy Provider credentials are inlined directly in the plugin `config.provider` (the `model_source=config` path). Future versions will support referencing AI Provider / AI Model entities via the `model` field.
 
-### 1.5 发送请求
+### 1.5 Send a Request
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/chat/completions \
@@ -126,88 +126,88 @@ curl -s -X POST http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-响应符合 OpenAI Chat Completions API 格式，同时响应头 `X-Kong-LLM-Model` 会注明实际使用的模型。
+The response conforms to the OpenAI Chat Completions API format, and the response header `X-Kong-LLM-Model` indicates the actual model used.
 
 ---
 
-## 2. 核心概念
+## 2. Core Concepts
 
 ### AI Provider
 
-AI Provider 代表一个 LLM 服务商的连接配置，包含：
+An AI Provider represents the connection configuration for an LLM service, including:
 
-- **provider_type**：服务商类型标识，决定使用哪个内置驱动（`openai` / `anthropic` / `gemini` / `openai_compat`）
-- **auth_config**：鉴权参数（API Key、HTTP Header 名、Query 参数等）
-- **endpoint_url**：自定义上游地址（默认使用各 Provider 的公网地址）
+- **provider_type**: Service type identifier that determines which built-in driver to use (`openai` / `anthropic` / `gemini` / `openai_compat`)
+- **auth_config**: Authentication parameters (API Key, HTTP Header name, Query parameter, etc.)
+- **endpoint_url**: Custom upstream address (defaults to each Provider's public endpoint)
 
-Admin API 在读取 Provider 时会自动遮蔽 `auth_config` 中的敏感字段（`header_value`、`param_value` 等）。
+When reading Providers via the Admin API, sensitive fields in `auth_config` (`header_value`, `param_value`, etc.) are automatically masked.
 
 ### AI Model / Model Group
 
-AI Model 是"逻辑模型"到"物理 Provider 模型"的映射：
+An AI Model is a mapping from a "logical model" to a "physical Provider model":
 
-- **name**：逻辑名称。**多个 AI Model 可以共用同一个 `name`**，构成一个 Model Group，用于负载均衡（按 `weight`）和故障切换（按 `priority`，值小者优先）。
-- **model_name**：发往 Provider 的实际模型标识符（如 `gpt-4o`、`claude-3-5-sonnet-20241022`）。
-- **priority / weight**：控制 Model Group 内的路由策略（优先级 + 加权）。
+- **name**: Logical name. **Multiple AI Models can share the same `name`**, forming a Model Group used for load balancing (by `weight`) and failover (by `priority`, lower value takes precedence).
+- **model_name**: The actual model identifier sent to the Provider (e.g. `gpt-4o`, `claude-3-5-sonnet-20241022`).
+- **priority / weight**: Controls routing strategy within a Model Group (priority + weighted).
 
 ### AI Virtual Key
 
-AI Virtual Key 是一种面向用户/团队的虚拟 API Key，用于：
+An AI Virtual Key is a virtual API key for users/teams, used for:
 
-- 细粒度的 TPM / RPM 配额控制
-- 预算上限（`budget_limit`）和使用量追踪（`budget_used`）
-- 允许访问的模型白名单（`allowed_models`）
+- Fine-grained TPM / RPM quota control
+- Budget caps (`budget_limit`) and usage tracking (`budget_used`)
+- Model whitelist (`allowed_models`) restricting which models can be accessed
 
-Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，此后只存储 SHA256 哈希。
+Virtual Keys have the format `sk-kr-<uuid32>`. The raw key is returned once at creation time; only its SHA256 hash is stored thereafter.
 
-### 四个插件及优先级
+### Four Plugins and Their Priorities
 
-插件按优先级从高到低执行（数字大者先执行）：
+Plugins execute in descending priority order (higher number executes first):
 
-| 插件 | 优先级 | 职责 |
+| Plugin | Priority | Responsibility |
 |---|---|---|
-| ai-prompt-guard | 773 | 安全检查：拒绝/允许模式匹配、消息长度限制 |
-| ai-cache | 772 | 语义缓存：计算缓存键、命中时短路 |
-| ai-rate-limit | 771 | 限流：RPM / TPM 计数、预扣修正 |
-| ai-proxy | 770 | 核心代理：协议转换、上游路由、token 统计 |
+| ai-prompt-guard | 773 | Security check: deny/allow pattern matching, message length limit |
+| ai-cache | 772 | Semantic cache: compute cache key, short-circuit on hit |
+| ai-rate-limit | 771 | Rate limiting: RPM / TPM counting, pre-deduction correction |
+| ai-proxy | 770 | Core proxy: protocol conversion, upstream routing, token accounting |
 
 ---
 
-## 3. 插件配置参考
+## 3. Plugin Configuration Reference
 
 ### 3.1 ai-proxy
 
-核心插件，负责将客户端的 OpenAI / Anthropic 格式请求转换为目标 Provider 的协议，发送请求并转换响应。
+The core plugin responsible for converting client OpenAI / Anthropic format requests into the target Provider's protocol, forwarding the request, and converting the response.
 
-#### 配置字段
+#### Configuration Fields
 
-| 字段 | 类型 | 默认值 | 说明 |
+| Field | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | `""` | 模型逻辑名称（引用 AI Model 的 `name`）；`model_source=config` 时必填 |
-| `model_source` | string | `"config"` | 模型来源：`config`（从插件配置取）或 `request`（从请求体 `model` 字段取） |
-| `route_type` | string | `"llm/v1/chat"` | 路由类型：`llm/v1/chat` 或 `llm/v1/completions` |
-| `client_protocol` | string | `"openai"` | 客户端协议：`openai` 或 `anthropic` |
-| `response_streaming` | string | `"allow"` | 流式策略：`allow`（尊重客户端请求）/ `deny`（强制非流式）/ `always`（强制流式）|
-| `max_request_body_size` | integer | `128` | 最大请求体大小（KB），超出返回 413 |
-| `model_name_header` | boolean | `true` | 是否在响应头 `X-Kong-LLM-Model` 中返回实际模型名 |
-| `timeout` | integer | `60000` | 上游超时（毫秒） |
-| `retries` | integer | `1` | 上游重试次数 |
-| `log_payloads` | boolean | `false` | 是否记录请求/响应体（调试用） |
-| `log_statistics` | boolean | `true` | 是否在日志中记录 token 统计 |
-| `model_routes` | array | `[]` | 智能路由规则（正则匹配 + 加权选择，见下方"智能路由"章节） |
-| `provider` | object | `null` | 内联 Provider 配置（见下方）；配置了 `model_routes` 时可省略 |
+| `model` | string | `""` | Logical model name (references the AI Model `name`); required when `model_source=config` |
+| `model_source` | string | `"config"` | Model source: `config` (from plugin config) or `request` (from request body `model` field) |
+| `route_type` | string | `"llm/v1/chat"` | Route type: `llm/v1/chat` or `llm/v1/completions` |
+| `client_protocol` | string | `"openai"` | Client protocol: `openai` or `anthropic` |
+| `response_streaming` | string | `"allow"` | Streaming policy: `allow` (honor client request) / `deny` (force non-streaming) / `always` (force streaming) |
+| `max_request_body_size` | integer | `128` | Maximum request body size (KB); returns 413 if exceeded |
+| `model_name_header` | boolean | `true` | Whether to return the actual model name in the response header `X-Kong-LLM-Model` |
+| `timeout` | integer | `60000` | Upstream timeout (milliseconds) |
+| `retries` | integer | `1` | Upstream retry count |
+| `log_payloads` | boolean | `false` | Whether to log request/response bodies (for debugging) |
+| `log_statistics` | boolean | `true` | Whether to log token statistics |
+| `model_routes` | array | `[]` | Intelligent routing rules (regex matching + weighted selection, see the "Intelligent Routing" section below) |
+| `provider` | object | `null` | Inline Provider configuration (see below); may be omitted when `model_routes` is configured |
 
-#### 内联 Provider 配置（`provider` 字段）
+#### Inline Provider Configuration (`provider` field)
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `provider_type` | string | Provider 类型：`openai` / `anthropic` / `gemini` / `openai_compat` |
-| `auth_config` | object | 鉴权参数，格式与 AI Provider 实体的 `auth_config` 相同 |
-| `endpoint_url` | string | 可选，自定义上游 URL（覆盖 Provider 默认地址） |
+| `provider_type` | string | Provider type: `openai` / `anthropic` / `gemini` / `openai_compat` |
+| `auth_config` | object | Authentication parameters, same format as the AI Provider entity's `auth_config` |
+| `endpoint_url` | string | Optional, custom upstream URL (overrides Provider default address) |
 
-#### 示例配置
+#### Example Configurations
 
-**OpenAI 标准接入：**
+**Standard OpenAI integration:**
 
 ```json
 {
@@ -228,7 +228,7 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 }
 ```
 
-**允许客户端自选模型（`model_source=request`）：**
+**Allow clients to select their own model (`model_source=request`):**
 
 ```json
 {
@@ -245,28 +245,28 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 }
 ```
 
-客户端在请求体中指定 `"model": "gpt-4o-mini"` 即可，网关会透传该模型名到 OpenAI。
+The client specifies `"model": "gpt-4o-mini"` in the request body, and the gateway passes that model name through to OpenAI.
 
 ---
 
 ### 3.2 ai-rate-limit
 
-对 AI 请求实施 RPM（每分钟请求数）和 TPM（每分钟 Token 数）限流。采用滑动窗口（60 秒），TPM 使用预扣 + 修正机制，保证计量准确。
+Enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) rate limiting on AI requests. Uses a sliding window (60 seconds); TPM uses a pre-deduction + correction mechanism to ensure accurate metering.
 
-#### 配置字段
+#### Configuration Fields
 
-| 字段 | 类型 | 默认值 | 说明 |
+| Field | Type | Default | Description |
 |---|---|---|---|
-| `limit_by` | string | `"consumer"` | 限流维度：`consumer` / `route` / `global` / `virtual_key` |
-| `tpm_limit` | integer | `null` | Token Per Minute 上限，`null` 表示不限 |
-| `rpm_limit` | integer | `null` | Request Per Minute 上限，`null` 表示不限 |
-| `header_name` | string | `"X-AI-Key"` | 读取 Virtual Key 的请求头名称（`limit_by=virtual_key` 时生效） |
-| `error_code` | integer | `429` | 超限时返回的 HTTP 状态码 |
-| `error_message` | string | `"AI rate limit exceeded"` | 超限时返回的错误消息 |
+| `limit_by` | string | `"consumer"` | Rate limit dimension: `consumer` / `route` / `global` / `virtual_key` |
+| `tpm_limit` | integer | `null` | Tokens Per Minute limit; `null` means unlimited |
+| `rpm_limit` | integer | `null` | Requests Per Minute limit; `null` means unlimited |
+| `header_name` | string | `"X-AI-Key"` | Request header name for reading the Virtual Key (effective when `limit_by=virtual_key`) |
+| `error_code` | integer | `429` | HTTP status code returned when limit is exceeded |
+| `error_message` | string | `"AI rate limit exceeded"` | Error message returned when limit is exceeded |
 
-#### 示例配置
+#### Example Configurations
 
-**按 Route 限流，每分钟最多 100 次请求、10 万 Token：**
+**Rate limit by Route: max 100 requests and 100k tokens per minute:**
 
 ```json
 {
@@ -278,7 +278,7 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 }
 ```
 
-**按 Consumer 限流（不限 RPM，仅限 TPM）：**
+**Rate limit by Consumer (no RPM limit, TPM only):**
 
 ```json
 {
@@ -291,24 +291,24 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 
 ### 3.3 ai-cache
 
-对相同问题的 AI 请求进行缓存，降低 LLM 调用成本。当前版本实现了缓存键计算基础设施（SHA256），Redis 后端集成在后续版本提供。
+Caches AI responses to identical questions to reduce LLM call costs. The current version implements the cache key computation infrastructure (SHA256); Redis backend integration will be provided in a future release.
 
-#### 配置字段
+#### Configuration Fields
 
-| 字段 | 类型 | 默认值 | 说明 |
+| Field | Type | Default | Description |
 |---|---|---|---|
-| `cache_ttl` | integer | `300` | 缓存 TTL（秒） |
-| `cache_key_strategy` | string | `"last_question"` | 缓存键策略：`last_question`（仅最后一条 user 消息）/ `all_questions`（所有 user 消息拼接）|
-| `skip_header` | string | `"X-AI-Skip-Cache"` | 客户端发送此 Header 时跳过缓存查找 |
+| `cache_ttl` | integer | `300` | Cache TTL (seconds) |
+| `cache_key_strategy` | string | `"last_question"` | Cache key strategy: `last_question` (only the last user message) / `all_questions` (all user messages concatenated) |
+| `skip_header` | string | `"X-AI-Skip-Cache"` | Skip cache lookup when the client sends this header |
 
-#### 两种缓存键策略对比
+#### Comparison of Cache Key Strategies
 
-| 策略 | 适用场景 | 说明 |
+| Strategy | Use Case | Description |
 |---|---|---|
-| `last_question` | 单轮问答、FAQ 场景 | 仅取最后一条 `role=user` 消息的内容做 SHA256 |
-| `all_questions` | 多轮对话、上下文敏感场景 | 将所有 `role=user` 消息拼接后做 SHA256 |
+| `last_question` | Single-turn Q&A, FAQ scenarios | SHA256 of only the last `role=user` message content |
+| `all_questions` | Multi-turn conversation, context-sensitive scenarios | SHA256 of all `role=user` messages concatenated |
 
-#### 示例配置
+#### Example Configuration
 
 ```json
 {
@@ -318,7 +318,7 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 }
 ```
 
-客户端强制绕过缓存：
+Client forcing cache bypass:
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -331,31 +331,30 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ### 3.4 ai-prompt-guard
 
-对用户输入（`role=user` 的消息）进行安全审查，支持拒绝模式（黑名单）、允许模式（白名单）和消息长度限制。
+Performs security review on user input (`role=user` messages), supporting deny patterns (blacklist), allow patterns (whitelist), and message length limits.
 
-#### 配置字段
+#### Configuration Fields
 
-| 字段 | 类型 | 默认值 | 说明 |
+| Field | Type | Default | Description |
 |---|---|---|---|
-| `deny_patterns` | string[] | `[]` | 拒绝模式列表（正则表达式），匹配任意一条则触发 |
-| `allow_patterns` | string[] | `[]` | 允许模式列表（正则表达式），配置后消息必须匹配至少一条，否则触发 |
-| `max_message_length` | integer | `32768` | 单条消息最大字节数 |
-| `action` | string | `"block"` | 触发后行为：`block`（拦截请求）/ `log_only`（仅记录日志，不拦截）|
-| `error_code` | integer | `400` | 拦截时返回的 HTTP 状态码 |
-| `error_message` | string | `"request blocked by ai-prompt-guard"` | 拦截时返回的错误消息 |
+| `deny_patterns` | string[] | `[]` | Deny pattern list (regex); triggers if any one matches |
+| `allow_patterns` | string[] | `[]` | Allow pattern list (regex); when configured, messages must match at least one, otherwise triggers |
+| `max_message_length` | integer | `32768` | Maximum bytes per message |
+| `action` | string | `"block"` | Action on trigger: `block` (reject request) / `log_only` (log only, do not block) |
+| `error_code` | integer | `400` | HTTP status code returned when blocked |
+| `error_message` | string | `"request blocked by ai-prompt-guard"` | Error message returned when blocked |
 
-> **注意**：`deny_patterns` 和 `allow_patterns` 同时配置时，先执行 deny 检查，再执行 allow 检查（必须通过两者）。`allow_patterns` 为空时白名单逻辑不生效。
+> **Note**: When both `deny_patterns` and `allow_patterns` are configured, the deny check runs first, then the allow check (the message must pass both). When `allow_patterns` is empty, the whitelist logic does not apply.
 
-#### 示例配置
+#### Example Configurations
 
-**屏蔽敏感话题，限制消息长度：**
+**Block sensitive topics and limit message length:**
 
 ```json
 {
   "deny_patterns": [
-    "(?i)(password|secret|api.?key)",
-    "(?i)(hack|exploit|injection)",
-    "忽略.*前面.*指令"
+    "(?i)(password|secret|api.?key|token)",
+    "(?i)(ignore.*previous.*instruction|jailbreak)"
   ],
   "max_message_length": 4096,
   "action": "block",
@@ -364,7 +363,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 }
 ```
 
-**白名单模式（只允许特定主题）：**
+**Allowlist mode (only allow specific topics):**
 
 ```json
 {
@@ -377,7 +376,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 }
 ```
 
-**审计模式（仅记录，不拦截）：**
+**Audit mode (log only, do not block):**
 
 ```json
 {
@@ -388,61 +387,61 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ---
 
-## 4. Admin API 参考
+## 4. Admin API Reference
 
-所有 AI Gateway 专属端点均以 `/ai-` 前缀开头，基础路径为 Admin API 地址（默认 `http://localhost:8001`）。
+All AI Gateway-specific endpoints are prefixed with `/ai-`. The base path is the Admin API address (default `http://localhost:8001`).
 
 ### AI Provider
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/ai-providers` | 列出所有 Provider（支持分页、tag 过滤） |
-| `POST` | `/ai-providers` | 创建 Provider |
-| `GET` | `/ai-providers/{id_or_name}` | 获取单个 Provider |
-| `PATCH` | `/ai-providers/{id_or_name}` | 更新 Provider 部分字段 |
-| `PUT` | `/ai-providers/{id_or_name}` | 替换（upsert）Provider |
-| `DELETE` | `/ai-providers/{id_or_name}` | 删除 Provider |
-| `GET` | `/ai-providers/{id}/ai-models` | 列出该 Provider 下的所有 AI Model |
+| `GET` | `/ai-providers` | List all Providers (supports pagination, tag filtering) |
+| `POST` | `/ai-providers` | Create a Provider |
+| `GET` | `/ai-providers/{id_or_name}` | Get a single Provider |
+| `PATCH` | `/ai-providers/{id_or_name}` | Update Provider fields partially |
+| `PUT` | `/ai-providers/{id_or_name}` | Replace (upsert) a Provider |
+| `DELETE` | `/ai-providers/{id_or_name}` | Delete a Provider |
+| `GET` | `/ai-providers/{id}/ai-models` | List all AI Models under this Provider |
 
-> 所有读取响应中，`auth_config` 的敏感字段（`header_value`、`param_value`、`aws_secret_access_key`、`gcp_service_account_json`）均被替换为 `"***"`。
+> In all read responses, sensitive fields in `auth_config` (`header_value`, `param_value`, `aws_secret_access_key`, `gcp_service_account_json`) are replaced with `"***"`.
 
 ### AI Model
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/ai-models` | 列出所有 AI Model |
-| `POST` | `/ai-models` | 创建 AI Model |
-| `GET` | `/ai-models/{id}` | 获取单个 AI Model |
-| `PATCH` | `/ai-models/{id}` | 更新 AI Model 部分字段 |
-| `PUT` | `/ai-models/{id}` | 替换（upsert）AI Model |
-| `DELETE` | `/ai-models/{id}` | 删除 AI Model |
-| `GET` | `/ai-model-groups` | 列出所有不同的 Model 逻辑名称（即所有 Model Group） |
+| `GET` | `/ai-models` | List all AI Models |
+| `POST` | `/ai-models` | Create an AI Model |
+| `GET` | `/ai-models/{id}` | Get a single AI Model |
+| `PATCH` | `/ai-models/{id}` | Update AI Model fields partially |
+| `PUT` | `/ai-models/{id}` | Replace (upsert) an AI Model |
+| `DELETE` | `/ai-models/{id}` | Delete an AI Model |
+| `GET` | `/ai-model-groups` | List all distinct Model logical names (i.e., all Model Groups) |
 
 ### AI Virtual Key
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/ai-virtual-keys` | 列出所有 Virtual Key |
-| `POST` | `/ai-virtual-keys` | 创建 Virtual Key（一次性返回原始密钥 `key` 字段） |
-| `GET` | `/ai-virtual-keys/{id_or_name}` | 获取单个 Virtual Key |
-| `PATCH` | `/ai-virtual-keys/{id_or_name}` | 更新 Virtual Key 配置 |
-| `DELETE` | `/ai-virtual-keys/{id_or_name}` | 删除 Virtual Key |
-| `POST` | `/ai-virtual-keys/{id}/rotate` | 轮换密钥（生成新密钥，返回新的原始 `key`） |
+| `GET` | `/ai-virtual-keys` | List all Virtual Keys |
+| `POST` | `/ai-virtual-keys` | Create a Virtual Key (raw key returned once in the `key` field) |
+| `GET` | `/ai-virtual-keys/{id_or_name}` | Get a single Virtual Key |
+| `PATCH` | `/ai-virtual-keys/{id_or_name}` | Update Virtual Key configuration |
+| `DELETE` | `/ai-virtual-keys/{id_or_name}` | Delete a Virtual Key |
+| `POST` | `/ai-virtual-keys/{id}/rotate` | Rotate the key (generates a new key, returns the new raw `key`) |
 
-> **安全说明**：`key_hash` 字段在所有响应中均被移除。原始密钥（`key` 字段）仅在 `POST /ai-virtual-keys` 和 `POST /ai-virtual-keys/{id}/rotate` 的成功响应中出现一次，请妥善保存。
+> **Security note**: The `key_hash` field is removed from all responses. The raw key (the `key` field) appears only once — in the successful response of `POST /ai-virtual-keys` and `POST /ai-virtual-keys/{id}/rotate`. Store it securely.
 
 ---
 
-## 5. 多 Provider 负载均衡
+## 5. Multi-Provider Load Balancing
 
-通过给多个 AI Model 设置相同的 `name`，它们自动构成一个 Model Group，ai-proxy 在路由时按 `priority` + `weight` 选择后端。
+By giving multiple AI Models the same `name`, they automatically form a Model Group. The ai-proxy selects the backend by `priority` + `weight` during routing.
 
-### 场景：OpenAI 主力 + Anthropic 备份
+### Scenario: OpenAI Primary + Anthropic Backup
 
-**前提**：
+**Prerequisites**:
 
-- 创建两个 Provider：`openai-prod` 和 `anthropic-prod`
-- 创建两个 AI Model，`name` 均为 `gpt4-tier`，分别指向不同 Provider
+- Create two Providers: `openai-prod` and `anthropic-prod`
+- Create two AI Models both with `name` set to `gpt4-tier`, each pointing to a different Provider
 
 ```bash
 # Provider 1 — OpenAI
@@ -455,7 +454,7 @@ curl -X POST http://localhost:8001/ai-providers \
   -H 'Content-Type: application/json' \
   -d '{"name": "anthropic-prod", "provider_type": "anthropic", "auth_config": {"header_name": "x-api-key", "header_value": "sk-ant-..."}}'
 
-# AI Model A — 主力（priority=1，高权重）
+# AI Model A — Primary (priority=1, high weight)
 OPENAI_ID="<openai provider id>"
 curl -X POST http://localhost:8001/ai-models \
   -H 'Content-Type: application/json' \
@@ -467,7 +466,7 @@ curl -X POST http://localhost:8001/ai-models \
     \"weight\": 90
   }"
 
-# AI Model B — 备份（priority=2，低权重）
+# AI Model B — Backup (priority=2, low weight)
 ANTHROPIC_ID="<anthropic provider id>"
 curl -X POST http://localhost:8001/ai-models \
   -H 'Content-Type: application/json' \
@@ -480,7 +479,7 @@ curl -X POST http://localhost:8001/ai-models \
   }"
 ```
 
-在 ai-proxy 插件中引用逻辑名称 `gpt4-tier`：
+Reference the logical name `gpt4-tier` in the ai-proxy plugin:
 
 ```json
 {
@@ -489,37 +488,37 @@ curl -X POST http://localhost:8001/ai-models \
 }
 ```
 
-网关将按 `priority` 选择最优 Provider，同 priority 内按 `weight` 加权路由。
+The gateway selects the best Provider by `priority`; within the same priority, traffic is distributed by `weight`.
 
-### 查看 Model Group
+### View Model Groups
 
 ```bash
 curl http://localhost:8001/ai-model-groups
-# 返回所有不同的 name，即所有 Model Group 列表
+# Returns all distinct names, i.e., the list of all Model Groups
 ```
 
 ---
 
-## 6. 双协议支持
+## 6. Dual Protocol Support
 
-Kong-Rust AI Gateway 支持同时暴露两种客户端协议：
+Kong-Rust AI Gateway supports exposing two client protocols simultaneously:
 
-- **OpenAI 协议**（`client_protocol=openai`）：客户端使用 `POST /v1/chat/completions` 格式
-- **Anthropic 协议**（`client_protocol=anthropic`）：客户端使用 `POST /v1/messages` 格式
+- **OpenAI protocol** (`client_protocol=openai`): clients use `POST /v1/chat/completions` format
+- **Anthropic protocol** (`client_protocol=anthropic`): clients use `POST /v1/messages` format
 
-无论客户端使用哪种协议，网关内部统一转换为目标 Provider 的格式。
+Regardless of which protocol the client uses, the gateway internally converts it to the target Provider's format.
 
-### 示例：同一后端，两条路由，两种协议
+### Example: Same Backend, Two Routes, Two Protocols
 
-**Route 1 — OpenAI 协议入口：**
+**Route 1 — OpenAI protocol endpoint:**
 
 ```bash
-# 创建路由
+# Create route
 curl -X POST http://localhost:8001/routes \
   -H 'Content-Type: application/json' \
   -d '{"name": "ai-openai", "paths": ["/v1/chat/completions"], "methods": ["POST"], "strip_path": false}'
 
-# 挂载 ai-proxy，client_protocol=openai
+# Attach ai-proxy, client_protocol=openai
 curl -X POST http://localhost:8001/plugins \
   -H 'Content-Type: application/json' \
   -d '{
@@ -536,15 +535,15 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**Route 2 — Anthropic 协议入口：**
+**Route 2 — Anthropic protocol endpoint:**
 
 ```bash
-# 创建路由
+# Create route
 curl -X POST http://localhost:8001/routes \
   -H 'Content-Type: application/json' \
   -d '{"name": "ai-anthropic", "paths": ["/v1/messages"], "methods": ["POST"], "strip_path": false}'
 
-# 挂载 ai-proxy，client_protocol=anthropic
+# Attach ai-proxy, client_protocol=anthropic
 curl -X POST http://localhost:8001/plugins \
   -H 'Content-Type: application/json' \
   -d '{
@@ -561,7 +560,7 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**Anthropic 协议请求示例：**
+**Anthropic protocol request example:**
 
 ```bash
 curl -X POST http://localhost:8000/v1/messages \
@@ -577,20 +576,20 @@ curl -X POST http://localhost:8000/v1/messages \
 
 ---
 
-## 7. 插件组合示例
+## 7. Plugin Combination Examples
 
-下面展示一个完整的生产级配置，将全部 4 个 AI 插件组合使用。
+The following demonstrates a complete production-grade configuration combining all 4 AI plugins.
 
-### 目标
+### Goal
 
-- **ai-prompt-guard**：屏蔽敏感词，限制消息长度（安全第一）
-- **ai-cache**：对相同问题缓存 5 分钟（降低成本）
-- **ai-rate-limit**：每个 Consumer 每分钟最多 60 次请求、6 万 Token（配额管理）
-- **ai-proxy**：路由到 OpenAI gpt-4o（核心代理）
+- **ai-prompt-guard**: Block sensitive content, limit message length (security first)
+- **ai-cache**: Cache identical questions for 5 minutes (cost reduction)
+- **ai-rate-limit**: Max 60 requests and 60k tokens per minute per Consumer (quota management)
+- **ai-proxy**: Route to OpenAI gpt-4o (core proxy)
 
-### 步骤
+### Steps
 
-**第一步**：创建 Route
+**Step 1**: Create the Route
 
 ```bash
 curl -X POST http://localhost:8001/routes \
@@ -603,7 +602,7 @@ curl -X POST http://localhost:8001/routes \
   }'
 ```
 
-**第二步**：挂载 ai-prompt-guard（优先级 773，最先执行）
+**Step 2**: Attach ai-prompt-guard (priority 773, executes first)
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -623,7 +622,7 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**第三步**：挂载 ai-cache（优先级 772）
+**Step 3**: Attach ai-cache (priority 772)
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -638,7 +637,7 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**第四步**：挂载 ai-rate-limit（优先级 771）
+**Step 4**: Attach ai-rate-limit (priority 771)
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -655,7 +654,7 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**第五步**：挂载 ai-proxy（优先级 770，最后执行）
+**Step 5**: Attach ai-proxy (priority 770, executes last)
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -681,32 +680,32 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-### 请求流程
+### Request Flow
 
 ```
-客户端 POST /ai/chat
-  → ai-prompt-guard (773): 内容安全检查 → 违规则 400 返回
-  → ai-cache (772):        缓存键计算，命中则直接返回缓存
-  → ai-rate-limit (771):   RPM/TPM 检查 → 超限则 429 返回
-  → ai-proxy (770):        转换协议，发往 OpenAI，返回结果
-  → ai-cache (772) log:    缓存回写（Redis 集成后生效）
-  → ai-rate-limit (771) log: TPM 预扣修正
-  → ai-proxy (770) log:    写入 token 统计日志
+Client POST /ai/chat
+  → ai-prompt-guard (773): content security check → returns 400 if violation
+  → ai-cache (772):        compute cache key, return cached response on hit
+  → ai-rate-limit (771):   RPM/TPM check → returns 429 if exceeded
+  → ai-proxy (770):        convert protocol, forward to OpenAI, return result
+  → ai-cache (772) log:    write back to cache (effective after Redis integration)
+  → ai-rate-limit (771) log: TPM pre-deduction correction
+  → ai-proxy (770) log:    write token statistics to log
 ```
 
 ---
 
-## 8. 智能模型路由
+## 8. Intelligent Model Routing
 
-ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由：根据请求中的 model 名称，用正则匹配决定路由到哪个 provider + 模型，支持加权分配。
+ai-proxy supports gateway-level intelligent routing via the `model_routes` configuration: based on the model name in the request, regex matching determines which provider + model to route to, with weighted distribution support.
 
-### 8.1 配置结构
+### 8.1 Configuration Structure
 
 ```json
 {
   "model_routes": [
     {
-      "pattern": "正则表达式（匹配请求中的 model 名）",
+      "pattern": "regex (matches the model name in the request)",
       "targets": [
         {
           "provider_type": "openai",
@@ -721,15 +720,15 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-- **`pattern`**：正则表达式，匹配客户端请求体中的 `model` 字段。按规则顺序匹配，第一条命中即生效。
-- **`targets`**：匹配后的候选目标列表。多个 target 时按 `weight` 加权轮询选择。
-- **`weight`**：加权值，默认 `1`。同规则内多个 target 的 weight 决定流量分配比例。
+- **`pattern`**: Regex that matches the `model` field in the client request body. Rules are matched in order; the first match wins.
+- **`targets`**: List of candidate targets after a match. When multiple targets are present, one is selected by weighted round-robin based on `weight`.
+- **`weight`**: Weight value, default `1`. The weights of multiple targets within the same rule determine the traffic distribution ratio.
 
-> **注意**：配置了 `model_routes` 后，`provider` 字段可省略。路由结果直接决定使用哪个 provider。
+> **Note**: When `model_routes` is configured, the `provider` field may be omitted. The routing result directly determines which provider to use.
 
-### 8.2 使用场景
+### 8.2 Use Cases
 
-**场景 1 — A/B 测试（80% OpenAI / 20% Azure）：**
+**Case 1 — A/B testing (80% OpenAI / 20% Azure):**
 
 ```json
 {
@@ -748,7 +747,7 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-**场景 2 — 多 Provider 统一入口：**
+**Case 2 — Multi-provider unified entry point:**
 
 ```json
 {
@@ -787,9 +786,9 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-客户端发送 `model: "claude-3-opus"` → 自动路由到 Anthropic；发送 `model: "gpt-4o"` → 路由到 OpenAI；未匹配的 → 使用 gpt-4o-mini 兜底。
+Client sends `model: "claude-3-opus"` → automatically routed to Anthropic; sends `model: "gpt-4o"` → routed to OpenAI; unmatched → falls back to gpt-4o-mini.
 
-**场景 3 — 成本优化（不同前缀路由到不同价位模型）：**
+**Case 3 — Cost optimization (route different prefixes to different pricing tiers):**
 
 ```json
 {
@@ -813,20 +812,20 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 
 ---
 
-## 9. 支持的 Provider
+## 9. Supported Providers
 
-| Provider | `provider_type` | 默认端点 | 鉴权方式 |
+| Provider | `provider_type` | Default Endpoint | Authentication |
 |---|---|---|---|
 | OpenAI | `openai` | `api.openai.com` | `Authorization: Bearer <key>` |
 | Anthropic | `anthropic` | `api.anthropic.com` | `x-api-key: <key>` |
-| Google Gemini | `gemini` | `generativelanguage.googleapis.com` | `?key=<key>` 或 `Authorization: Bearer <token>` |
-| 通义千问（阿里云） | `openai_compat` | `dashscope.aliyuncs.com` | `Authorization: Bearer <key>` |
-| 混元（腾讯云） | `openai_compat` | 自定义 | `Authorization: Bearer <key>` |
-| 任意 OpenAI 兼容服务 | `openai_compat` | 自定义（`endpoint_url`） | `Authorization: Bearer <key>` |
+| Google Gemini | `gemini` | `generativelanguage.googleapis.com` | `?key=<key>` or `Authorization: Bearer <token>` |
+| Alibaba Cloud Qwen | `openai_compat` | `dashscope.aliyuncs.com` | `Authorization: Bearer <key>` |
+| Tencent Cloud Hunyuan | `openai_compat` | custom | `Authorization: Bearer <key>` |
+| Any OpenAI-compatible service | `openai_compat` | custom (`endpoint_url`) | `Authorization: Bearer <key>` |
 
-### 各 Provider auth_config 示例
+### auth_config Examples per Provider
 
-**OpenAI / openai_compat：**
+**OpenAI / openai_compat:**
 
 ```json
 {
@@ -835,7 +834,7 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-**Anthropic：**
+**Anthropic:**
 
 ```json
 {
@@ -844,7 +843,7 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-**Gemini（Query 参数鉴权）：**
+**Gemini (query parameter authentication):**
 
 ```json
 {
@@ -853,7 +852,7 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 }
 ```
 
-**自定义兼容服务（如本地 Ollama、vLLM）：**
+**Custom compatible service (e.g., local Ollama, vLLM):**
 
 ```bash
 curl -X POST http://localhost:8001/ai-providers \
