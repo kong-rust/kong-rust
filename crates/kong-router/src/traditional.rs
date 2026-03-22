@@ -457,8 +457,10 @@ impl TraditionalRouter {
                     }
                 }
 
+                // Return the actual matched text (not the pattern) for strip_path — 返回实际匹配的文本（而非模式）用于 strip_path
+                let matched_text = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_else(|| pattern.clone());
                 return (
-                    Some(pattern.clone()),
+                    Some(matched_text),
                     UriCaptures { named, unnamed },
                 );
             }
