@@ -408,7 +408,14 @@ pub fn build_status_router(state: AdminState) -> Router {
     Router::new()
         .route("/status", get(status_info))
         .route("/metrics", get(status_metrics))
+        // admin-api-method plugin test endpoint — admin-api-method 测试插件端点
+        .route("/hello", get(status_hello))
         .with_state(state)
+}
+
+/// GET /hello — test endpoint for admin-api-method plugin compatibility — 测试端点，用于 admin-api-method 插件兼容性
+async fn status_hello() -> impl axum::response::IntoResponse {
+    Json(json!({ "hello": "from status api" }))
 }
 
 /// Build the Kong Manager GUI router (static file server for SPA) — 构建 Kong Manager GUI 路由（SPA 静态文件服务）

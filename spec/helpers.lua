@@ -223,6 +223,13 @@ for _, name in ipairs({"services", "routes", "consumers", "plugins", "upstreams"
     _M.db.daos[name] = { schema = { name = name } }
 end
 
+-- Provide global 'kong' object for test compatibility (used by some spec files) — 提供全局 kong 对象供测试兼容性使用
+if not kong then
+    kong = {
+        configuration = _M.test_conf,
+    }
+end
+
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 
 local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
@@ -421,6 +428,34 @@ function _M.start_kong(conf)
         env_str, KONG_RUST_BIN, PID_FILE)
     os.execute(cmd)
 
+    -- When admin_listen=off, health check via status API or just wait — admin_listen=off 时通过 status API 或等待来检查健康
+    local admin_off = conf.admin_listen == "off"
+    local status_listen_val = conf.status_listen
+
+    if admin_off and status_listen_val and status_listen_val ~= "off" then
+        -- Parse status host:port for health check — 解析 status 的 host:port 用于健康检查
+        local shost, sport = status_listen_val:match("([^:]+):(%d+)")
+        if shost and sport then
+            local ok = _M.wait_until(function()
+                local client = _M.http_client(shost, tonumber(sport), 5000)
+                if not client then return false end
+                local res = client:send({ method = "GET", path = "/status" })
+                return res and res.status == 200
+            end, 30)
+            if not ok then
+                _M.stop_kong()
+                error("Kong-Rust failed to start within 30 seconds (status API check). Check /tmp/gw-spec.log")
+            end
+            return true
+        end
+    end
+
+    if admin_off then
+        -- No admin or status API to check, just wait — 没有可检查的 API，仅等待
+        socket.sleep(3)
+        return true
+    end
+
     local ok = _M.wait_until(function()
         local client = _M.admin_client()
         if not client then return false end
@@ -430,7 +465,7 @@ function _M.start_kong(conf)
 
     if not ok then
         _M.stop_kong()
-        error("Kong-Rust failed to start within 30 seconds. Check /tmp/kong-rust-spec.log")
+        error("Kong-Rust failed to start within 30 seconds. Check /tmp/gw-spec.log")
     end
 
     return true
@@ -2174,6 +2209,24 @@ function _M.get_available_port()
   local _, port = server:getsockname()
   server:close()
   return tonumber(port)
+end
+
+---------------------------------------------------------------------------
+-- gRPC / HTTP2 stubs — gRPC / HTTP2 桩函数
+-- These features are not yet implemented in Kong-Rust.
+---------------------------------------------------------------------------
+
+_M.grpcbin_url = "grpc://127.0.0.1:15002"
+_M.grpcbin_ssl_url = "grpcs://127.0.0.1:15003"
+
+-- proxy_client_grpc returns a callable that always fails — 返回始终失败的可调用对象
+function _M.proxy_client_grpc()
+    error("gRPC client is not yet supported in Kong-Rust test framework")
+end
+
+-- http2_client stub — HTTP/2 客户端桩函数
+function _M.http2_client(host, port, tls)
+    error("HTTP/2 client is not yet supported in Kong-Rust test framework")
 end
 
 return _M

@@ -670,6 +670,9 @@ impl ProxyHttp for KongProxy {
         // 4. Set up plugin context (before service check so plugins can short-circuit serviceless routes) — 设置插件上下文（在服务检查之前，以便插件可以短路无服务路由）
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
         ctx.plugin_ctx.service_id = route_match.service_id;
+        // Pass URI captures from regex path matching to plugin context — 将正则路径匹配的 URI 捕获组传递给插件上下文
+        ctx.plugin_ctx.uri_captures_named = route_match.uri_captures.named.clone();
+        ctx.plugin_ctx.uri_captures_unnamed = route_match.uri_captures.unnamed.clone();
 
         // Populate matched route JSON for kong.router.get_route() — 填充匹配路由 JSON 供 kong.router.get_route() 使用
         if let Ok(routes_cache) = self.routes_by_id.read() {

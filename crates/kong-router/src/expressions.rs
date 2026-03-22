@@ -156,6 +156,7 @@ impl ExpressionsRouter {
                     protocols: Arc::clone(&route.protocols),
                     request_buffering: route.request_buffering,
                     response_buffering: route.response_buffering,
+                    uri_captures: crate::UriCaptures::default(),
                 });
             }
         }
