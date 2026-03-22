@@ -2,9 +2,12 @@
 //! 每个 provider（OpenAI、Anthropic、Gemini 等）实现 AiDriver trait
 
 pub mod anthropic;
+pub mod balancer;
 pub mod gemini;
 pub mod openai;
 pub mod openai_compat;
+
+pub use balancer::ModelGroupBalancer;
 
 use crate::codec::{ChatRequest, ChatResponse, SseEvent};
 use crate::models::{AiModel, AiProviderConfig};
