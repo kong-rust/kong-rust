@@ -221,8 +221,8 @@ async fn test_ai_proxy_access_missing_provider_returns_error() {
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("missing inline provider"),
-        "错误信息应包含 'missing inline provider'，实际：{}",
+        err_msg.contains("missing provider") || err_msg.contains("model_routes"),
+        "错误信息应包含 provider 缺失提示，实际：{}",
         err_msg
     );
 }

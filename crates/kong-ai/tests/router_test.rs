@@ -1,292 +1,379 @@
-//! Model Router 测试 — 正则匹配 + 加权选择
-//! Tests for ModelRouter: regex matching and weighted selection
+//! Model Router 测试 — AI 网关智能路由（正则匹配 + 加权选择）
+//! Tests for AI Gateway intelligent model routing: regex matching + weighted selection
 
-use kong_ai::provider::router::{ModelRouteConfig, ModelRouter};
+use kong_ai::provider::router::{ModelRouteConfig, ModelRouter, ModelTargetConfig};
 
-// ============ 辅助函数 ============
+// ============ 辅助函数 — test helpers ============
 
-fn route(pattern: &str, target: &str, weight: u32) -> ModelRouteConfig {
-    ModelRouteConfig {
-        pattern: pattern.to_string(),
-        target_group: target.to_string(),
+fn target(provider: &str, model: &str, weight: u32) -> ModelTargetConfig {
+    ModelTargetConfig {
+        provider_type: provider.to_string(),
+        model_name: model.to_string(),
+        endpoint_url: None,
+        auth_config: serde_json::json!({}),
         weight,
     }
 }
 
-fn route_default(pattern: &str, target: &str) -> ModelRouteConfig {
-    route(pattern, target, 1)
+fn target_with_endpoint(
+    provider: &str,
+    model: &str,
+    endpoint: &str,
+    weight: u32,
+) -> ModelTargetConfig {
+    ModelTargetConfig {
+        provider_type: provider.to_string(),
+        model_name: model.to_string(),
+        endpoint_url: Some(endpoint.to_string()),
+        auth_config: serde_json::json!({"header_value": "test-key"}),
+        weight,
+    }
 }
 
-// ============ 基础正则匹配 ============
+fn rule(pattern: &str, targets: Vec<ModelTargetConfig>) -> ModelRouteConfig {
+    ModelRouteConfig {
+        pattern: pattern.to_string(),
+        targets,
+    }
+}
+
+// ============ 正则匹配 — regex matching ============
 
 #[test]
-fn test_exact_match() {
-    // pattern "^gpt-4$" 匹配 "gpt-4" 但不匹配 "gpt-4o"
-    let router = ModelRouter::from_configs(&[route_default("^gpt-4$", "exact-gpt4")]).unwrap();
-    assert_eq!(router.resolve("gpt-4"), Some("exact-gpt4".to_string()));
-    assert_eq!(router.resolve("gpt-4o"), None);
-    assert_eq!(router.resolve("gpt-4-turbo"), None);
+fn test_exact_match_routes_to_provider() {
+    // 精确匹配 "^gpt-4$" → OpenAI gpt-4，不匹配 "gpt-4o"
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4$",
+        vec![target("openai", "gpt-4", 1)],
+    )])
+    .unwrap();
+
+    let res = router.resolve("gpt-4").unwrap();
+    assert_eq!(res.provider_type, "openai");
+    assert_eq!(res.model.model_name, "gpt-4");
+    assert!(router.resolve("gpt-4o").is_none());
 }
 
 #[test]
-fn test_prefix_match() {
-    // pattern "^gpt-4" 匹配 "gpt-4", "gpt-4o", "gpt-4-turbo"
-    let router = ModelRouter::from_configs(&[route_default("^gpt-4", "openai-gpt4")]).unwrap();
-    assert_eq!(router.resolve("gpt-4"), Some("openai-gpt4".to_string()));
-    assert_eq!(router.resolve("gpt-4o"), Some("openai-gpt4".to_string()));
-    assert_eq!(
-        router.resolve("gpt-4-turbo"),
-        Some("openai-gpt4".to_string())
-    );
-    assert_eq!(router.resolve("claude-3"), None);
+fn test_prefix_match_maps_variants() {
+    // "^gpt-4" 匹配 gpt-4/gpt-4o/gpt-4-turbo → 全部路由到同一 provider
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![target("openai", "gpt-4o", 1)],
+    )])
+    .unwrap();
+
+    for name in &["gpt-4", "gpt-4o", "gpt-4-turbo"] {
+        let res = router.resolve(name).unwrap();
+        assert_eq!(res.provider_type, "openai");
+        // model_name 是路由目标的 model_name，不是请求中的
+        assert_eq!(res.model.model_name, "gpt-4o");
+    }
+    assert!(router.resolve("claude-3").is_none());
 }
 
 #[test]
-fn test_wildcard_match() {
-    // pattern ".*" 匹配所有内容（默认 fallback）
-    let router = ModelRouter::from_configs(&[route_default(".*", "default-fallback")]).unwrap();
+fn test_model_name_preserved_in_resolution() {
+    // resolve 结果中 model.name 保留原始请求的 model 名
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![target("openai", "gpt-4o-2024-08-06", 1)],
+    )])
+    .unwrap();
+
+    let res = router.resolve("gpt-4o-mini").unwrap();
+    assert_eq!(res.model.name, "gpt-4o-mini"); // 原始请求 model
+    assert_eq!(res.model.model_name, "gpt-4o-2024-08-06"); // 实际发给 provider 的
+}
+
+#[test]
+fn test_first_rule_wins() {
+    // 多条规则按顺序匹配，第一条命中即返回（不走后面的通配符）
+    let router = ModelRouter::from_configs(&[
+        rule("^gpt-4", vec![target("openai", "gpt-4o", 1)]),
+        rule("^gpt", vec![target("openai_compat", "gpt-3.5-turbo", 1)]),
+        rule(".*", vec![target("openai", "fallback-model", 1)]),
+    ])
+    .unwrap();
+
+    let res = router.resolve("gpt-4o").unwrap();
+    assert_eq!(res.provider_type, "openai");
+    assert_eq!(res.model.model_name, "gpt-4o");
+
+    let res = router.resolve("gpt-3.5-turbo").unwrap();
+    assert_eq!(res.provider_type, "openai_compat");
+
+    let res = router.resolve("claude-3-opus").unwrap();
+    assert_eq!(res.model.model_name, "fallback-model");
+}
+
+#[test]
+fn test_multi_provider_routing() {
+    // 不同 pattern → 不同 provider
+    let router = ModelRouter::from_configs(&[
+        rule("^gpt-4", vec![target("openai", "gpt-4o", 1)]),
+        rule("^claude", vec![target("anthropic", "claude-3-opus-20240229", 1)]),
+        rule("^gemini", vec![target("gemini", "gemini-pro", 1)]),
+        rule("^qwen", vec![target_with_endpoint("openai_compat", "qwen-turbo", "https://dashscope.aliyuncs.com", 1)]),
+    ])
+    .unwrap();
+
+    let res = router.resolve("gpt-4o").unwrap();
+    assert_eq!(res.provider_type, "openai");
+
+    let res = router.resolve("claude-3-opus").unwrap();
+    assert_eq!(res.provider_type, "anthropic");
+    assert_eq!(res.model.model_name, "claude-3-opus-20240229");
+
+    let res = router.resolve("gemini-pro-vision").unwrap();
+    assert_eq!(res.provider_type, "gemini");
+
+    let res = router.resolve("qwen-turbo-latest").unwrap();
+    assert_eq!(res.provider_type, "openai_compat");
     assert_eq!(
-        router.resolve("gpt-4"),
-        Some("default-fallback".to_string())
+        res.provider_config.endpoint_url.as_deref(),
+        Some("https://dashscope.aliyuncs.com")
     );
-    assert_eq!(
-        router.resolve("claude-3"),
-        Some("default-fallback".to_string())
-    );
-    assert_eq!(
-        router.resolve("anything"),
-        Some("default-fallback".to_string())
-    );
+
+    assert!(router.resolve("llama-3").is_none());
 }
 
 #[test]
 fn test_no_match_returns_none() {
-    // pattern "^gpt-4" 不匹配 "claude-3"
-    let router = ModelRouter::from_configs(&[route_default("^gpt-4", "openai")]).unwrap();
-    assert_eq!(router.resolve("claude-3"), None);
-}
-
-#[test]
-fn test_first_match_wins_no_weights() {
-    // 两条规则："^gpt.*" → "group-a", ".*" → "default"
-    // "gpt-4" 同时匹配两条，但只有一条匹配时返回该条
-    // 当 "claude-3" 只匹配 ".*" 时返回 "default"
-    let router = ModelRouter::from_configs(&[
-        route_default("^gpt.*", "group-a"),
-        route_default(".*", "default"),
-    ])
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![target("openai", "gpt-4o", 1)],
+    )])
     .unwrap();
-
-    // "claude-3" 只匹配 ".*" → "default"
-    assert_eq!(router.resolve("claude-3"), Some("default".to_string()));
-
-    // "gpt-4" 匹配两条，加权轮询（equal weight=1,1）→ 交替返回
-    // 但两条都有 weight=1，所以应该 50/50 分布
-    let mut group_a_count = 0;
-    let mut default_count = 0;
-    for _ in 0..100 {
-        match router.resolve("gpt-4").as_deref() {
-            Some("group-a") => group_a_count += 1,
-            Some("default") => default_count += 1,
-            other => panic!("unexpected result: {:?}", other),
-        }
-    }
-    assert_eq!(group_a_count, 50);
-    assert_eq!(default_count, 50);
-}
-
-// ============ 加权路由 ============
-
-#[test]
-fn test_weighted_routing_distribution() {
-    // pattern "^gpt-4" → "group-a" weight=80
-    // pattern "^gpt-4" → "group-b" weight=20
-    // 1000 次调用：group-a ~800, group-b ~200
-    let router = ModelRouter::from_configs(&[
-        route("^gpt-4", "group-a", 80),
-        route("^gpt-4", "group-b", 20),
-    ])
-    .unwrap();
-
-    let mut counts = std::collections::HashMap::new();
-    for _ in 0..1000 {
-        let result = router.resolve("gpt-4").unwrap();
-        *counts.entry(result).or_insert(0) += 1;
-    }
-
-    let a = *counts.get("group-a").unwrap_or(&0);
-    let b = *counts.get("group-b").unwrap_or(&0);
-
-    // 加权轮询是确定性的：800/200 精确分布
-    assert_eq!(a, 800, "group-a should get exactly 800 out of 1000");
-    assert_eq!(b, 200, "group-b should get exactly 200 out of 1000");
-}
-
-#[test]
-fn test_weighted_routing_single_weight() {
-    // 只有一条匹配规则 → 始终返回该目标
-    let router = ModelRouter::from_configs(&[route("^gpt-4", "only-group", 50)]).unwrap();
-
-    for _ in 0..100 {
-        assert_eq!(
-            router.resolve("gpt-4"),
-            Some("only-group".to_string())
-        );
-    }
-}
-
-#[test]
-fn test_weighted_routing_equal_weights() {
-    // 两条规则 weight=1, weight=1 → ~50/50 分布
-    let router = ModelRouter::from_configs(&[
-        route("^gpt-4", "group-x", 1),
-        route("^gpt-4", "group-y", 1),
-    ])
-    .unwrap();
-
-    let mut x_count = 0;
-    let mut y_count = 0;
-    for _ in 0..100 {
-        match router.resolve("gpt-4").as_deref() {
-            Some("group-x") => x_count += 1,
-            Some("group-y") => y_count += 1,
-            other => panic!("unexpected: {:?}", other),
-        }
-    }
-    assert_eq!(x_count, 50);
-    assert_eq!(y_count, 50);
-}
-
-// ============ 复杂场景 ============
-
-#[test]
-fn test_multiple_patterns_different_models() {
-    // 多模式匹配不同模型
-    let router = ModelRouter::from_configs(&[
-        route_default("^gpt-4", "openai"),
-        route_default("^claude", "anthropic"),
-        route_default("^gemini", "google"),
-    ])
-    .unwrap();
-
-    assert_eq!(router.resolve("gpt-4o"), Some("openai".to_string()));
-    assert_eq!(
-        router.resolve("claude-3-opus"),
-        Some("anthropic".to_string())
-    );
-    assert_eq!(
-        router.resolve("gemini-pro"),
-        Some("google".to_string())
-    );
-    assert_eq!(router.resolve("llama-3"), None);
+    assert!(router.resolve("claude-3").is_none());
 }
 
 #[test]
 fn test_case_sensitive_by_default() {
-    // 默认大小写敏感："^GPT-4" 不匹配 "gpt-4"
-    let router = ModelRouter::from_configs(&[route_default("^GPT-4", "uppercase")]).unwrap();
-    assert_eq!(router.resolve("GPT-4"), Some("uppercase".to_string()));
-    assert_eq!(router.resolve("gpt-4"), None);
+    let router = ModelRouter::from_configs(&[rule(
+        "^GPT-4",
+        vec![target("openai", "gpt-4", 1)],
+    )])
+    .unwrap();
+    assert!(router.resolve("GPT-4").is_some());
+    assert!(router.resolve("gpt-4").is_none());
 }
 
 #[test]
 fn test_case_insensitive_with_flag() {
-    // 使用 (?i) 标志进行大小写不敏感匹配
-    let router =
-        ModelRouter::from_configs(&[route_default("(?i)^gpt-4", "case-insensitive")]).unwrap();
-    assert_eq!(
-        router.resolve("GPT-4"),
-        Some("case-insensitive".to_string())
-    );
-    assert_eq!(
-        router.resolve("gpt-4"),
-        Some("case-insensitive".to_string())
-    );
-    assert_eq!(
-        router.resolve("Gpt-4-turbo"),
-        Some("case-insensitive".to_string())
-    );
+    let router = ModelRouter::from_configs(&[rule(
+        "(?i)^gpt-4",
+        vec![target("openai", "gpt-4", 1)],
+    )])
+    .unwrap();
+    assert!(router.resolve("GPT-4").is_some());
+    assert!(router.resolve("gpt-4").is_some());
+    assert!(router.resolve("Gpt-4-turbo").is_some());
+}
+
+// ============ 加权路由 — weighted routing ============
+
+#[test]
+fn test_weighted_routing_80_20_distribution() {
+    // 同一 pattern 下两个 target：80% OpenAI / 20% Azure
+    // 加权轮询是确定性的，1000 次应精确 800/200
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target_with_endpoint("openai", "gpt-4o", "https://api.openai.com", 80),
+            target_with_endpoint("openai_compat", "gpt-4o", "https://azure.openai.com", 20),
+        ],
+    )])
+    .unwrap();
+
+    let mut openai_count = 0;
+    let mut azure_count = 0;
+    for _ in 0..1000 {
+        let res = router.resolve("gpt-4o").unwrap();
+        match res.provider_type.as_str() {
+            "openai" => openai_count += 1,
+            "openai_compat" => azure_count += 1,
+            other => panic!("unexpected provider: {}", other),
+        }
+    }
+    assert_eq!(openai_count, 800, "OpenAI should get exactly 800/1000");
+    assert_eq!(azure_count, 200, "Azure should get exactly 200/1000");
 }
 
 #[test]
+fn test_weighted_routing_equal_weights() {
+    // 权重 1:1 → 50/50 分布
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target("openai", "gpt-4o", 1),
+            target("openai_compat", "gpt-4o", 1),
+        ],
+    )])
+    .unwrap();
+
+    let mut counts = [0u32; 2];
+    for _ in 0..100 {
+        let res = router.resolve("gpt-4o").unwrap();
+        match res.provider_type.as_str() {
+            "openai" => counts[0] += 1,
+            "openai_compat" => counts[1] += 1,
+            _ => panic!("unexpected"),
+        }
+    }
+    assert_eq!(counts[0], 50);
+    assert_eq!(counts[1], 50);
+}
+
+#[test]
+fn test_weighted_routing_single_target() {
+    // 只有一个 target → 始终返回该 target（无需加权）
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![target("openai", "gpt-4o", 100)],
+    )])
+    .unwrap();
+
+    for _ in 0..100 {
+        let res = router.resolve("gpt-4o").unwrap();
+        assert_eq!(res.provider_type, "openai");
+    }
+}
+
+#[test]
+fn test_weighted_routing_three_targets() {
+    // 三路加权：50/30/20
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target("openai", "gpt-4o", 50),
+            target_with_endpoint("openai_compat", "gpt-4o", "https://azure.com", 30),
+            target_with_endpoint("openai_compat", "gpt-4o", "https://us-east.azure.com", 20),
+        ],
+    )])
+    .unwrap();
+
+    let mut counts = std::collections::HashMap::new();
+    for _ in 0..1000 {
+        let res = router.resolve("gpt-4o").unwrap();
+        let key = res
+            .provider_config
+            .endpoint_url
+            .unwrap_or_else(|| "default".to_string());
+        *counts.entry(key).or_insert(0u32) += 1;
+    }
+    assert_eq!(*counts.get("default").unwrap_or(&0), 500);
+    assert_eq!(*counts.get("https://azure.com").unwrap_or(&0), 300);
+    assert_eq!(*counts.get("https://us-east.azure.com").unwrap_or(&0), 200);
+}
+
+#[test]
+fn test_weighted_routing_preserves_auth_config() {
+    // 验证路由结果保留了 auth_config
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt",
+        vec![ModelTargetConfig {
+            provider_type: "openai".to_string(),
+            model_name: "gpt-4o".to_string(),
+            endpoint_url: None,
+            auth_config: serde_json::json!({"header_value": "sk-my-secret-key"}),
+            weight: 1,
+        }],
+    )])
+    .unwrap();
+
+    let res = router.resolve("gpt-4o").unwrap();
+    assert_eq!(
+        res.provider_config.auth_config["header_value"],
+        "sk-my-secret-key"
+    );
+}
+
+// ============ 边界情况 — edge cases ============
+
+#[test]
 fn test_empty_routes_returns_none() {
-    // 空路由表 → resolve 返回 None
     let router = ModelRouter::from_configs(&[]).unwrap();
-    assert_eq!(router.resolve("gpt-4"), None);
-    assert_eq!(router.resolve("anything"), None);
+    assert!(router.resolve("gpt-4").is_none());
 }
 
 #[test]
 fn test_invalid_regex_returns_error() {
-    // 无效正则 → from_configs 返回 Err
-    let result = ModelRouter::from_configs(&[route_default("[invalid", "target")]);
+    let result = ModelRouter::from_configs(&[rule(
+        "[invalid",
+        vec![target("openai", "gpt-4", 1)],
+    )]);
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
-    assert!(
-        err_msg.contains("invalid model route regex"),
-        "error message should mention invalid regex, got: {}",
-        err_msg
-    );
+    assert!(err_msg.contains("invalid model route regex"));
 }
-
-// ============ from_configs 构建 ============
 
 #[test]
-fn test_from_configs_builds_correctly() {
-    // 验证 ModelRouteConfig → ModelRouter 转换正常
-    let configs = vec![
-        route("^gpt-4.*", "openai-gpt4", 80),
-        route("^gpt-4.*", "azure-gpt4", 20),
-        route_default("^claude-.*", "anthropic-claude"),
-        route_default(".*", "default-fallback"),
-    ];
-
-    let router = ModelRouter::from_configs(&configs).unwrap();
-
-    // gpt-4o 匹配前两条 + 最后一条 → 加权选择
-    let result = router.resolve("gpt-4o");
-    assert!(result.is_some());
-
-    // claude-3 匹配第三条 + 最后一条
-    let result = router.resolve("claude-3");
-    assert!(result.is_some());
-
-    // unknown 只匹配 ".*" → default-fallback
-    assert_eq!(
-        router.resolve("unknown-model"),
-        Some("default-fallback".to_string())
-    );
+fn test_empty_targets_returns_error() {
+    let result = ModelRouter::from_configs(&[rule("^gpt-4", vec![])]);
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(err_msg.contains("has no targets"));
 }
 
-// ============ 集成测试 — 与 ai-proxy 配置的集成 ============
+#[test]
+fn test_wildcard_fallback() {
+    // ".*" 作为最后的兜底规则
+    let router = ModelRouter::from_configs(&[
+        rule("^gpt", vec![target("openai", "gpt-4o", 1)]),
+        rule(".*", vec![target("openai_compat", "default-model", 1)]),
+    ])
+    .unwrap();
+
+    // 不匹配 gpt → 命中通配符
+    let res = router.resolve("llama-3").unwrap();
+    assert_eq!(res.provider_type, "openai_compat");
+    assert_eq!(res.model.model_name, "default-model");
+}
+
+// ============ 配置序列化 — config deserialization ============
 
 #[test]
 fn test_ai_proxy_config_with_model_routes() {
-    // 验证 AiProxyConfig 能正确解析 model_routes 字段
+    // 验证完整 JSON 配置可正确反序列化
     let json = serde_json::json!({
-        "model": "gpt-4",
         "model_routes": [
-            { "pattern": "^gpt-4.*", "target_group": "openai-gpt4", "weight": 80 },
-            { "pattern": "^gpt-4.*", "target_group": "azure-gpt4", "weight": 20 },
-            { "pattern": "^claude-.*", "target_group": "anthropic-claude" },
-            { "pattern": ".*", "target_group": "default-fallback" }
-        ],
-        "provider": {
-            "provider_type": "openai",
-            "auth_config": { "api_key": "test-key" }
-        }
+            {
+                "pattern": "^gpt-4",
+                "targets": [
+                    { "provider_type": "openai", "model_name": "gpt-4o", "weight": 80,
+                      "auth_config": { "header_value": "sk-openai" } },
+                    { "provider_type": "openai_compat", "model_name": "gpt-4o", "weight": 20,
+                      "endpoint_url": "https://azure.openai.com",
+                      "auth_config": { "header_value": "azure-key" } }
+                ]
+            },
+            {
+                "pattern": "^claude",
+                "targets": [
+                    { "provider_type": "anthropic", "model_name": "claude-3-opus-20240229",
+                      "auth_config": { "header_value": "sk-ant-xxx" } }
+                ]
+            }
+        ]
     });
 
     let cfg: kong_ai::plugins::ai_proxy::AiProxyConfig =
-        serde_json::from_value(json).expect("should parse AiProxyConfig with model_routes");
+        serde_json::from_value(json).expect("should parse");
 
-    assert_eq!(cfg.model_routes.len(), 4);
-    assert_eq!(cfg.model_routes[0].pattern, "^gpt-4.*");
-    assert_eq!(cfg.model_routes[0].target_group, "openai-gpt4");
-    assert_eq!(cfg.model_routes[0].weight, 80);
-    assert_eq!(cfg.model_routes[2].target_group, "anthropic-claude");
+    assert_eq!(cfg.model_routes.len(), 2);
+    assert_eq!(cfg.model_routes[0].pattern, "^gpt-4");
+    assert_eq!(cfg.model_routes[0].targets.len(), 2);
+    assert_eq!(cfg.model_routes[0].targets[0].provider_type, "openai");
+    assert_eq!(cfg.model_routes[0].targets[0].weight, 80);
+    assert_eq!(cfg.model_routes[0].targets[1].provider_type, "openai_compat");
+    assert_eq!(
+        cfg.model_routes[0].targets[1].endpoint_url.as_deref(),
+        Some("https://azure.openai.com")
+    );
+    assert_eq!(cfg.model_routes[1].targets[0].provider_type, "anthropic");
     // 默认 weight=1
-    assert_eq!(cfg.model_routes[2].weight, 1);
+    assert_eq!(cfg.model_routes[1].targets[0].weight, 1);
 }
 
 #[test]
@@ -294,13 +381,84 @@ fn test_ai_proxy_config_without_model_routes() {
     // 不配置 model_routes 时默认为空
     let json = serde_json::json!({
         "model": "gpt-4",
-        "provider": {
-            "provider_type": "openai"
-        }
+        "provider": { "provider_type": "openai" }
     });
 
     let cfg: kong_ai::plugins::ai_proxy::AiProxyConfig =
-        serde_json::from_value(json).expect("should parse AiProxyConfig without model_routes");
+        serde_json::from_value(json).expect("should parse");
 
     assert!(cfg.model_routes.is_empty());
+}
+
+// ============ 完整使用场景 — realistic usage scenarios ============
+
+#[test]
+fn test_scenario_ab_testing_between_providers() {
+    // 场景：A/B 测试 — 70% 请求走 OpenAI，30% 走自建 vLLM
+    let router = ModelRouter::from_configs(&[rule(
+        "^llm-v1",
+        vec![
+            target("openai", "gpt-4o", 70),
+            target_with_endpoint("openai_compat", "qwen2.5-72b", "http://vllm.internal:8000", 30),
+        ],
+    )])
+    .unwrap();
+
+    let mut openai = 0;
+    let mut vllm = 0;
+    for _ in 0..1000 {
+        let res = router.resolve("llm-v1-chat").unwrap();
+        match res.provider_type.as_str() {
+            "openai" => openai += 1,
+            "openai_compat" => vllm += 1,
+            _ => panic!("unexpected"),
+        }
+    }
+    assert_eq!(openai, 700);
+    assert_eq!(vllm, 300);
+}
+
+#[test]
+fn test_scenario_cost_optimization_routing() {
+    // 场景：成本优化 — 简单请求走便宜模型，复杂请求走贵模型
+    // 通过不同 model 名前缀路由
+    let router = ModelRouter::from_configs(&[
+        rule("^cheap-", vec![target("openai", "gpt-3.5-turbo", 1)]),
+        rule("^smart-", vec![target("anthropic", "claude-3-opus-20240229", 1)]),
+        rule(".*", vec![target("openai", "gpt-4o-mini", 1)]),
+    ])
+    .unwrap();
+
+    let res = router.resolve("cheap-summarize").unwrap();
+    assert_eq!(res.model.model_name, "gpt-3.5-turbo");
+
+    let res = router.resolve("smart-reasoning").unwrap();
+    assert_eq!(res.provider_type, "anthropic");
+
+    let res = router.resolve("anything-else").unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o-mini");
+}
+
+#[test]
+fn test_scenario_multi_region_failover() {
+    // 场景：多区域部署 — 同一模型跨区域加权分配
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target_with_endpoint("openai_compat", "gpt-4o", "https://us-east.azure.com", 50),
+            target_with_endpoint("openai_compat", "gpt-4o", "https://eu-west.azure.com", 30),
+            target_with_endpoint("openai_compat", "gpt-4o", "https://ap-east.azure.com", 20),
+        ],
+    )])
+    .unwrap();
+
+    let mut counts = std::collections::HashMap::new();
+    for _ in 0..1000 {
+        let res = router.resolve("gpt-4o").unwrap();
+        let ep = res.provider_config.endpoint_url.unwrap();
+        *counts.entry(ep).or_insert(0u32) += 1;
+    }
+    assert_eq!(counts["https://us-east.azure.com"], 500);
+    assert_eq!(counts["https://eu-west.azure.com"], 300);
+    assert_eq!(counts["https://ap-east.azure.com"], 200);
 }

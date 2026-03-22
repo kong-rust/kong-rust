@@ -166,7 +166,7 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 2. 确定模型名称
-        let mut model_name = match cfg.model_source.as_str() {
+        let model_name = match cfg.model_source.as_str() {
             "request" => {
                 if chat_request.model.is_empty() {
                     return Err(KongError::PluginError {
@@ -194,56 +194,81 @@ impl PluginHandler for AiProxyPlugin {
             }
         };
 
-        // 2.5 智能路由：如果配置了 model_routes，用正则匹配替代直接使用 model_name
-        if !cfg.model_routes.is_empty() {
-            let router = ModelRouter::from_configs(&cfg.model_routes)?;
-            if let Some(target_group) = router.resolve(&model_name) {
-                debug!("ai-proxy: model '{}' routed to group '{}'", model_name, target_group);
-                // 用 target_group 替代 model_name 作为后续查找的 key
-                // 但保留原始 model_name 在 chat_request 中（客户端可能需要）
-                model_name = target_group;
-            }
-        }
-
         // 3. 确定客户端协议
         let client_protocol = match cfg.client_protocol.as_str() {
             "anthropic" => ClientProtocol::Anthropic,
             _ => ClientProtocol::OpenAi,
         };
 
-        // 4. 获取 provider 配置（MVP 阶段从内联配置取）
-        let inline_provider = cfg.provider.as_ref().ok_or_else(|| KongError::PluginError {
-            plugin_name: "ai-proxy".to_string(),
-            message: "missing inline provider configuration".to_string(),
-        })?;
-
-        let provider_type = &inline_provider.provider_type;
-
-        // 5. 从注册表获取 driver
-        let driver = self
-            .driver_registry
-            .get(provider_type)
-            .ok_or_else(|| KongError::PluginError {
+        // 4. 智能路由 / Intelligent routing
+        // 优先使用 model_routes（AI 网关级智能路由）；fallback 到 inline provider 配置
+        // Priority: model_routes (AI Gateway-level routing) > inline provider config
+        let (driver, ai_model, provider_config) = if !cfg.model_routes.is_empty() {
+            // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
+            // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
+            let router = ModelRouter::from_configs(&cfg.model_routes)?;
+            let resolution = router.resolve(&model_name).ok_or_else(|| KongError::PluginError {
                 plugin_name: "ai-proxy".to_string(),
-                message: format!("unsupported provider type: {}", provider_type),
-            })?
-            .clone();
+                message: format!(
+                    "no model route matched for model '{}' — 无路由规则匹配",
+                    model_name
+                ),
+            })?;
 
-        // 6. 构建 AiModel 和 AiProviderConfig
-        let ai_model = AiModel {
-            name: model_name.clone(),
-            model_name: model_name.clone(),
-            enabled: true,
-            ..Default::default()
-        };
+            let driver = self
+                .driver_registry
+                .get(&resolution.provider_type)
+                .ok_or_else(|| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("unsupported provider type: {}", resolution.provider_type),
+                })?
+                .clone();
 
-        let provider_config = AiProviderConfig {
-            name: provider_type.clone(),
-            provider_type: provider_type.clone(),
-            auth_config: inline_provider.auth_config.clone(),
-            endpoint_url: inline_provider.endpoint_url.clone(),
-            enabled: true,
-            ..Default::default()
+            // 用路由选中的 model_name 覆盖请求体中的 model（实际发给 provider 的名称可能不同）
+            // Override request model with routed model_name (actual name sent to provider may differ)
+            chat_request.model = resolution.model.model_name.clone();
+
+            debug!(
+                "ai-proxy: model '{}' routed → provider={}, model_name={}",
+                model_name, resolution.provider_type, resolution.model.model_name
+            );
+
+            (driver, resolution.model, resolution.provider_config)
+        } else {
+            // Fallback：使用内联 provider 配置（无智能路由时的默认行为）
+            // Fallback: use inline provider config (default behavior without routing)
+            let inline_provider = cfg.provider.as_ref().ok_or_else(|| KongError::PluginError {
+                plugin_name: "ai-proxy".to_string(),
+                message: "missing provider: configure model_routes or inline provider — 需要配置 model_routes 或 inline provider".to_string(),
+            })?;
+
+            let provider_type = &inline_provider.provider_type;
+            let driver = self
+                .driver_registry
+                .get(provider_type)
+                .ok_or_else(|| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("unsupported provider type: {}", provider_type),
+                })?
+                .clone();
+
+            let ai_model = AiModel {
+                name: model_name.clone(),
+                model_name: model_name.clone(),
+                enabled: true,
+                ..Default::default()
+            };
+
+            let provider_config = AiProviderConfig {
+                name: provider_type.clone(),
+                provider_type: provider_type.clone(),
+                auth_config: inline_provider.auth_config.clone(),
+                endpoint_url: inline_provider.endpoint_url.clone(),
+                enabled: true,
+                ..Default::default()
+            };
+
+            (driver, ai_model, provider_config)
         };
 
         // 7. 配置上游连接
@@ -296,6 +321,11 @@ impl PluginHandler for AiProxyPlugin {
             ctx.upstream_headers_to_set.push((k.clone(), v.clone()));
         }
 
+        debug!(
+            "ai-proxy access: model={}, provider={}, stream={}",
+            ai_model.model_name, provider_config.provider_type, stream_mode
+        );
+
         // 11. 存储跨阶段状态
         let ai_state = AiRequestState {
             driver,
@@ -313,11 +343,6 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         ctx.extensions.insert(ai_state);
-
-        debug!(
-            "ai-proxy access: model={}, provider={}, stream={}",
-            model_name, provider_type, stream_mode
-        );
 
         Ok(())
     }
