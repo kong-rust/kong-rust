@@ -229,6 +229,11 @@ fn form_pairs_to_json(pairs: &[(String, String)]) -> Value {
         let is_array = is_array || is_known_array_field(key);
 
         if is_array {
+            // If single empty value for a known array field, treat as null (clear field) — 已知数组字段的单个空值视为 null（清除字段）
+            if entries.len() == 1 && entries[0].1.is_empty() {
+                map.insert(key.clone(), Value::Null);
+                continue;
+            }
             // Build array, respecting dotted indices if present — 构建数组，如有点号索引则按索引排列
             let has_indices = entries.iter().any(|(idx, _)| idx.is_some());
             if has_indices {

@@ -161,6 +161,8 @@ fn is_known_route(path: &str) -> bool {
         ["services", _, sub] if matches!(*sub, "routes" | "plugins") => true,
         // /services/{id}/plugins/{id}
         ["services", _, "plugins", _] => true,
+        // /routes/{id}/service
+        ["routes", _, "service"] => true,
         // /routes/{id}/plugins
         ["routes", _, "plugins"] => true,
         // /routes/{id}/plugins/{id}
@@ -392,6 +394,13 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .patch(update_sni)
                 .put(upsert_sni)
                 .delete(delete_sni),
+        )
+        // Routes nested service — 路由嵌套 service 端点
+        .route(
+            "/routes/{route_id_or_name}/service",
+            get(handlers::get_route_service)
+                .patch(handlers::update_route_service)
+                .put(handlers::upsert_route_service),
         )
         // Certificates nested SNIs — 证书嵌套 SNI 路由
         .route(

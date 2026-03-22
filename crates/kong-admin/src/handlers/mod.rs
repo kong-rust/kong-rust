@@ -1320,14 +1320,17 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 let has_routing_field = has_field("methods") || has_field("hosts") || has_field("headers")
                     || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
                 if !has_routing_field {
+                    let protocols_str = obj.get("protocols").and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("', '"))
+                        .unwrap_or_else(|| "grpcs', 'https', 'http', 'grpc".to_string());
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json!({
-                            "message": "schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is 'grpcs', 'https', 'http', 'grpc')",
+                            "message": format!("schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}')", protocols_str),
                             "name": "schema violation",
                             "code": 2,
                             "fields": {
-                                "@entity": ["must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is 'grpcs', 'https', 'http', 'grpc'"]
+                                "@entity": [format!("must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}'", protocols_str)]
                             },
                         })),
                     );
@@ -1666,6 +1669,45 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
                         },
                     })),
                 );
+            }
+        }
+    }
+
+    // Route must have at least one routing field for upsert — upsert 时 Route 也需要至少一个路由匹配字段
+    if T::table_name() == "routes" {
+        if let Some(obj) = body.as_object_mut() {
+            let has_field = |name: &str| -> bool {
+                match obj.get(name) {
+                    Some(Value::Array(a)) => !a.is_empty(),
+                    Some(Value::Object(o)) => !o.is_empty(),
+                    Some(Value::Null) | None => false,
+                    Some(_) => true,
+                }
+            };
+            let has_routing = has_field("methods") || has_field("hosts") || has_field("headers")
+                || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
+            if !has_routing {
+                let protocols = obj.get("protocols").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("', '"))
+                    .unwrap_or_else(|| "grpcs', 'https', 'http', 'grpc".to_string());
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": format!("schema violation (must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}')", protocols),
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "@entity": [format!("must set one of 'methods', 'hosts', 'headers', 'paths', 'snis' when 'protocols' is '{}'", protocols)]
+                        },
+                    })),
+                );
+            }
+            // gRPC routes: strip_path forced to false — gRPC 路由：strip_path 强制为 false
+            let is_grpc = obj.get("protocols").and_then(|v| v.as_array()).map_or(false, |arr| {
+                arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
+            });
+            if is_grpc {
+                obj.insert("strip_path".to_string(), json!(false));
             }
         }
     }
@@ -2255,6 +2297,78 @@ pub async fn create_certificate_sni(
     let result = do_create::<Sni>(&state.snis, body).await;
     let _ = state.refresh_tx.send("snis");
     result
+}
+
+// ============ Route ↔ Service nested endpoints — 路由 ↔ 服务嵌套端点 ============
+
+/// GET /routes/{route_id_or_name}/service — get the service associated with a route — 获取路由关联的服务
+pub async fn get_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let service_id = match &route.service {
+        Some(fk) => fk.id.to_string(),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    match state.services.select(&PrimaryKey::Id(uuid::Uuid::parse_str(&service_id).unwrap())).await {
+        Ok(Some(svc)) => (StatusCode::OK, Json(serde_json::to_value(&svc).unwrap_or(json!(null)))),
+        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    }
+}
+
+/// PATCH /routes/{route_id_or_name}/service — update the service associated with a route — 更新路由关联的服务
+pub async fn update_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let service_id = match &route.service {
+        Some(fk) => fk.id.to_string(),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let result = do_update::<Service>(&state.services, &service_id, &body.0).await;
+    let _ = state.refresh_tx.send("services");
+    result
+}
+
+/// PUT /routes/{route_id_or_name}/service — create or replace the service associated with a route — 创建或替换路由关联的服务
+pub async fn upsert_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let body = body.0;
+    if let Some(fk) = &route.service {
+        let result = do_upsert::<Service>(&state.services, &fk.id.to_string(), body).await;
+        let _ = state.refresh_tx.send("services");
+        result
+    } else {
+        let result = do_create::<Service>(&state.services, body.clone()).await;
+        let _ = state.refresh_tx.send("services");
+        if let (StatusCode::CREATED, Json(ref svc_json)) = result {
+            if let Some(svc_id) = svc_json.get("id").and_then(|v| v.as_str()) {
+                let update_body = json!({"service": {"id": svc_id}});
+                let _ = do_update::<Route>(&state.routes, &route_id_or_name, &update_body).await;
+                let _ = state.refresh_tx.send("routes");
+            }
+        }
+        result
+    }
 }
 
 /// Resolve a certificate identifier that may be a UUID or an SNI name — 解析可能是 UUID 或 SNI 名称的证书标识符

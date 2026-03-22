@@ -733,7 +733,9 @@ function Blueprint:new(admin_client)
     end
 
     -- default data generators for "named_*" entities — "named_*" 实体的默认数据生成器
-    local defaults_generators = {
+    -- Declare first so closures can reference it — 先声明使闭包能引用
+    local defaults_generators
+    defaults_generators = {
         named_services = function(overrides)
             local n = next_seq()
             local defaults = {
