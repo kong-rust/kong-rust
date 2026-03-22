@@ -65,3 +65,4 @@ kong-manager/bundle-analyzer/
 # AI 工具
 # ========================
 CLAUDE.md
+.gstack/

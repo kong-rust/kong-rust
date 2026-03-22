@@ -1324,3 +1324,58 @@ pub fn vault_schema() -> EntitySchema {
         .tags()
         .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
+
+/// Create Schema for AiProviderConfig entity — 创建 AI Provider 实体的 Schema
+pub fn ai_provider_schema() -> EntitySchema {
+    EntitySchema::new("ai_providers")
+        .pk()
+        .timestamps()
+        .text("name")
+        .text("provider_type")
+        .text_opt("endpoint_url")
+        .jsonb("auth_config")
+        .text_opt("default_model")
+        .jsonb("config")
+        .boolean("enabled")
+        .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}
+
+/// Create Schema for AiModel entity — 创建 AI Model 实体的 Schema
+pub fn ai_model_schema() -> EntitySchema {
+    EntitySchema::new("ai_models")
+        .pk()
+        .timestamps()
+        .text("name")
+        .column("provider_id", "provider_id", ColumnType::Uuid, false)
+        .text("model_name")
+        .integer("priority")
+        .integer("weight")
+        .float_opt("input_cost")
+        .float_opt("output_cost")
+        .integer_opt("max_tokens")
+        .jsonb("config")
+        .boolean("enabled")
+        .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}
+
+/// Create Schema for AiVirtualKey entity — 创建 AI Virtual Key 实体的 Schema
+pub fn ai_virtual_key_schema() -> EntitySchema {
+    EntitySchema::new("ai_virtual_keys")
+        .pk()
+        .timestamps()
+        .text("name")
+        .text("key_hash")
+        .text("key_prefix")
+        .column("consumer_id", "consumer_id", ColumnType::Uuid, true)
+        .text_array("allowed_models")
+        .integer_opt("tpm_limit")
+        .integer_opt("rpm_limit")
+        .float_opt("budget_limit")
+        .float("budget_used")
+        .boolean("enabled")
+        .column("expires_at", "expires_at", ColumnType::Timestamp, true)
+        .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}

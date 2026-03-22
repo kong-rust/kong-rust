@@ -10,6 +10,7 @@ members = [
     "crates/kong-lua-bridge",
     "crates/kong-admin",
     "crates/kong-server",
+    "crates/kong-ai",
 ]
 
 [workspace.package]
@@ -71,8 +72,14 @@ mime = "0.3"
 hickory-resolver = "0.25"
 tempfile = "3"
 
+# AI Gateway 依赖
+anymap2 = "0.13"
+tiktoken-rs = "0.6"
+dashmap = "6"
+
 # Workspace crates
 kong-core = { path = "crates/kong-core" }
+kong-ai = { path = "crates/kong-ai" }
 kong-config = { path = "crates/kong-config" }
 kong-db = { path = "crates/kong-db" }
 kong-router = { path = "crates/kong-router" }

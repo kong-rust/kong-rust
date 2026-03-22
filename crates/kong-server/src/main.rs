@@ -236,6 +236,12 @@ fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system
         }
     }
 
+    // 注册 Rust 原生 AI 插件
+    registry.register("ai-proxy", Arc::new(kong_ai::plugins::AiProxyPlugin::new()));
+    registry.register("ai-rate-limit", Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()));
+    registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
+    registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
+
     registry
 }
 
@@ -586,6 +592,9 @@ async fn init_proxy_and_admin(
             snis: Arc::new(DblessDao::<Sni>::new(Arc::clone(&store))),
             ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(Arc::clone(&store))),
             vaults: Arc::new(DblessDao::<Vault>::new(Arc::clone(&store))),
+            ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(Arc::clone(&store))),
+            ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(&store))),
+            ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(&store))),
             node_id,
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
@@ -698,6 +707,9 @@ async fn init_proxy_and_admin(
                 ca_certificate_schema(),
             )),
             vaults: Arc::new(PgDao::<Vault>::new(db.clone(), vault_schema())),
+            ai_providers: Arc::new(PgDao::<kong_ai::models::AiProviderConfig>::new(db.clone(), ai_provider_schema())),
+            ai_models: Arc::new(PgDao::<kong_ai::models::AiModel>::new(db.clone(), ai_model_schema())),
+            ai_virtual_keys: Arc::new(PgDao::<kong_ai::models::AiVirtualKey>::new(db.clone(), ai_virtual_key_schema())),
             node_id,
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),

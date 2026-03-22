@@ -72,22 +72,11 @@ jobs:
           KONG_PG_DATABASE: kong_tests
         run: ./target/debug/kong db bootstrap
 
-      - name: Run smoke tests
+      - name: Run all spec tests
         env:
           KONG_SPEC_TEST_PG_HOST: 127.0.0.1
           KONG_SPEC_TEST_PG_PORT: "5432"
           KONG_SPEC_TEST_PG_USER: kong
           KONG_SPEC_TEST_PG_PASSWORD: kong
           KONG_SPEC_TEST_PG_DATABASE: kong_tests
-        run: make spec-smoke
-
-      - name: Run Admin API spec tests
-        env:
-          KONG_SPEC_TEST_PG_HOST: 127.0.0.1
-          KONG_SPEC_TEST_PG_PORT: "5432"
-          KONG_SPEC_TEST_PG_USER: kong
-          KONG_SPEC_TEST_PG_PASSWORD: kong
-          KONG_SPEC_TEST_PG_DATABASE: kong_tests
-        run: |
-          bash scripts/run-specs.sh spec/02-integration/04-admin_api/10-services_routes_spec.lua || true
-        continue-on-error: true
+        run: make spec
