@@ -221,6 +221,38 @@ fn error_response(err: KongError) -> Response {
 /// Enrich UNIQUE violation error with actual field values from the request body
 /// 用请求体中的实际字段值丰富 UNIQUE 冲突错误消息
 /// Returns (message, optional fields object) — 返回 (消息, 可选的 fields 对象)
+/// Validate upstream name: must be valid hostname, not IP — 验证 upstream 名称：有效主机名，不能是 IP
+fn validate_upstream_name(name: &str) -> Option<(StatusCode, Json<Value>)> {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("Invalid name ('{}'); no ip addresses allowed", name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": { "name": format!("Invalid name ('{}'); no ip addresses allowed", name) },
+            })),
+        ));
+    }
+    let is_valid = !name.is_empty() && !name.contains(' ')
+        && name.split('.').all(|label| {
+            !label.is_empty() && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+    if !is_valid {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("schema violation (name: Invalid name ('{}'); must be a valid hostname)", name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": { "name": format!("Invalid name ('{}'); must be a valid hostname", name) },
+            })),
+        ));
+    }
+    None
+}
+
 fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Value>) {
     let msg = err.to_string();
     if let KongError::UniqueViolation(inner) = err {
@@ -1304,6 +1336,12 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                     })),
                 );
             }
+            // Validate upstream name format — 验证上游名称格式
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                if let Some(err) = validate_upstream_name(name) {
+                    return err;
+                }
+            }
         }
 
         // Route must have at least one of methods/hosts/headers/paths/snis — Route 至少需要一个路由匹配字段
@@ -1669,6 +1707,12 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
                         },
                     })),
                 );
+            }
+            // Validate upstream name format — 验证上游名称格式
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                if let Some(err) = validate_upstream_name(name) {
+                    return err;
+                }
             }
         }
     }
