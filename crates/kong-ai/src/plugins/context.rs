@@ -36,4 +36,6 @@ pub struct AiRequestState {
     pub ttft: Option<Instant>,
     /// 路由类型（如 "llm/v1/chat"）
     pub route_type: String,
+    /// 是否为第一个流式事件（用于 Anthropic 客户端协议编码）
+    pub is_first_stream_event: bool,
 }

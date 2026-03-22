@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 use kong_core::error::{KongError, Result};
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 
+use crate::codec::anthropic_format::AnthropicCodec;
 use crate::codec::ChatRequest;
 use crate::models::{AiModel, AiProviderConfig};
 use crate::plugins::context::{AiRequestState, ClientProtocol};
@@ -143,11 +144,21 @@ impl PluginHandler for AiProxyPlugin {
             return Ok(());
         }
 
-        let mut chat_request: ChatRequest =
-            serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
-                plugin_name: "ai-proxy".to_string(),
-                message: format!("invalid chat request body: {}", e),
-            })?;
+        // 根据 client_protocol 选择解码方式
+        let mut chat_request: ChatRequest = match cfg.client_protocol.as_str() {
+            "anthropic" => {
+                AnthropicCodec::decode_request(body_str).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("invalid Anthropic chat request body: {}", e),
+                })?
+            }
+            _ => {
+                serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("invalid chat request body: {}", e),
+                })?
+            }
+        };
 
         // 2. 确定模型名称
         let model_name = match cfg.model_source.as_str() {
@@ -282,6 +293,7 @@ impl PluginHandler for AiProxyPlugin {
             request_start: Instant::now(),
             ttft: None,
             route_type: cfg.route_type.clone(),
+            is_first_stream_event: true,
         };
 
         ctx.extensions.insert(ai_state);
@@ -385,17 +397,45 @@ impl PluginHandler for AiProxyPlugin {
 
                 // 转换每个 SSE 事件并拼装输出
                 let mut output = String::new();
+                let is_anthropic_client = state.client_protocol == ClientProtocol::Anthropic;
+
                 for event in &events {
-                    // [DONE] 终止事件直接透传
+                    // [DONE] 终止事件
                     if event.is_done() {
-                        output.push_str("data: [DONE]\n\n");
+                        if is_anthropic_client {
+                            // Anthropic 客户端协议：[DONE] → message_delta + message_stop
+                            if let Ok(encoded) = AnthropicCodec::encode_stream_event(event, false) {
+                                for enc_event in &encoded {
+                                    output.push_str(&format!(
+                                        "event: {}\ndata: {}\n\n",
+                                        enc_event.event_type, enc_event.data
+                                    ));
+                                }
+                            }
+                        } else {
+                            output.push_str("data: [DONE]\n\n");
+                        }
                         continue;
                     }
 
-                    // 通过 driver 转换事件格式（OpenAI 直通，Anthropic 需转换）
+                    // 通过 driver 转换事件格式（OpenAI 直通，Anthropic provider 需转换）
                     match state.driver.transform_stream_event(event, &state.model) {
                         Ok(Some(transformed)) => {
-                            output.push_str(&format!("data: {}\n\n", transformed.data));
+                            // 如果客户端协议为 Anthropic，进一步编码为 Anthropic SSE 格式
+                            if is_anthropic_client {
+                                let is_first = state.is_first_stream_event;
+                                if let Ok(encoded) = AnthropicCodec::encode_stream_event(&transformed, is_first) {
+                                    for enc_event in &encoded {
+                                        output.push_str(&format!(
+                                            "event: {}\ndata: {}\n\n",
+                                            enc_event.event_type, enc_event.data
+                                        ));
+                                    }
+                                    state.is_first_stream_event = false;
+                                }
+                            } else {
+                                output.push_str(&format!("data: {}\n\n", transformed.data));
+                            }
 
                             // 累积 token usage（如果事件携带了 usage 数据）
                             if let Some(usage) = state.driver.extract_stream_usage(&transformed) {
@@ -470,12 +510,22 @@ impl PluginHandler for AiProxyPlugin {
                 .transform_response(status, &ctx.response_headers, &full_body, &state.model)
             {
                 Ok(chat_response) => {
-                    let response_json = serde_json::to_string(&chat_response).map_err(|e| {
-                        KongError::PluginError {
-                            plugin_name: "ai-proxy".to_string(),
-                            message: format!("failed to serialize response: {}", e),
-                        }
-                    })?;
+                    // 根据 client_protocol 编码响应
+                    let response_json = if state.client_protocol == ClientProtocol::Anthropic {
+                        AnthropicCodec::encode_response(&chat_response).map_err(|e| {
+                            KongError::PluginError {
+                                plugin_name: "ai-proxy".to_string(),
+                                message: format!("failed to encode Anthropic response: {}", e),
+                            }
+                        })?
+                    } else {
+                        serde_json::to_string(&chat_response).map_err(|e| {
+                            KongError::PluginError {
+                                plugin_name: "ai-proxy".to_string(),
+                                message: format!("failed to serialize response: {}", e),
+                            }
+                        })?
+                    };
 
                     // 替换响应体
                     *body = Some(Bytes::from(response_json));
