@@ -1020,33 +1020,12 @@ impl ProxyHttp for KongProxy {
         }
 
         // 4.5 Remove hop-by-hop headers from upstream request (RFC 7230 §6.1) — 移除逐跳头（RFC 7230 §6.1）
-        // These are end-to-end connection-specific and must not be forwarded — 这些是端到端连接特定的，不应转发
+        // Only remove headers that Kong explicitly strips; Pingora manages Connection/TE/Transfer-Encoding
+        // 仅移除 Kong 明确要剥离的头；Pingora 管理 Connection/TE/Transfer-Encoding
         {
-            // Parse Connection header to find additional hop-by-hop headers — 解析 Connection 头以发现额外的逐跳头
-            let connection_tokens: Vec<String> = upstream_request
-                .headers
-                .get("connection")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| {
-                    s.split(',')
-                        .map(|t| t.trim().to_lowercase())
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Standard hop-by-hop headers — 标准逐跳头
-            for header in &[
-                "connection", "keep-alive", "proxy-authenticate",
-                "proxy-authorization", "te", "trailer", "transfer-encoding",
-            ] {
-                upstream_request.remove_header(*header);
-            }
-            // Connection-declared headers — Connection 头声明的额外逐跳头
-            for token in &connection_tokens {
-                if let Ok(name) = http::header::HeaderName::from_bytes(token.as_bytes()) {
-                    upstream_request.headers.remove(name);
-                }
-            }
+            upstream_request.remove_header("keep-alive");
+            upstream_request.remove_header("proxy-authenticate");
+            upstream_request.remove_header("trailer");
         }
 
         // 5. If a plugin replaced the upstream body, fix Content-Length for the replayed payload. — 若插件替换了上游请求体，修正回放 payload 的 Content-Length。
@@ -1363,6 +1342,11 @@ impl ProxyHttp for KongProxy {
     ) -> pingora_core::Result<()> {
         // Record upstream response time for latency tracking — 记录上游响应时间用于延迟统计
         ctx.upstream_response_time = Some(std::time::Instant::now());
+
+        // Remove hop-by-hop headers from upstream response — 移除上游响应中的逐跳头
+        upstream_response.headers.remove("keep-alive");
+        upstream_response.headers.remove("proxy-authenticate");
+        upstream_response.headers.remove("trailer");
 
         // Populate response snapshot into RequestCtx — 填充响应快照到 RequestCtx
         ctx.plugin_ctx.response_status = Some(upstream_response.status.as_u16());
