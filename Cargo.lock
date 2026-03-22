@@ -1750,6 +1750,7 @@ dependencies = [
  "clap",
  "gethostname",
  "kong-admin",
+ "kong-ai",
  "kong-config",
  "kong-core",
  "kong-db",

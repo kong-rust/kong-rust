@@ -9,3 +9,15 @@ pub mod codec;
 pub mod token;
 pub mod ratelimit;
 pub mod plugins;
+
+/// 解析插件配置 JSON — 统一错误处理
+pub fn parse_plugin_config<T: serde::de::DeserializeOwned>(
+    config: &kong_core::traits::PluginConfig,
+) -> kong_core::error::Result<T> {
+    serde_json::from_value(config.config.clone()).map_err(|e| {
+        kong_core::error::KongError::PluginError {
+            plugin_name: config.name.clone(),
+            message: format!("invalid plugin config: {}", e),
+        }
+    })
+}

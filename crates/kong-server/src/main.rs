@@ -236,6 +236,9 @@ fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system
         }
     }
 
+    // 注册 Rust 原生 AI 插件
+    registry.register("ai-proxy", Arc::new(kong_ai::plugins::AiProxyPlugin::new()));
+
     registry
 }
 
