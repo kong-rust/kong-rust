@@ -210,20 +210,44 @@ CREATE TABLE IF NOT EXISTS ai_virtual_keys (
 
 ### 3.4 实体关系
 
+AI 插件支持 Kong 标准的四级挂载：**全局 / Per-Service / Per-Route / Per-Consumer**。
+插件通过现有 `resolve_plugins` 机制自动处理四级优先级覆盖（global < service < route < consumer）。
+
 ```
-Route ──挂载──> ai-proxy 插件 { model: "gpt-4" }
-                     │
-                     ▼ (按 name 查找 model group)
+┌─────────────────── 挂载方式（任选）───────────────────┐
+│                                                      │
+│  全局:    POST /plugins { name: "ai-proxy", ... }    │
+│  Service: POST /services/{id}/plugins                │
+│  Route:   POST /routes/{id}/plugins                  │
+│  Consumer: POST /consumers/{id}/plugins              │
+│                                                      │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+              ai-proxy 插件 config
+              { model: "gpt-4",  model_source: "config"|"request" }
+                       │
+                       ▼ (按 name 查找 model group)
               ai_models (name="gpt-4")
               ├── model_1: provider=my-openai,  model_name=gpt-4,     weight=80, priority=10
               ├── model_2: provider=my-azure,   model_name=gpt-4-0613, weight=20, priority=10
               └── model_3: provider=my-anthropic, model_name=claude-3.5, weight=100, priority=5 (fallback)
-                     │
-                     ▼
+                       │
+                       ▼
               ai_providers (endpoint + auth)
 
 ai_virtual_keys ──关联──> consumers (复用 Kong Consumer 体系)
 ```
+
+**典型配置示例：**
+
+| 场景 | 挂载方式 | 说明 |
+|------|---------|------|
+| 所有 AI 请求统一安全检查 | 全局挂载 `ai-prompt-guard` | 不需要每个 Route 单独配置 |
+| 某 Service 下所有 Route 共享同一 LLM | Service 级挂载 `ai-proxy` | config.model="gpt-4" |
+| 单个 Route 指定特定模型 | Route 级挂载 `ai-proxy` | 覆盖 Service 级配置 |
+| 统一 LLM 入口，model 由请求决定 | 全局/Service 级挂载 `ai-proxy` | config.model_source="request" |
+| 特定 Consumer 限流 | Consumer 级挂载 `ai-rate-limit` | 覆盖全局限流配置 |
 
 ---
 
@@ -468,13 +492,14 @@ pub struct SseEvent {
 **Config Schema：**
 ```json
 {
-  "model": "gpt-4",                     // model group name (必填)
+  "model": "gpt-4",                     // model group name (model_source=config 时必填)
+  "model_source": "config",             // config: 使用固定 model | request: 从请求体 model 字段动态路由
   "route_type": "llm/v1/chat",          // llm/v1/chat | llm/v1/completions
   "client_protocol": "openai",          // openai | anthropic (客户端协议)
   "response_streaming": "allow",        // allow | deny | always
   "max_request_body_size": 8192,        // 最大请求体 (KB)
   "model_name_header": true,            // X-Kong-LLM-Model 响应头
-  "timeout": 60000,                     // LLM 请求超时 (ms)
+  "timeout": 60000,                     // LLM 请求超时 (ms), 流式请求仅作为首包超时
   "retries": 2,                         // group 内重试次数
   "log_payloads": false,                // 是否记录请求/响应原文
   "log_statistics": true                // 是否记录 token/cost 指标
@@ -799,6 +824,8 @@ PUT    /ai-providers/{id_or_name}       # 替换
 DELETE /ai-providers/{id_or_name}       # 删除
 
 GET    /ai-providers/{id}/ai-models     # 该 provider 下的 models
+
+GET    /ai-model-groups                    # 列出所有 distinct model name (防拼写错误)
 ```
 
 ### 8.2 AI Model CRUD
@@ -954,6 +981,13 @@ kong_ai_prompt_blocked_total{model, reason}
 | `ModelHealth` 健康状态纯内存 | 重启后丢失，冷却中的 provider 立即恢复 | 预期行为——重启意味着新的探测周期，无需持久化 |
 | Budget 异步更新有超支窗口 | 与 LiteLLM 一致，log 阶段异步累加 | 可接受——budget 是软限制，精确到分钟级即可 |
 | 流式响应缓存需要内存累积 | ai-proxy 在 body_filter 流式处理时同步累积完整响应到 `AiRequestState.response_buffer` | 大响应可能占用较多内存，可通过 `max_cache_body_size` 配置上限 |
+| Redis 不可用时限流降级 | 配置 `storage=redis` 但 Redis 宕机时，需要 fallback 而非拒绝所有请求 | 自动 fallback 到内存限流器，log 告警 |
+
+### AI 内部缓存机制
+
+ai-proxy 插件内部使用 `Arc<RwLock<HashMap>>` 缓存 model groups、providers 和预构建的 `ModelGroupBalancer`。
+AI 实体（ai_providers / ai_models）的 CUD 操作通过现有 debounce refresh channel 触发缓存重建。
+请求热路径只做 `Arc::clone` 获取 balancer 引用，无锁竞争。
 
 ---
 
