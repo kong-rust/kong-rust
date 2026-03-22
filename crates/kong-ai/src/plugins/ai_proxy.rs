@@ -14,6 +14,7 @@ use crate::codec::anthropic_format::AnthropicCodec;
 use crate::codec::ChatRequest;
 use crate::models::{AiModel, AiProviderConfig};
 use crate::plugins::context::{AiRequestState, ClientProtocol};
+use crate::provider::router::{ModelRouteConfig, ModelRouter};
 use crate::provider::{DriverRegistry, TokenUsage};
 
 // ============ 插件配置 ============
@@ -46,6 +47,9 @@ pub struct AiProxyConfig {
     pub log_statistics: bool,
     /// 内联 provider 配置（MVP 阶段使用，不走 DAO）
     pub provider: Option<InlineProviderConfig>,
+    /// 模型路由规则（正则匹配 + 加权选择） — model routing rules
+    #[serde(default)]
+    pub model_routes: Vec<ModelRouteConfig>,
 }
 
 /// 内联 provider 配置（嵌入在插件 config JSON 中）
@@ -75,6 +79,7 @@ impl Default for AiProxyConfig {
             log_payloads: false,
             log_statistics: true,
             provider: None,
+            model_routes: Vec::new(),
         }
     }
 }
@@ -161,7 +166,7 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 2. 确定模型名称
-        let model_name = match cfg.model_source.as_str() {
+        let mut model_name = match cfg.model_source.as_str() {
             "request" => {
                 if chat_request.model.is_empty() {
                     return Err(KongError::PluginError {
@@ -188,6 +193,17 @@ impl PluginHandler for AiProxyPlugin {
                 }
             }
         };
+
+        // 2.5 智能路由：如果配置了 model_routes，用正则匹配替代直接使用 model_name
+        if !cfg.model_routes.is_empty() {
+            let router = ModelRouter::from_configs(&cfg.model_routes)?;
+            if let Some(target_group) = router.resolve(&model_name) {
+                debug!("ai-proxy: model '{}' routed to group '{}'", model_name, target_group);
+                // 用 target_group 替代 model_name 作为后续查找的 key
+                // 但保留原始 model_name 在 chat_request 中（客户端可能需要）
+                model_name = target_group;
+            }
+        }
 
         // 3. 确定客户端协议
         let client_protocol = match cfg.client_protocol.as_str() {
