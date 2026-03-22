@@ -22,8 +22,9 @@ fn make_chat_body() -> String {
 }
 
 fn make_large_chat_body() -> String {
-    // 约 800 字节 → 估算 ~200 tokens
-    let content = "x".repeat(700);
+    // body ~260 字节 → 估算 ~65 tokens（(260+3)/4 ≈ 65）
+    // 两个请求 ~130 tokens > 100 limit → 第二个被阻断
+    let content = "x".repeat(200);
     json!({
         "model": "gpt-4",
         "messages": [{"role": "user", "content": content}]
@@ -205,10 +206,10 @@ async fn test_rate_limit_by_consumer() {
 async fn test_rate_limit_combined_rpm_tpm() {
     let limiter = Arc::new(MemoryRateLimiter::new(Duration::from_secs(60)));
     let rate_plugin = AiRateLimitPlugin::with_limiter(limiter);
-    // RPM=100（不触发），TPM=50（容易触发）
+    // RPM=100（不触发），TPM=100（第一个请求通过，第二个触发）
     let config = PluginConfig {
         name: "ai-rate-limit".to_string(),
-        config: json!({"rpm_limit": 100, "tpm_limit": 50, "limit_by": "global"}),
+        config: json!({"rpm_limit": 100, "tpm_limit": 100, "limit_by": "global"}),
     };
 
     // 第一个大请求: 通过

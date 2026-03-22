@@ -276,21 +276,23 @@ async fn test_ai_proxy_body_filter_streaming_usage_accumulation() {
         .await
         .unwrap();
 
-    // 第二个事件：再携带 usage（completion_tokens=3）
-    let usage_chunk2 = make_sse_usage_chunk(0, 3, 3);
+    // 第二个事件：再携带 usage（prompt_tokens=10, completion_tokens=8）
+    // 使用替换语义：每个 chunk 携带到该时刻的最终值（兼容 OpenAI/Anthropic/Gemini）
+    // Replacement semantics: each chunk carries the final value at that point
+    let usage_chunk2 = make_sse_usage_chunk(10, 8, 18);
     let mut body2: Option<Bytes> = Some(Bytes::from(usage_chunk2));
     plugin
         .body_filter(&config, &mut ctx, &mut body2, true)
         .await
         .unwrap();
 
-    // 验证 usage 累积
+    // 验证 usage 替换（非累积）— replacement semantics (not accumulation)
     let state = ctx.extensions.get::<AiRequestState>().unwrap();
     let pt = state.usage.prompt_tokens.unwrap_or(0);
     let ct = state.usage.completion_tokens.unwrap_or(0);
-    // 两个事件的 prompt_tokens = 10 + 0 = 10，completion_tokens = 5 + 3 = 8
-    assert_eq!(pt, 10, "prompt_tokens 应累积为 10，实际：{}", pt);
-    assert_eq!(ct, 8, "completion_tokens 应累积为 8，实际：{}", ct);
+    // 替换语义：最后一个 chunk 的值即为最终值
+    assert_eq!(pt, 10, "prompt_tokens 应为 10，实际：{}", pt);
+    assert_eq!(ct, 8, "completion_tokens 应为 8，实际：{}", ct);
     // end_of_stream 时应计算 total_tokens
     assert_eq!(
         state.usage.total_tokens,
