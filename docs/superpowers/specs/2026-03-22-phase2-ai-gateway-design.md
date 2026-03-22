@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS ai_models (
     ws_id         UUID REFERENCES workspaces(id),
     created_at    TIMESTAMPTZ DEFAULT now(),
     updated_at    TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(name, provider_id)
+    UNIQUE(name, provider_id, ws_id)
 );
 ```
 
@@ -232,11 +232,23 @@ ai_virtual_keys ──关联──> consumers (复用 Kong Consumer 体系)
 ### 4.1 核心 Trait
 
 ```rust
+/// AI Provider 数据库实体对应的配置 struct（非 trait）
+pub struct AiProviderConfig {
+    pub id: Uuid,
+    pub name: String,
+    pub provider_type: String,
+    pub endpoint_url: Option<String>,
+    pub auth_config: AuthConfig,
+    pub default_model: Option<String>,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+}
+
 /// LLM Provider 驱动接口
 /// 每个 provider (OpenAI, Anthropic, Gemini...) 实现此 trait
 #[async_trait]
-pub trait AiProvider: Send + Sync {
-    /// provider 类型标识
+pub trait AiDriver: Send + Sync {
+    /// driver 类型标识
     fn provider_type(&self) -> &str;
 
     /// 将 OpenAI 规范化请求转换为 provider 原生格式
@@ -244,7 +256,7 @@ pub trait AiProvider: Send + Sync {
         &self,
         request: &ChatRequest,
         model: &AiModel,
-        provider: &AiProvider,
+        provider_config: &AiProviderConfig,
     ) -> Result<ProviderRequest>;
 
     /// 将 provider 原生响应转换为 OpenAI 规范化格式 (非流式)
@@ -298,24 +310,24 @@ pub struct TokenUsage {
 }
 ```
 
-### 4.2 Provider 注册
+### 4.2 Driver 注册
 
 ```rust
-pub struct ProviderRegistry {
-    drivers: HashMap<String, Arc<dyn AiProvider>>,
+pub struct DriverRegistry {
+    drivers: HashMap<String, Arc<dyn AiDriver>>,
 }
 
-impl ProviderRegistry {
+impl DriverRegistry {
     pub fn new() -> Self {
         let mut registry = Self { drivers: HashMap::new() };
-        registry.register("openai", Arc::new(OpenAiProvider));
-        registry.register("anthropic", Arc::new(AnthropicProvider));
-        registry.register("gemini", Arc::new(GeminiProvider));
-        registry.register("openai_compat", Arc::new(OpenAiCompatProvider));
+        registry.register("openai", Arc::new(OpenAiDriver));
+        registry.register("anthropic", Arc::new(AnthropicDriver));
+        registry.register("gemini", Arc::new(GeminiDriver));
+        registry.register("openai_compat", Arc::new(OpenAiCompatDriver));
         registry
     }
 
-    pub fn get(&self, provider_type: &str) -> Option<&Arc<dyn AiProvider>> {
+    pub fn get(&self, provider_type: &str) -> Option<&Arc<dyn AiDriver>> {
         self.drivers.get(provider_type)
     }
 }
@@ -334,7 +346,7 @@ impl ProviderRegistry {
 **Gemini driver**：
 - 请求：OpenAI messages → Gemini `generateContent` format（`contents` 数组，role 映射 user/model）
 - 响应：Gemini candidates → OpenAI choices
-- 流式：JSON array 流（非标准 SSE），需要状态机解析
+- 流式：使用 `streamGenerateContent?alt=sse` 端点获取标准 SSE 格式（避免 JSON array 状态机解析的复杂度）
 - Auth：API key 作为 query param 或 OAuth2 bearer token
 
 **OpenAI Compat driver**：
@@ -469,6 +481,32 @@ pub struct SseEvent {
 }
 ```
 
+**插件间数据传递：**
+
+现有 `RequestCtx.shared` 是 `HashMap<String, serde_json::Value>`，无法存储 trait object 和有状态对象（如 `SseParser`）。需要扩展 `RequestCtx`：
+
+```rust
+// 在 kong-core 的 RequestCtx 中新增
+pub extensions: anymap2::Map<dyn Any + Send + Sync>,
+```
+
+AI 插件将类型化状态存入 extensions：
+
+```rust
+/// AI 插件跨阶段共享状态（存入 ctx.extensions）
+pub struct AiRequestState {
+    pub driver: Arc<dyn AiDriver>,
+    pub model: AiModel,
+    pub provider_config: AiProviderConfig,
+    pub stream_mode: bool,
+    pub client_protocol: ClientProtocol,  // OpenAI | Anthropic
+    pub sse_parser: Option<SseParser>,    // 流式时使用
+    pub usage: TokenUsage,                // 累加器
+    pub response_buffer: Option<BytesMut>, // 流式时累积完整响应（供缓存回写）
+    pub ttft: Option<Instant>,            // Time To First Token
+}
+```
+
 **执行流程：**
 
 ```
@@ -477,34 +515,38 @@ access 阶段:
      - client_protocol=anthropic: AnthropicCodec.decode_request()
      - client_protocol=openai: 直接反序列化
   2. 查找 model group → 按 weight/priority LB 选择一条 AiModel
-  3. 获取 AiProvider → 调用 driver.transform_request() 转换为 provider 格式
+  3. 获取 AiProviderConfig → 调用 driver.transform_request() 转换为 provider 格式
   4. 调用 driver.configure_upstream() → 覆写 ctx 的 upstream_host/port/scheme/path
   5. 设置 upstream 请求 headers (auth + content-type + extra)
-  6. 将 AI 上下文 (driver, model, provider, stream_mode, client_protocol) 存入 ctx
-
-upstream_request_filter 阶段:
-  7. 替换请求体为 provider 格式的 body
+  6. 设置 ctx.upstream_body = Some(provider_body) (替换请求体)
+  7. 对 OpenAI/Azure provider 自动注入 stream_options.include_usage=true
+  8. 将 AiRequestState 存入 ctx.extensions
 
 header_filter 阶段:
-  8. 非流式: 读取完整响应体
-     - driver.transform_response() → ChatResponse
-     - driver.extract_usage() → TokenUsage
-     - client_protocol=anthropic: AnthropicCodec.encode_response()
-     - 设置响应头 (Content-Type, X-Kong-LLM-Model)
-  9. 流式: 设置 Content-Type=text/event-stream，初始化 SseParser
+  9. 检测上游响应 Content-Type，判断流式/非流式
+  10. 流式: 设置响应 Content-Type=text/event-stream，初始化 SseParser 存入 AiRequestState
+  11. 非流式: 标记等待 body_filter 完整 body
 
 body_filter 阶段:
-  10. 非流式: 替换响应体 (已在 header_filter 处理完)
-  11. 流式: 逐 chunk 处理
+  12. 非流式 (end_of_stream=true 时):
+      - 从 buffered body 完整读取
+      - driver.transform_response() → ChatResponse
+      - driver.extract_usage() → TokenUsage
+      - client_protocol=anthropic: AnthropicCodec.encode_response()
+      - 替换响应体，设置 X-Kong-LLM-Model header
+  13. 流式 (逐 chunk):
       - SseParser.feed(chunk) → events
       - 对每个 event: driver.transform_stream_event() → OpenAI 格式 event
+      - driver.extract_stream_usage() → 累加到 AiRequestState.usage
       - client_protocol=anthropic: AnthropicCodec.encode_stream_event()
-      - 累加 stream token usage
+      - 同步累积到 response_buffer (供 ai-cache 回写)
       - 拼接输出 chunk
+  14. 流式 end_of_stream: SseParser.flush()，完成最终 usage 汇总
 
 log 阶段:
-  12. 序列化 analytics: model, provider, latency, token usage, cost
-  13. 异步更新 budget_used (如果有 virtual key)
+  15. 序列化 analytics: model, provider, latency, token usage, cost
+  16. 异步更新 budget_used (如果有 virtual key)
+  17. 上报 LB 健康状态: report_success() 或 report_failure()
 ```
 
 **LB/Fallback 策略：**
@@ -575,12 +617,13 @@ access 阶段 (预检):
   3. 检查 RPM 计数是否超限 → 超限返回 429
   4. 检查 TPM 计数是否超限 → 超限返回 429
   5. RPM 计数 +1
-  6. 将 virtual_key 信息存入 ctx (供 ai-proxy 和 log 阶段使用)
+  6. 估算 prompt_tokens 并预扣 TPM (缓解回写窗口问题)
+  7. 将 virtual_key 信息存入 ctx (供 ai-proxy 和 log 阶段使用)
 
 log 阶段 (回写):
-  7. 从 ctx 读取实际 token usage
-  8. TPM 计数 += actual_tokens
-  9. 异步更新 budget_used += cost
+  8. 从 ctx 读取实际 token usage
+  9. TPM 计数修正: += (actual_tokens - 预扣的 estimated_tokens)
+  10. 异步更新 budget_used += cost
 ```
 
 **内存限流器：**
@@ -649,7 +692,8 @@ access 阶段:
   5. 未命中 → 放行，标记 ctx.cache_key
 
 log 阶段 (回写):
-  6. 从 ctx 读取完整响应
+  6. 从 ctx.extensions 的 AiRequestState.response_buffer 读取完整响应
+     (ai-proxy 在 body_filter 流式处理时同步累积到 response_buffer)
   7. 写入 Redis KV (key → response, TTL)
   8. 如果 semantic_cache.enabled:
      a. 上传 embedding + cache_key 到向量存储
@@ -712,9 +756,11 @@ Priority 770: ai-proxy          (核心代理)
 
 | 优先级 | 来源 | 准确度 | 适用场景 |
 |--------|------|--------|----------|
-| 1 | Provider 返回的真实 usage | 精确 | 非流式全部 provider；流式 Anthropic/Gemini |
-| 2 | tiktoken-rs 本地计算 | 精确 (GPT 系列) | 流式 OpenAI/Azure 不返回 usage 时 |
+| 1 | Provider 返回的真实 usage | 精确 | 非流式全部 provider；流式 Anthropic/Gemini；流式 OpenAI (通过 `stream_options.include_usage`) |
+| 2 | tiktoken-rs 本地计算 | 精确 (GPT 系列) | Provider 未返回 usage 时的 fallback |
 | 3 | 字符估算 (len/4) | 粗略 | tiktoken 不支持的模型 |
+
+**注意**：ai-proxy 在 `transform_request` 时自动为 OpenAI/Azure provider 注入 `stream_options: { include_usage: true }`，确保流式响应的最后一个 SSE event 包含精确 usage。
 
 ```rust
 pub struct TokenCounter {
@@ -891,6 +937,7 @@ kong_ai_prompt_blocked_total{model, reason}
 | `redis` (crate) | Redis 连接 (限流 + 缓存) | async, 可选依赖 |
 | `regex` | Prompt Guard 正则匹配 | 已在项目中使用 |
 | `bytes` / `bytes-mut` | SSE 解析 buffer | 已在项目中使用 |
+| `anymap2` | ctx.extensions 类型化存储 | 类似 http::Extensions |
 
 **不引入**：
 - 无额外 HTTP client — 复用 Pingora 的上游连接机制
@@ -898,7 +945,19 @@ kong_ai_prompt_blocked_total{model, reason}
 
 ---
 
-## 12. 不在范围内
+## 12. 已知限制
+
+| 限制 | 原因 | 缓解方案 |
+|------|------|---------|
+| TPM 限流存在短暂超额窗口 | 两阶段回写固有限制：access 预检 → log 回写之间有时间差，流式请求可能持续数十秒 | access 阶段按 prompt_tokens 估算预扣；completion_tokens 在 log 阶段差额修正 |
+| `ai_providers.auth_config` 明文存储 API Key | MVP 阶段简化实现 | Admin API GET 响应中 mask 敏感字段（`header_value` → `"***"`）；后续版本支持 vault 集成 |
+| `ModelHealth` 健康状态纯内存 | 重启后丢失，冷却中的 provider 立即恢复 | 预期行为——重启意味着新的探测周期，无需持久化 |
+| Budget 异步更新有超支窗口 | 与 LiteLLM 一致，log 阶段异步累加 | 可接受——budget 是软限制，精确到分钟级即可 |
+| 流式响应缓存需要内存累积 | ai-proxy 在 body_filter 流式处理时同步累积完整响应到 `AiRequestState.response_buffer` | 大响应可能占用较多内存，可通过 `max_cache_body_size` 配置上限 |
+
+---
+
+## 13. 不在范围内
 
 - 多 CP 间 AI 配置同步（依赖 Phase 1 Hybrid）
 - AI 插件的 Lua 兼容层（ai-proxy Lua 插件已有，保持共存）
