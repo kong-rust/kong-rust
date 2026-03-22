@@ -6,6 +6,9 @@
 //! - Special endpoints (/, /status) — 特殊端点（/, /status）
 
 pub mod schemas;
+pub mod ai_providers;
+pub mod ai_models;
+pub mod ai_virtual_keys;
 pub use schemas::*;
 
 use std::sync::Arc;
@@ -663,6 +666,16 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/acls/{acls}",
         "/consumers/{consumers}/acls",
         "/reports/send-ping",
+        // AI Gateway endpoints — AI 网关端点
+        "/ai-providers",
+        "/ai-providers/{ai_providers}",
+        "/ai-providers/{ai_providers}/ai-models",
+        "/ai-models",
+        "/ai-models/{ai_models}",
+        "/ai-model-groups",
+        "/ai-virtual-keys",
+        "/ai-virtual-keys/{ai_virtual_keys}",
+        "/ai-virtual-keys/{ai_virtual_keys}/rotate",
     ];
 
     Json(json!({ "data": endpoints }))
@@ -839,7 +852,7 @@ fn encode_tags_param(tags_str: &str) -> String {
 /// Build Kong-compatible paginated response — 构建 Kong 兼容的分页响应
 /// Always includes `next` (null when no more pages), only includes `offset` when present —
 /// 始终包含 `next`（无更多页时为 null），仅在存在时包含 `offset`
-fn build_page_response<T: Serialize>(page: &Page<T>) -> Value {
+pub(crate) fn build_page_response<T: Serialize>(page: &Page<T>) -> Value {
     build_page_response_with_tags(page, None)
 }
 
@@ -877,7 +890,7 @@ fn build_page_response_with_tags<T: Serialize>(page: &Page<T>, tags: Option<&str
 /// uses concrete type handlers simplified via macros — 使用具体类型的 handler 通过宏简化注册
 
 /// Generic list handler — 通用列表处理
-async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
+pub(crate) async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     params: &ListParams,
 ) -> (StatusCode, Json<Value>) {
@@ -899,7 +912,7 @@ async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
 }
 
 /// Generic get handler — 通用查询处理
-async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
+pub(crate) async fn do_get<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
 ) -> (StatusCode, Json<Value>) {
@@ -1047,7 +1060,7 @@ fn expand_url_shorthand(body: &Value) -> Result<Value, (StatusCode, Json<Value>)
 }
 
 /// Generic create handler — 通用创建处理
-async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
+pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
@@ -1312,7 +1325,7 @@ async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
 }
 
 /// Generic update handler (PATCH = merge semantics) — 通用更新处理（PATCH = 合并语义）
-async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
+pub(crate) async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
     body: &Value,
@@ -1462,7 +1475,7 @@ async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
 }
 
 /// Generic upsert handler (PUT = replace semantics) — 通用 upsert 处理（PUT = 替换语义）
-async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
+pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
     body: Value,
@@ -1615,7 +1628,7 @@ async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> + Send + Sy
 
 /// Generic delete handler — 通用删除处理
 /// Kong-compatible: DELETE is idempotent, returns 204 even if not found — Kong 兼容：DELETE 幂等，即使不存在也返回 204
-async fn do_delete<T: Entity + Send + Sync + 'static>(
+pub(crate) async fn do_delete<T: Entity + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     id_or_name: &str,
 ) -> axum::response::Response {

@@ -38,6 +38,9 @@ pub struct AdminState {
     pub snis: Arc<dyn Dao<Sni>>,
     pub ca_certificates: Arc<dyn Dao<CaCertificate>>,
     pub vaults: Arc<dyn Dao<Vault>>,
+    pub ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>>,
+    pub ai_models: Arc<dyn Dao<kong_ai::models::AiModel>>,
+    pub ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>>,
     pub node_id: uuid::Uuid,
     pub config: Arc<kong_config::KongConfig>,
     /// Proxy engine reference (Clone semantics, sharing underlying Arc data), used to refresh in-memory cache after write operations — 代理引擎引用（Clone 语义，共享底层 Arc 数据），用于写操作后刷新内存缓存
@@ -136,6 +139,7 @@ fn is_known_route(path: &str) -> bool {
         "/", "/status", "/config", "/endpoints", "/plugins/enabled", "/plugins",
         "/services", "/routes", "/consumers", "/upstreams",
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
+        "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
     ];
     if static_routes.contains(&path) {
         return true;
@@ -146,7 +150,8 @@ fn is_known_route(path: &str) -> bool {
     match segments.as_slice() {
         // /entity/{id}
         [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
-            | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags") => true,
+            | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags"
+            | "ai-providers" | "ai-models" | "ai-virtual-keys") => true,
         // /schemas/{entity}
         ["schemas", _] => true,
         // /schemas/{entity}/validate or /schemas/plugins/validate
@@ -167,6 +172,10 @@ fn is_known_route(path: &str) -> bool {
         ["upstreams", _, "targets"] => true,
         // /upstreams/{id}/targets/{id}
         ["upstreams", _, "targets", _] => true,
+        // /ai-providers/{id}/ai-models
+        ["ai-providers", _, "ai-models"] => true,
+        // /ai-virtual-keys/{id}/rotate
+        ["ai-virtual-keys", _, "rotate"] => true,
         _ => false,
     }
 }
@@ -369,6 +378,35 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .put(upsert_vault)
                 .delete(delete_vault),
         )
+        // AI Providers
+        .route("/ai-providers", get(handlers::ai_providers::list).post(handlers::ai_providers::create))
+        .route(
+            "/ai-providers/{id_or_name}",
+            get(handlers::ai_providers::get_one)
+                .patch(handlers::ai_providers::update)
+                .put(handlers::ai_providers::upsert)
+                .delete(handlers::ai_providers::delete_one),
+        )
+        .route("/ai-providers/{id}/ai-models", get(handlers::ai_providers::list_models))
+        // AI Models
+        .route("/ai-models", get(handlers::ai_models::list).post(handlers::ai_models::create))
+        .route(
+            "/ai-models/{id}",
+            get(handlers::ai_models::get_one)
+                .patch(handlers::ai_models::update)
+                .put(handlers::ai_models::upsert)
+                .delete(handlers::ai_models::delete_one),
+        )
+        .route("/ai-model-groups", get(handlers::ai_models::list_groups))
+        // AI Virtual Keys
+        .route("/ai-virtual-keys", get(handlers::ai_virtual_keys::list).post(handlers::ai_virtual_keys::create))
+        .route(
+            "/ai-virtual-keys/{id_or_name}",
+            get(handlers::ai_virtual_keys::get_one)
+                .patch(handlers::ai_virtual_keys::update)
+                .delete(handlers::ai_virtual_keys::delete_one),
+        )
+        .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
         .fallback(admin_fallback)
         // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
         .method_not_allowed_fallback(method_not_allowed_handler)
