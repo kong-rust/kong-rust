@@ -390,7 +390,7 @@ local function build_env_str(conf)
     return table.concat(env_parts, " "), env
 end
 
-function _M.start_kong(conf)
+function _M.start_kong(conf, _, _, fixtures)
     conf = conf or {}
 
     -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
@@ -2209,6 +2209,47 @@ function _M.get_available_port()
   local _, port = server:getsockname()
   server:close()
   return tonumber(port)
+end
+
+---------------------------------------------------------------------------
+-- DNS mock stub — DNS 模拟桩
+-- Kong-Rust uses system DNS; this stub collects records for compatibility.
+-- Actual DNS override is not yet implemented.
+---------------------------------------------------------------------------
+
+local DnsMock = {}
+DnsMock.__index = DnsMock
+
+function DnsMock:A(record)
+    self.records[#self.records + 1] = { type = "A", name = record.name, address = record.address }
+end
+
+function DnsMock:SRV(record)
+    self.records[#self.records + 1] = { type = "SRV", name = record.name, target = record.target, port = record.port }
+end
+
+function DnsMock:CNAME(record)
+    self.records[#self.records + 1] = { type = "CNAME", name = record.name, cname = record.cname }
+end
+
+_M.dns_mock = {
+    new = function()
+        return setmetatable({ records = {} }, DnsMock)
+    end,
+}
+
+---------------------------------------------------------------------------
+-- Worker helpers stubs — Worker 辅助函数桩
+---------------------------------------------------------------------------
+
+function _M.get_kong_workers()
+    return 1
+end
+
+function _M.wait_for_all_config_update(opts)
+    -- Kong-Rust doesn't have multi-worker config propagation; config is immediate — Kong-Rust 没有多 worker 配置传播，配置立即生效
+    socket.sleep(0.5)
+    return true
 end
 
 ---------------------------------------------------------------------------
