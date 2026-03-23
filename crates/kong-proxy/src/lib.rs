@@ -1056,8 +1056,8 @@ impl ProxyHttp for KongProxy {
                 && self.config.trusted_ips.iter().any(|tip| {
                     let tip = tip.trim();
                     if tip.contains('/') {
-                        // CIDR match (simple: 0.0.0.0/0 matches all) — CIDR 匹配
-                        tip == "0.0.0.0/0" || tip == "::/0"
+                        // CIDR match — CIDR 匹配
+                        cidr_contains(tip, &client_ip)
                     } else {
                         tip == client_ip
                     }
@@ -1792,5 +1792,32 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Log 阶段执行失败: {}", e);
         }
+    }
+}
+
+/// Check if a client IP is within a CIDR range — 检查客户端 IP 是否在 CIDR 范围内
+fn cidr_contains(cidr: &str, client_ip: &str) -> bool {
+    let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix_len) = prefix_str.parse::<u8>() else {
+        return false;
+    };
+    let Ok(net_ip) = net_str.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let Ok(client) = client_ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match (net_ip, client) {
+        (std::net::IpAddr::V4(net), std::net::IpAddr::V4(cli)) => {
+            let mask = if prefix_len >= 32 { u32::MAX } else { u32::MAX << (32 - prefix_len) };
+            (u32::from(net) & mask) == (u32::from(cli) & mask)
+        }
+        (std::net::IpAddr::V6(net), std::net::IpAddr::V6(cli)) => {
+            let mask = if prefix_len >= 128 { u128::MAX } else { u128::MAX << (128 - prefix_len) };
+            (u128::from(net) & mask) == (u128::from(cli) & mask)
+        }
+        _ => false, // v4 vs v6 mismatch — IPv4 与 IPv6 不匹配
     }
 }

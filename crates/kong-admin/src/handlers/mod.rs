@@ -4696,7 +4696,7 @@ pub async fn create_nested_target(
             }
         }
         // Append default port :8000 if missing — 追加默认端口 :8000
-        if !target_val.contains(':') {
+        if !target_has_port(&target_val) {
             obj.insert("target".to_string(), json!(format!("{}:8000", target_val)));
         }
         // Generate cache_key for uniqueness — 生成 cache_key 保证唯一性
@@ -4860,7 +4860,7 @@ pub async fn upsert_nested_target(
         }
         // Normalize target address (append :8000 if no port) — 规范化 target 地址（无端口时追加 :8000）
         if let Some(t) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
-            let t = if !t.contains(':') { format!("{}:8000", t) } else { t };
+            let t = if !target_has_port(&t) { format!("{}:8000", t) } else { t };
             obj.insert("target".to_string(), json!(t));
             // Only set cache_key for new targets (existing keeps original) — 仅为新 target 设置 cache_key（已有保留原值）
             if existing.is_none() {
@@ -4901,6 +4901,17 @@ pub async fn set_target_health(
         map.insert(key, health_status.to_string());
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Check if a target string already has a port — 检查 target 字符串是否已有端口
+/// IPv6: [::1]:8000 has port, [::1] does not. IPv4/hostname: foo:8000 has port, foo does not.
+fn target_has_port(target: &str) -> bool {
+    if target.starts_with('[') {
+        // IPv6: port present only if "]:" exists — IPv6 格式：仅当存在 "]:" 时有端口
+        target.contains("]:")
+    } else {
+        target.contains(':')
+    }
 }
 
 /// Check if upstream has healthchecks enabled (passive or active) — 检查 upstream 是否启用了健康检查
@@ -4968,53 +4979,59 @@ pub async fn upstream_health(
     let hc_enabled = is_healthchecks_enabled(&upstream);
     let active_hc_enabled = upstream.healthchecks.active.healthy.interval > 0.0
         || upstream.healthchecks.active.unhealthy.interval > 0.0;
-    let health_map = state.target_health.read().ok();
-    let dns_hostsfile = state.config.dns_hostsfile.as_str();
-    let health_data: Vec<Value> = targets.iter().map(|t| {
-        // Parse target host:port — 解析 target 的 host:port
-        let (host, port) = if t.target.starts_with('[') {
-            // IPv6 format: [::1]:port
-            let parts: Vec<&str> = t.target.rsplitn(2, ':').collect();
-            if parts.len() == 2 {
-                (parts[1].to_string(), parts[0].parse::<u16>().unwrap_or(0))
+    let health_map_snapshot: std::collections::HashMap<String, String> = state.target_health.read()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    let dns_hostsfile = state.config.dns_hostsfile.to_string();
+    let upstream_id = upstream.id;
+    // Run DNS resolution + TCP probes in spawn_blocking to avoid blocking tokio — 在 spawn_blocking 中运行 DNS 解析和 TCP 探测，避免阻塞 tokio
+    let health_data: Vec<Value> = tokio::task::spawn_blocking(move || {
+        targets.iter().map(|t| {
+            // Parse target host:port — 解析 target 的 host:port
+            let (host, port) = if t.target.starts_with('[') {
+                // IPv6 format: [::1]:port — split on "]:" to avoid splitting inside the address
+                if let Some(idx) = t.target.find("]:") {
+                    let host = t.target[..idx + 1].to_string(); // includes closing ']'
+                    let port = t.target[idx + 2..].parse::<u16>().unwrap_or(0);
+                    (host, port)
+                } else {
+                    (t.target.clone(), 0u16)
+                }
             } else {
-                (t.target.clone(), 0u16)
-            }
-        } else {
-            let parts: Vec<&str> = t.target.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                (parts[0].to_string(), parts[1].parse::<u16>().unwrap_or(0))
-            } else {
-                (t.target.clone(), 0u16)
-            }
-        };
-        // Determine health status — 确定健康状态
-        let health_key = format!("{}:{}", upstream.id, t.target);
-        let health_status = if t.weight == 0 {
-            // Weight 0 targets are always HEALTHCHECKS_OFF — weight=0 的 target 始终为 HEALTHCHECKS_OFF
-            "HEALTHCHECKS_OFF".to_string()
-        } else if !hc_enabled {
-            // No healthchecks configured — 未配置健康检查
-            // Try DNS resolution — 尝试 DNS 解析
-            let host_only = host.trim_start_matches('[').trim_end_matches(']');
-            if resolve_target_ip(host_only, dns_hostsfile).is_none() {
-                "DNS_ERROR".to_string()
-            } else {
+                let parts: Vec<&str> = t.target.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].parse::<u16>().unwrap_or(0))
+                } else {
+                    (t.target.clone(), 0u16)
+                }
+            };
+            // Determine health status — 确定健康状态
+            let health_key = format!("{}:{}", upstream_id, t.target);
+            let health_status = if t.weight == 0 {
+                // Weight 0 targets are always HEALTHCHECKS_OFF — weight=0 的 target 始终为 HEALTHCHECKS_OFF
                 "HEALTHCHECKS_OFF".to_string()
-            }
-        } else {
-            // Healthchecks enabled — 健康检查已启用
-            if let Some(ref map) = health_map {
-                if let Some(status) = map.get(&health_key) {
+            } else if !hc_enabled {
+                // No healthchecks configured — 未配置健康检查
+                // Try DNS resolution — 尝试 DNS 解析
+                let host_only = host.trim_start_matches('[').trim_end_matches(']');
+                if resolve_target_ip(host_only, &dns_hostsfile).is_none() {
+                    "DNS_ERROR".to_string()
+                } else {
+                    "HEALTHCHECKS_OFF".to_string()
+                }
+            } else {
+                // Healthchecks enabled — 健康检查已启用
+                if let Some(status) = health_map_snapshot.get(&health_key) {
                     status.clone()
                 } else {
                     // Try DNS first — 先尝试 DNS
                     let host_only = host.trim_start_matches('[').trim_end_matches(']');
-                    if resolve_target_ip(host_only, dns_hostsfile).is_none() {
+                    if resolve_target_ip(host_only, &dns_hostsfile).is_none() {
                         "DNS_ERROR".to_string()
                     } else if active_hc_enabled {
                         // Active healthcheck with probe: try TCP connect — 主动健康检查探测：尝试 TCP 连接
-                        if let Some(ref ip) = resolve_target_ip(host_only, dns_hostsfile) {
+                        if let Some(ref ip) = resolve_target_ip(host_only, &dns_hostsfile) {
                             let addr_str = format!("{}:{}", ip, port);
                             if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
                                 match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)) {
@@ -5031,30 +5048,28 @@ pub async fn upstream_health(
                         "HEALTHY".to_string()
                     }
                 }
-            } else {
-                "HEALTHY".to_string()
-            }
-        };
-        // Resolve IP for address data — 解析 IP 用于地址数据
-        let host_only = host.trim_start_matches('[').trim_end_matches(']');
-        let resolved_ip = resolve_target_ip(host_only, dns_hostsfile).unwrap_or_else(|| host_only.to_string());
-        json!({
-            "id": t.id,
-            "target": t.target,
-            "weight": t.weight,
-            "upstream": { "id": upstream.id },
-            "health": health_status,
-            "created_at": t.created_at,
-            "data": {
-                "addresses": [{
-                    "ip": resolved_ip,
-                    "port": port,
-                    "health": health_status,
-                    "weight": t.weight,
-                }]
-            },
-        })
-    }).collect();
+            };
+            // Resolve IP for address data — 解析 IP 用于地址数据
+            let host_only = host.trim_start_matches('[').trim_end_matches(']');
+            let resolved_ip = resolve_target_ip(host_only, &dns_hostsfile).unwrap_or_else(|| host_only.to_string());
+            json!({
+                "id": t.id,
+                "target": t.target,
+                "weight": t.weight,
+                "upstream": { "id": upstream_id },
+                "health": health_status,
+                "created_at": t.created_at,
+                "data": {
+                    "addresses": [{
+                        "ip": resolved_ip,
+                        "port": port,
+                        "health": health_status,
+                        "weight": t.weight,
+                    }]
+                },
+            })
+        }).collect()
+    }).await.unwrap_or_default();
     (StatusCode::OK, Json(json!({
         "id": upstream.id,
         "name": upstream.name,
