@@ -405,6 +405,20 @@ function _M.start_kong(conf, _, _, fixtures)
         _M.test_conf.proxy_port,
         _M.test_conf.status_port,
     }
+    -- Also wait for custom status_listen port if specified — 同时等待自定义 status_listen 端口
+    if conf.status_listen then
+        local custom_port = conf.status_listen:match(":(%d+)")
+        if custom_port then
+            custom_port = tonumber(custom_port)
+            local found = false
+            for _, p in ipairs(ports_to_check) do
+                if p == custom_port then found = true; break end
+            end
+            if not found then
+                ports_to_check[#ports_to_check + 1] = custom_port
+            end
+        end
+    end
     _M.wait_until(function()
         for _, port in ipairs(ports_to_check) do
             local s = socket.tcp()
@@ -501,10 +515,18 @@ function _M.stop_kong(prefix, preserve_prefix, preserve_dc)
         f:close()
         if pid and pid ~= "" then
             os.execute(string.format("kill -TERM %s 2>/dev/null || true", pid))
-            _M.wait_until(function()
+            local stopped = _M.wait_until(function()
                 local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
                 return ret ~= 0 and ret ~= true
-            end, 10)
+            end, 5)
+            -- Force kill if SIGTERM didn't work — SIGTERM 无效时使用 SIGKILL 强制杀死
+            if not stopped then
+                os.execute(string.format("kill -9 %s 2>/dev/null || true", pid))
+                _M.wait_until(function()
+                    local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
+                    return ret ~= 0 and ret ~= true
+                end, 5)
+            end
         end
         os.remove(PID_FILE)
     end

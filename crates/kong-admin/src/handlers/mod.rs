@@ -13,7 +13,7 @@ pub use schemas::*;
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequest, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -764,26 +764,128 @@ pub async fn status_info(
     Json(body).into_response()
 }
 
+/// GET /status/ready — Readiness check — GET /status/ready — 就绪检查
+/// Returns 200 when the node is ready to serve traffic, 503 otherwise.
+/// DB mode: always ready after startup. DB-less mode: ready only after a valid config is loaded.
+/// DB 模式：启动后即就绪。DB-less 模式：仅在加载有效配置后就绪。
+pub async fn status_ready(
+    State(state): State<AdminState>,
+) -> Response {
+    let is_dbless = state.config.database == "off";
+
+    if is_dbless {
+        // In db-less mode, check if a config has been loaded — db-less 模式下检查是否已加载配置
+        // Empty string or all-zeros hash means no valid config loaded — 空字符串或全零哈希表示没有加载有效配置
+        let hash = state.configuration_hash.read()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        let no_config = hash.is_empty() || hash.chars().all(|c| c == '0');
+        if no_config {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "message": "no configuration loaded" })),
+            ).into_response();
+        }
+    }
+
+    Json(json!({ "message": "ready" })).into_response()
+}
+
 /// POST /config — Accept declarative config (db-less mode) — POST /config — 接受声明式配置（db-less 模式）
+/// Supports both JSON body and multipart/form-data with a `config` YAML/JSON field.
+/// 支持 JSON 请求体和 multipart/form-data（含 `config` YAML/JSON 字段）。
 pub async fn post_config(
     State(state): State<AdminState>,
-    body: String,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Parse the config body as JSON — 将配置内容解析为 JSON
-    let config: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => {
+    // Extract config body depending on Content-Type — 根据 Content-Type 提取配置内容
+    let content_type = request.headers().get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let (body, config) = if content_type.contains("multipart/form-data") {
+        // Parse multipart form data — 解析 multipart 表单数据
+        let mut multipart: axum::extract::Multipart = match axum::extract::Multipart::from_request(request, &()).await {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to parse multipart form: {}", e) })),
+                ).into_response();
+            }
+        };
+
+        let mut config_str = String::new();
+        while let Ok(Some(field)) = multipart.next_field().await {
+            let name = field.name().map(|n| n.to_string());
+            if name.as_deref() == Some("config") {
+                config_str = field.text().await.unwrap_or_default();
+                break;
+            }
+        }
+
+        if config_str.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "message": format!("failed to parse declarative config: {}", e),
-                })),
+                Json(json!({ "message": "missing 'config' field in multipart form" })),
             ).into_response();
         }
+
+        // Try JSON first, then YAML — 先尝试 JSON，再尝试 YAML
+        let parsed: Value = match serde_json::from_str(&config_str) {
+            Ok(v) => v,
+            Err(_) => {
+                // Try YAML — 尝试 YAML
+                match serde_yaml::from_str(&config_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                        ).into_response();
+                    }
+                }
+            }
+        };
+
+        (config_str, parsed)
+    } else {
+        // JSON body — JSON 请求体
+        let body_bytes = match axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to read request body: {}", e) })),
+                ).into_response();
+            }
+        };
+        let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+        let parsed: Value = match serde_json::from_str(&body_str) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                ).into_response();
+            }
+        };
+        (body_str, parsed)
     };
+
+    // Validate declarative config: must be an object with _format_version — 验证声明式配置：必须是包含 _format_version 的对象
+    if !config.is_object() || !config.as_object().unwrap().contains_key("_format_version") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "failed to parse declarative config: expected object with '_format_version' key",
+            })),
+        ).into_response();
+    }
 
     // In db-less mode, load the config into the in-memory store — db-less 模式下将配置加载到内存存储
     if let Some(ref store) = state.dbless_store {
@@ -3740,8 +3842,34 @@ fn validate_transformer_plugin_config(
     match plugin_name {
         "response-transformer" => validate_response_transformer_config(config),
         "request-transformer" => validate_request_transformer_config(config),
+        "rate-limiting" => validate_rate_limiting_config(config),
         _ => None,
     }
+}
+
+/// Validate rate-limiting plugin config: at least one rate limit period must be set — 验证 rate-limiting 插件配置：至少需要设置一个限流周期
+fn validate_rate_limiting_config(config: &Value) -> Option<(StatusCode, Json<Value>)> {
+    let periods = ["second", "minute", "hour", "day", "month", "year"];
+    let has_any = periods.iter().any(|p| {
+        config.get(p).map_or(false, |v| !v.is_null())
+    });
+    if !has_any {
+        let msg = "at least one of these fields must be non-empty: \
+                   'config.second', 'config.minute', 'config.hour', \
+                   'config.day', 'config.month', 'config.year'";
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": 2,
+                "name": "schema violation",
+                "message": format!("schema violation ({})", msg),
+                "fields": {
+                    "@entity": [msg]
+                }
+            })),
+        ));
+    }
+    None
 }
 
 /// Check if a header name is valid (no commas, spaces, or other invalid chars) — 检查 header 名称是否有效

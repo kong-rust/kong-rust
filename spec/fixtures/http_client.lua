@@ -207,30 +207,29 @@ function Client:send(opts)
 
     -- normalize response headers (lowercase keys, case-insensitive lookup)
     -- 标准化响应头（小写键，大小写无关查找）
-    local norm_headers_raw = {}
+    -- Store headers directly in table for pairs() compatibility (LuaJIT doesn't call __pairs)
+    -- 将头部直接存储在表中以兼容 pairs()（LuaJIT 不调用 __pairs）
+    local norm_headers = {}
     if response_headers then
         for k, v in pairs(response_headers) do
-            norm_headers_raw[k:lower()] = v
+            norm_headers[k:lower()] = v
         end
     end
     -- Case-insensitive header access: res.headers["Allow"] → lookup "allow"
     -- 大小写无关的头部访问：res.headers["Allow"] → 查找 "allow"
-    local norm_headers = setmetatable({}, {
-        __index = function(_, key)
+    setmetatable(norm_headers, {
+        __index = function(self, key)
             if type(key) == "string" then
-                return norm_headers_raw[key:lower()]
+                return rawget(self, key:lower())
             end
-            return norm_headers_raw[key]
+            return nil
         end,
-        __newindex = function(_, key, value)
+        __newindex = function(self, key, value)
             if type(key) == "string" then
-                norm_headers_raw[key:lower()] = value
+                rawset(self, key:lower(), value)
             else
-                norm_headers_raw[key] = value
+                rawset(self, key, value)
             end
-        end,
-        __pairs = function(_)
-            return pairs(norm_headers_raw)
         end,
     })
 

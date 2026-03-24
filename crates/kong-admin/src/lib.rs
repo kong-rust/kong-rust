@@ -540,6 +540,7 @@ pub fn build_status_router(state: AdminState) -> Router {
 
     Router::new()
         .route("/status", get(status_info))
+        .route("/status/ready", get(status_ready))
         .route("/metrics", get(status_metrics))
         // admin-api-method plugin test endpoint — admin-api-method 测试插件端点
         .route("/hello", get(status_hello))
