@@ -3371,6 +3371,13 @@ fn validate_ca_certificate_cert(body: &Value) -> Result<(), (StatusCode, Json<Va
     let cert = X509::from_pem(cert_str.as_bytes())
         .map_err(|_| cert_schema_violation("certificate is not valid PEM format"))?;
 
+    // Check expiry first (Kong checks expiry before CA constraint) — 先检查过期（Kong 先检查过期再检查 CA 约束）
+    let not_after = cert.not_after();
+    let now = openssl::asn1::Asn1Time::days_from_now(0).map_err(|_| cert_schema_violation("internal error checking certificate expiry"))?;
+    if not_after < now {
+        return Err(cert_schema_violation("certificate expired, \"Not After\" time is in the past"));
+    }
+
     // Check CA basic constraint via X509v3 text output — 通过 X509v3 文本输出检查 CA 基本约束
     let is_ca = {
         let text_bytes = cert.to_text().unwrap_or_default();
@@ -3380,13 +3387,6 @@ fn validate_ca_certificate_cert(body: &Value) -> Result<(), (StatusCode, Json<Va
 
     if !is_ca {
         return Err(cert_schema_violation("certificate does not appear to be a CA because it is missing the \"CA\" basic constraint"));
-    }
-
-    // Check expiry — 检查是否过期
-    let not_after = cert.not_after();
-    let now = openssl::asn1::Asn1Time::days_from_now(0).map_err(|_| cert_schema_violation("internal error checking certificate expiry"))?;
-    if not_after < now {
-        return Err(cert_schema_violation("certificate expired, \"Not After\" time is in the past"));
     }
 
     Ok(())
