@@ -3243,17 +3243,154 @@ pub async fn delete_sni(State(state): State<AdminState>, Path(id_or_name): Path<
     let _ = state.refresh_tx.send("snis");
     result
 }
-entity_handlers!(
-    CaCertificate,
-    ca_certificates,
-    "ca_certificates",
-    list_ca_certificates,
-    get_ca_certificate,
-    create_ca_certificate,
-    update_ca_certificate,
-    upsert_ca_certificate,
-    delete_ca_certificate
-);
+// ---- CA Certificate custom handlers (validation: CA constraint, expiry, FK references) ----
+// ---- CA Certificate 自定义处理器（验证：CA 约束、过期检查、FK 引用检查）----
+
+pub async fn list_ca_certificates(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    do_list::<CaCertificate>(&state.ca_certificates, &params).await
+}
+
+pub async fn get_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_get::<CaCertificate>(&state.ca_certificates, &id_or_name).await
+}
+
+pub async fn create_ca_certificate(
+    State(state): State<AdminState>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(err) = validate_ca_certificate_cert(&body) {
+        return err;
+    }
+    let result = do_create::<CaCertificate>(&state.ca_certificates, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn update_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    // PATCH: validate cert if provided — PATCH：如果提供了 cert 则验证
+    if body.get("cert").and_then(|v| v.as_str()).is_some() {
+        if let Err(err) = validate_ca_certificate_cert(&body) {
+            return err;
+        }
+    }
+    let result = do_update::<CaCertificate>(&state.ca_certificates, &id_or_name, &body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn upsert_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    // PUT: cert is required — PUT：cert 是必填字段
+    let cert_str = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+    if cert_str.is_empty() {
+        return cert_schema_violation("cert: required field missing");
+    }
+    if let Err(err) = validate_ca_certificate_cert(&body) {
+        return err;
+    }
+    let result = do_upsert::<CaCertificate>(&state.ca_certificates, &id_or_name, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn delete_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> axum::response::Response {
+    // Check if any service references this CA certificate — 检查是否有 service 引用此 CA 证书
+    let ca_id = match uuid::Uuid::parse_str(&id_or_name) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            // Try to look up the entity to get its UUID — 尝试查找实体获取 UUID
+            let (status, Json(body)) = do_get::<CaCertificate>(&state.ca_certificates, &id_or_name).await;
+            if status.is_success() {
+                body.get("id").and_then(|v| v.as_str()).and_then(|s| uuid::Uuid::parse_str(s).ok())
+            } else {
+                // Entity not found, let do_delete handle the error — 实体未找到，交给 do_delete 处理
+                None
+            }
+        }
+    };
+    if let Some(ca_id) = ca_id {
+        // Scan services for references to this CA cert — 扫描 services 是否引用了此 CA 证书
+        let all_params = PageParams { size: 1000, ..Default::default() };
+        if let Ok(page) = state.services.page(&all_params).await {
+            for svc in &page.data {
+                if let Some(ref ca_certs) = svc.ca_certificates {
+                    if ca_certs.contains(&ca_id) {
+                        return (StatusCode::BAD_REQUEST, Json(json!({
+                            "message": format!("ca certificate {} is still referenced by services (id = {})", ca_id, svc.id),
+                            "name": "foreign key violation",
+                            "code": 4,
+                        }))).into_response();
+                    }
+                }
+            }
+        }
+    }
+    let result = do_delete::<CaCertificate>(&state.ca_certificates, &id_or_name).await;
+    let _ = state.refresh_tx.send("ca_certificates");
+    result
+}
+
+/// Validate CA certificate: must be valid PEM, must have CA basic constraint, must not be expired
+/// 验证 CA 证书：必须是有效 PEM、必须有 CA 基本约束、不能已过期
+fn validate_ca_certificate_cert(body: &Value) -> Result<(), (StatusCode, Json<Value>)> {
+    use openssl::x509::X509;
+
+    let cert_str = match body.get("cert").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()), // No cert provided, skip validation — 未提供 cert，跳过验证
+    };
+
+    // Check for multiple certificates — 检查是否包含多个证书
+    let pem_count = cert_str.matches("-----BEGIN CERTIFICATE-----").count();
+    if pem_count > 1 {
+        return Err(cert_schema_violation("please submit only one certificate at a time"));
+    }
+
+    let cert = X509::from_pem(cert_str.as_bytes())
+        .map_err(|_| cert_schema_violation("certificate is not valid PEM format"))?;
+
+    // Check CA basic constraint via X509v3 text output — 通过 X509v3 文本输出检查 CA 基本约束
+    let is_ca = {
+        let text_bytes = cert.to_text().unwrap_or_default();
+        let text = String::from_utf8_lossy(&text_bytes);
+        text.contains("CA:TRUE")
+    };
+
+    if !is_ca {
+        return Err(cert_schema_violation("certificate does not appear to be a CA because it is missing the \"CA\" basic constraint"));
+    }
+
+    // Check expiry — 检查是否过期
+    let not_after = cert.not_after();
+    let now = openssl::asn1::Asn1Time::days_from_now(0).map_err(|_| cert_schema_violation("internal error checking certificate expiry"))?;
+    if not_after < now {
+        return Err(cert_schema_violation("certificate expired, \"Not After\" time is in the past"));
+    }
+
+    Ok(())
+}
 entity_handlers!(
     Vault,
     vaults,
