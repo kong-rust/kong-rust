@@ -85,7 +85,7 @@ end
 
 -- generate multipart boundary — 生成 multipart 边界
 local function generate_boundary()
-    return "----FormBoundary" .. string.format("%x%x", math.random(0, 0xFFFFFFFF), math.random(0, 0xFFFFFFFF))
+    return "----FormBoundary" .. string.format("%04x%04x%04x%04x", math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF))
 end
 
 -- encode multipart/form-data body — 编码 multipart/form-data 请求体

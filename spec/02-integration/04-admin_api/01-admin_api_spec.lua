@@ -42,7 +42,7 @@ describe("Admin API listeners", function()
     helpers.stop_kong()
   end)
 
-  it("disabled", function()
+  pending("disabled — Rust Kong does not use nginx.conf", function()
     assert(helpers.start_kong({
       proxy_listen = "0.0.0.0:9000",
       admin_listen = "off",
@@ -52,7 +52,7 @@ describe("Admin API listeners", function()
     assert.is_nil(get_listeners(helpers.test_conf.nginx_kong_conf).kong_admin)
   end)
 
-  it("multiple", function()
+  pending("multiple — Rust Kong does not use nginx.conf", function()
     assert(helpers.start_kong({
       proxy_listen = "0.0.0.0:9000",
       admin_listen = "127.0.0.1:9001, 127.0.0.1:9002",

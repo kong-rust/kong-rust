@@ -676,7 +676,7 @@ function Blueprint:new(admin_client)
         targets      = "/upstreams/%s/targets",
         certificates = "/certificates",
         snis         = "/snis",
-        ca_certificates = "/ca-certificates",
+        ca_certificates = "/ca_certificates",
         vaults       = "/vaults",
     }
 
@@ -1013,7 +1013,7 @@ function DbProxy:new(admin_client_fn)
         targets      = "/upstreams/%s/targets",
         certificates = "/certificates",
         snis         = "/snis",
-        ca_certificates = "/ca-certificates",
+        ca_certificates = "/ca_certificates",
         vaults       = "/vaults",
     }
 
@@ -1022,7 +1022,8 @@ function DbProxy:new(admin_client_fn)
     function db:truncate(entity_name)
         local endpoint = entity_endpoints[entity_name]
         if not endpoint then
-            endpoint = "/" .. entity_name:gsub("_", "-")
+            -- Use underscore paths (Rust admin API convention) — 使用下划线路径（Rust admin API 惯例）
+            endpoint = "/" .. entity_name
         end
         if endpoint:find("%%s") then return true end
 
@@ -1221,7 +1222,7 @@ function _M.get_db_utils(strategy, tables, plugins)
             table.insert(ordered, tables[i])
         end
         for _, tbl in ipairs(ordered) do
-            local endpoint = "/" .. tbl:gsub("_", "-")
+            local endpoint = "/" .. tbl
             for _ = 1, 100 do
                 local res = admin:get(endpoint .. "?size=1000")
                 if not res or res.status ~= 200 then break end
@@ -1984,15 +1985,16 @@ function _M.clean_db()
     local admin = _M.admin_client()
     if not admin then return end
 
+    -- Use actual API paths (underscore, not hyphen) — 使用实际的 API 路径（下划线，非连字符）
     local entities = { "plugins", "snis", "routes", "services", "consumers",
                        "targets", "upstreams", "certificates", "ca_certificates" }
     for _, entity in ipairs(entities) do
-        local res = admin:get("/" .. entity:gsub("_", "-"))
+        local res = admin:get("/" .. entity)
         if res and res.status == 200 then
             local ok, body = pcall(cjson.decode, res.body)
             if ok and body and body.data then
                 for _, item in ipairs(body.data) do
-                    admin:delete("/" .. entity:gsub("_", "-") .. "/" .. item.id)
+                    admin:delete("/" .. entity .. "/" .. item.id)
                 end
             end
         end
