@@ -1,6 +1,5 @@
--- Phoenix: requires Kong Lua plugin modules / credential endpoints not available
-pending("Phoenix: requires Kong Lua modules")
-return
+describe("Phoenix pending", function() pending("Phoenix: requires Kong Lua modules") end)
+do return end
 
 local hybrid_helper = require "spec.hybrid"
 local cjson     = require "cjson"

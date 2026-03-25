@@ -1,6 +1,5 @@
--- Phoenix: requires keyauth_credentials endpoint not available in Rust rewrite
-pending("Phoenix: requires keyauth credential endpoints")
-return
+describe("Phoenix pending", function() pending("Phoenix: requires keyauth credential endpoints") end)
+do return end
 
 local helpers = require "spec.helpers"
 

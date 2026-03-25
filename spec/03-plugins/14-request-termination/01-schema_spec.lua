@@ -1,6 +1,5 @@
--- Phoenix: This test requires Kong Lua modules not available in the Rust rewrite
-pending("Phoenix: requires Kong Lua modules")
-return
+describe("Phoenix pending", function() pending("Phoenix: requires Kong Lua modules") end)
+do return end
 
 local schema_def = require "kong.plugins.request-termination.schema"
 local v = require("spec.helpers").validate_plugin_config_schema

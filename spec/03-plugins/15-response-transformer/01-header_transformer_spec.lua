@@ -1,6 +1,5 @@
--- Phoenix: This test requires Kong Lua modules not available in the Rust rewrite
-pending("Phoenix: requires Kong Lua modules")
-return
+describe("Phoenix pending", function() pending("Phoenix: requires Kong Lua modules") end)
+do return end
 
 local CONTENT_LENGTH = "Content-Length"
 local CONTENT_TYPE = "Content-Type"
