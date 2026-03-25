@@ -2363,14 +2363,108 @@ end
 _M.grpcbin_url = "grpc://127.0.0.1:15002"
 _M.grpcbin_ssl_url = "grpcs://127.0.0.1:15003"
 
--- proxy_client_grpc returns a callable that always fails — 返回始终失败的可调用对象
+-- proxy_client_grpc — gRPC 客户端（使用 curl --http2 模拟）
 function _M.proxy_client_grpc()
-    error("gRPC client is not yet supported in Kong-Rust test framework")
+    -- Return a callable that sends gRPC-like HTTP/2 requests via curl
+    -- 返回一个通过 curl 发送类 gRPC HTTP/2 请求的可调用对象
+    return function(opts)
+        local service = opts.service or ""
+        local grpc_opts = opts.opts or {}
+        local port = _M.test_conf.proxy_port or 9000
+
+        -- Use curl with --http2-prior-knowledge for plaintext gRPC
+        -- 使用 curl 的 --http2-prior-knowledge 发送明文 gRPC
+        local cmd = string.format(
+            "curl -s -o /dev/null -w '%%{http_code}' --http2-prior-knowledge " ..
+            "-H 'Content-Type: application/grpc' " ..
+            "-H 'TE: trailers' " ..
+            "-X POST 'http://127.0.0.1:%d/%s' 2>&1",
+            port, service:gsub("%.", "/")
+        )
+
+        local handle = io.popen(cmd)
+        local output = handle:read("*a")
+        local ok = handle:close()
+
+        -- gRPC errors return non-200 status codes
+        -- Parse the output for gRPC status
+        local status = output:match("(%d+)")
+        if status and tonumber(status) == 200 then
+            return true, output
+        else
+            -- Format error similar to grpcurl output
+            local code_name = "Unavailable"
+            if status == "503" or status == "000" then
+                code_name = "Unavailable"
+            elseif status == "404" then
+                code_name = "Unimplemented"
+            end
+            return false, string.format("Code: %s\nMessage: %s", code_name, output)
+        end
+    end
 end
 
--- http2_client stub — HTTP/2 客户端桩函数
+-- http2_client — HTTP/2 客户端（使用 curl --http2 实现）
 function _M.http2_client(host, port, tls)
-    error("HTTP/2 client is not yet supported in Kong-Rust test framework")
+    -- Return a callable HTTP/2 client using curl
+    -- 返回使用 curl 实现的 HTTP/2 客户端
+    local scheme = tls and "https" or "http"
+
+    -- Pseudo-headers object with :get method — 带 :get 方法的伪 headers 对象
+    local function make_headers(status, raw_headers)
+        local h = { [":status"] = tostring(status) }
+        for line in raw_headers:gmatch("[^\r\n]+") do
+            local k, v = line:match("^([^:]+):%s*(.+)$")
+            if k then
+                h[k:lower()] = v
+            end
+        end
+        function h:get(key)
+            return self[key]
+        end
+        return h
+    end
+
+    return function(opts)
+        local h = opts.headers or {}
+        local method = h[":method"] or "GET"
+        local path = h[":path"] or "/"
+        local authority = h[":authority"] or string.format("%s:%d", host, port)
+
+        -- Build curl command with HTTP/2
+        -- 构建 HTTP/2 curl 命令
+        local extra_headers = ""
+        for k, v in pairs(h) do
+            if k:sub(1,1) ~= ":" then
+                extra_headers = extra_headers .. string.format(" -H '%s: %s'", k, v)
+            end
+        end
+
+        local tls_opts = tls and "-k" or ""
+        local cmd = string.format(
+            "curl -s %s --http2 -X %s -D /dev/stderr '%s://%s%s' -H 'Host: %s'%s 2>/tmp/h2_headers.txt",
+            tls_opts, method, scheme, authority, path, authority, extra_headers
+        )
+
+        local handle = io.popen(cmd)
+        local body = handle:read("*a") or ""
+        handle:close()
+
+        -- Read response headers from stderr redirect
+        -- 从 stderr 重定向读取响应头
+        local hf = io.open("/tmp/h2_headers.txt", "r")
+        local raw_headers = ""
+        local status_code = "200"
+        if hf then
+            raw_headers = hf:read("*a") or ""
+            hf:close()
+            -- Parse status line: "HTTP/2 200" or "HTTP/1.1 200 OK"
+            status_code = raw_headers:match("HTTP/[%d.]+ (%d+)") or "200"
+        end
+
+        local headers = make_headers(status_code, raw_headers)
+        return body, headers
+    end
 end
 
 ---------------------------------------------------------------------------
