@@ -1237,25 +1237,28 @@ function _M.get_db_utils(strategy, tables, plugins)
         end
     end
 
-    -- truncate specified tables or all (reverse order for FK deps, with pagination) — 清空指定表或所有表（逆序处理外键依赖，含分页）
+    -- truncate: use SQL TRUNCATE CASCADE for reliable cleanup — 使用 SQL TRUNCATE CASCADE 可靠清理
+    -- This avoids FK constraint issues when deleting via Admin API — 避免通过 Admin API 删除时的外键约束问题
+    local pg_env = string.format("PGPASSWORD=%s", _M.test_conf.pg_password or "kong")
+    local pg_cmd = string.format("%s psql -h %s -p %s -U %s %s -c",
+        pg_env,
+        _M.test_conf.pg_host or "127.0.0.1",
+        _M.test_conf.pg_port or "5432",
+        _M.test_conf.pg_user or "kong",
+        _M.test_conf.pg_database or "kong_tests")
+
     if tables then
-        local ordered = {}
-        for i = #tables, 1, -1 do
-            table.insert(ordered, tables[i])
+        -- Build TRUNCATE statement for specified tables — 构建指定表的 TRUNCATE 语句
+        local sql_tables = {}
+        for _, tbl in ipairs(tables) do
+            sql_tables[#sql_tables + 1] = tbl
         end
-        for _, tbl in ipairs(ordered) do
-            local endpoint = "/" .. tbl
-            for _ = 1, 100 do
-                local res = admin:get(endpoint .. "?size=1000")
-                if not res or res.status ~= 200 then break end
-                local ok, body = pcall(cjson.decode, res.body)
-                if not ok or not body or not body.data or #body.data == 0 then break end
-                for _, item in ipairs(body.data) do
-                    admin:delete(endpoint .. "/" .. item.id)
-                end
-                if #body.data < 1000 then break end
-            end
-        end
+        local truncate_sql = "TRUNCATE " .. table.concat(sql_tables, ", ") .. " CASCADE"
+        os.execute(string.format("%s %q 2>/dev/null", pg_cmd, truncate_sql))
+    else
+        -- Truncate all known tables — 清空所有已知表
+        os.execute(string.format("%s %q 2>/dev/null", pg_cmd,
+            "TRUNCATE plugins, snis, routes, services, certificates, targets, upstreams, consumers, ca_certificates CASCADE"))
     end
 
     local bp = Blueprint:new(admin)
@@ -2356,52 +2359,115 @@ function _M.wait_for_all_config_update(opts)
 end
 
 ---------------------------------------------------------------------------
--- gRPC / HTTP2 stubs — gRPC / HTTP2 桩函数
--- These features are not yet implemented in Kong-Rust.
+-- gRPC / HTTP2 — gRPC / HTTP2 客户端
+-- Uses grpcurl CLI tool — 使用 grpcurl 命令行工具
 ---------------------------------------------------------------------------
 
 _M.grpcbin_url = "grpc://127.0.0.1:15002"
 _M.grpcbin_ssl_url = "grpcs://127.0.0.1:15003"
 
--- proxy_client_grpc — gRPC 客户端（使用 curl --http2 模拟）
-function _M.proxy_client_grpc()
-    -- Return a callable that sends gRPC-like HTTP/2 requests via curl
-    -- 返回一个通过 curl 发送类 gRPC HTTP/2 请求的可调用对象
-    return function(opts)
-        local service = opts.service or ""
-        local grpc_opts = opts.opts or {}
-        local port = _M.test_conf.proxy_port or 9000
+-- Proto file path — Proto 文件路径
+local MOCK_GRPC_UPSTREAM_PROTO_PATH = "./spec/fixtures/grpc/hello.proto"
 
-        -- Use curl with --http2-prior-knowledge for plaintext gRPC
-        -- 使用 curl 的 --http2-prior-knowledge 发送明文 gRPC
-        local cmd = string.format(
-            "curl -s -o /dev/null -w '%%{http_code}' --http2-prior-knowledge " ..
-            "-H 'Content-Type: application/grpc' " ..
-            "-H 'TE: trailers' " ..
-            "-X POST 'http://127.0.0.1:%d/%s' 2>&1",
-            port, service:gsub("%.", "/")
-        )
-
-        local handle = io.popen(cmd)
-        local output = handle:read("*a")
-        local ok = handle:close()
-
-        -- gRPC errors return non-200 status codes
-        -- Parse the output for gRPC status
-        local status = output:match("(%d+)")
-        if status and tonumber(status) == 200 then
-            return true, output
-        else
-            -- Format error similar to grpcurl output
-            local code_name = "Unavailable"
-            if status == "503" or status == "000" then
-                code_name = "Unavailable"
-            elseif status == "404" then
-                code_name = "Unimplemented"
-            end
-            return false, string.format("Code: %s\nMessage: %s", code_name, output)
+-- Generate grpcurl flags from a table of flag-value pairs — 从 flag-value 对生成 grpcurl 参数
+-- If value is not a string, the flag is passed as-is — 如果 value 不是字符串，flag 原样传递
+local function gen_grpcurl_opts(opts_t)
+    local opts_l = {}
+    for opt, val in pairs(opts_t) do
+        if val ~= false then
+            opts_l[#opts_l + 1] = opt .. " " .. (type(val) == "string" and val or "")
         end
     end
+    return table.concat(opts_l, " ")
+end
+
+-- Create a gRPC client using grpcurl — 使用 grpcurl 创建 gRPC 客户端
+-- @param host hostname to connect to
+-- @param port port to connect to
+-- @param opts table of grpcurl flags
+-- @return callable gRPC client
+local function grpc_client(host, port, opts)
+    host = assert(host)
+    port = assert(tostring(port))
+    opts = opts or {}
+    if not opts["-proto"] then
+        opts["-proto"] = MOCK_GRPC_UPSTREAM_PROTO_PATH
+    end
+
+    local t = {
+        opts = opts,
+        cmd_template = string.format("grpcurl %%s %s:%s %%s", host, port),
+    }
+
+    return setmetatable(t, {
+        __call = function(self, args)
+            local service = assert(args.service)
+            local body = args.body
+            local arg_opts = args.opts or {}
+
+            local t_body = type(body)
+            if t_body ~= "nil" then
+                if t_body == "table" then
+                    body = require("cjson").encode(body)
+                end
+                arg_opts["-d"] = string.format("'%s'", body)
+            end
+
+            -- Merge base opts with call-specific opts — 合并基础选项和调用特定选项
+            local merged = {}
+            for k, v in pairs(self.opts) do merged[k] = v end
+            for k, v in pairs(arg_opts) do merged[k] = v end
+
+            local cmd_opts = gen_grpcurl_opts(merged)
+            local cmd = string.format(self.cmd_template, cmd_opts, service)
+
+            -- Use temp files to capture output + exit code (LuaJIT io.popen:close() always returns true)
+            -- 使用临时文件捕获输出和退出码（LuaJIT 的 io.popen:close() 总是返回 true）
+            local stdout_file = os.tmpname()
+            local stderr_file = os.tmpname()
+            local full_cmd = string.format("%s >%s 2>%s", cmd, stdout_file, stderr_file)
+            local exit_code = os.execute(full_cmd)
+
+            local stdout_f = io.open(stdout_file, "r")
+            local stdout = stdout_f and stdout_f:read("*a") or ""
+            if stdout_f then stdout_f:close() end
+
+            local stderr_f = io.open(stderr_file, "r")
+            local stderr = stderr_f and stderr_f:read("*a") or ""
+            if stderr_f then stderr_f:close() end
+
+            os.remove(stdout_file)
+            os.remove(stderr_file)
+
+            local output = (stdout or "") .. (stderr or "")
+            -- LuaJIT os.execute returns exit code (0 = success) — LuaJIT os.execute 返回退出码（0 = 成功）
+            if exit_code == 0 then
+                return true, output
+            else
+                return nil, output
+            end
+        end,
+    })
+end
+
+-- proxy_client_grpc — plaintext gRPC client for proxy port — 代理端口的明文 gRPC 客户端
+-- @param host hostname (default: 127.0.0.1)
+-- @param port port (default: proxy_port)
+-- @return gRPC client
+function _M.proxy_client_grpc(host, port)
+    local proxy_ip = host or "127.0.0.1"
+    local proxy_port = port or (_M.test_conf and _M.test_conf.proxy_port) or 9000
+    return grpc_client(proxy_ip, proxy_port, {["-plaintext"] = true})
+end
+
+-- proxy_client_grpcs — TLS gRPC client for proxy SSL port — 代理 SSL 端口的 TLS gRPC 客户端
+-- @param host hostname (default: 127.0.0.1)
+-- @param port port (default: proxy_ssl_port)
+-- @return gRPC client
+function _M.proxy_client_grpcs(host, port)
+    local proxy_ip = host or "127.0.0.1"
+    local proxy_port = port or (_M.test_conf and _M.test_conf.proxy_ssl_port) or 9443
+    return grpc_client(proxy_ip, proxy_port, {["-insecure"] = true})
 end
 
 -- http2_client — HTTP/2 客户端（使用 curl --http2 实现）

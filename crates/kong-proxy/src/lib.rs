@@ -50,6 +50,8 @@ pub struct KongCtx {
     pub upstream_addr: Option<String>,
     /// Whether to use TLS for upstream connection — 是否使用 TLS 连接上游
     pub upstream_tls: bool,
+    /// Whether upstream is gRPC (needs h2c for plaintext) — 上游是否为 gRPC（明文时需要 h2c）
+    pub upstream_is_grpc: bool,
     /// Upstream SNI — 上游 SNI
     pub upstream_sni: String,
     /// Plugin context — 插件上下文
@@ -324,15 +326,21 @@ impl KongProxy {
     }
 
     /// Resolve upstream address — 解析上游地址
+    /// Returns (addr, use_tls, sni, is_grpc) — 返回 (地址, 是否TLS, SNI, 是否gRPC)
     fn resolve_upstream(
         &self,
         service: &Service,
-    ) -> std::result::Result<(String, bool, String), Box<pingora_core::Error>> {
+    ) -> std::result::Result<(String, bool, String, bool), Box<pingora_core::Error>> {
         let use_tls = matches!(
             service.protocol,
             kong_core::models::Protocol::Https
                 | kong_core::models::Protocol::Grpcs
                 | kong_core::models::Protocol::Tls
+        );
+
+        let is_grpc = matches!(
+            service.protocol,
+            kong_core::models::Protocol::Grpc | kong_core::models::Protocol::Grpcs
         );
 
         // Try resolving upstream address via load balancer — 尝试通过负载均衡器解析上游地址
@@ -343,7 +351,7 @@ impl KongProxy {
                     let sni = lb
                         .host_header()
                         .unwrap_or_else(|| addr.split(':').next().unwrap_or(&addr).to_string());
-                    return Ok((addr, use_tls, sni));
+                    return Ok((addr, use_tls, sni, is_grpc));
                 }
             }
         }
@@ -351,7 +359,7 @@ impl KongProxy {
         // Use Service's host:port directly — 直接使用 Service 的 host:port
         let addr = format!("{}:{}", service.host, service.port);
         let sni = service.host.clone();
-        Ok((addr, use_tls, sni))
+        Ok((addr, use_tls, sni, is_grpc))
     }
 
     // Helper: check if a specific header feature is enabled in config.headers — 检查配置中是否启用了特定 header 功能
@@ -610,6 +618,7 @@ impl ProxyHttp for KongProxy {
             service: None,
             upstream_addr: None,
             upstream_tls: false,
+            upstream_is_grpc: false,
             upstream_sni: String::new(),
             plugin_ctx: RequestCtx::new(),
             resolved_plugins: Arc::new(Vec::new()),
@@ -772,7 +781,7 @@ impl ProxyHttp for KongProxy {
         }
 
         // Resolve upstream address — 解析上游地址
-        let (mut upstream_addr, mut upstream_tls, mut upstream_sni) = self
+        let (mut upstream_addr, mut upstream_tls, mut upstream_sni, upstream_is_grpc) = self
             .resolve_upstream(&service)
             .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
 
@@ -789,6 +798,7 @@ impl ProxyHttp for KongProxy {
         ctx.upstream_addr = Some(upstream_addr);
         ctx.upstream_tls = upstream_tls;
         ctx.upstream_sni = upstream_sni;
+        ctx.upstream_is_grpc = upstream_is_grpc;
         ctx.resolved_plugins = resolved_plugins;
 
         Ok(false) // Continue to upstream — 继续到上游
@@ -828,9 +838,13 @@ impl ProxyHttp for KongProxy {
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
-        // Set ALPN to prefer HTTP/2 over HTTP/1.1 if TLS is used
+        // Set HTTP version for upstream connection — 设置上游连接的 HTTP 版本
         if ctx.upstream_tls {
+            // TLS: prefer HTTP/2 via ALPN — TLS：通过 ALPN 优先使用 HTTP/2
             peer.options.alpn = pingora_core::protocols::tls::ALPN::H2H1;
+        } else if ctx.upstream_is_grpc {
+            // Plaintext gRPC: force HTTP/2 (h2c prior knowledge) — 明文 gRPC：强制 HTTP/2（h2c 先验知识）
+            peer.options.set_http_version(2, 2);
         }
 
         // Apply Service timeouts — 应用 Service 超时设置

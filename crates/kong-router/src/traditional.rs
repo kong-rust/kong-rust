@@ -354,8 +354,17 @@ impl TraditionalRouter {
 
         // Protocol matching — 协议匹配
         // If route defines protocols, request scheme must be in the list — 如果路由定义了 protocols，请求 scheme 必须在列表中
+        // gRPC routes use "grpc"/"grpcs" but actual requests arrive as "http"/"https",
+        // so we treat them as compatible — gRPC 路由使用 "grpc"/"grpcs" 但实际请求以 "http"/"https" 到达，视为兼容
         if !route.protocols.is_empty() {
-            if !route.protocols.iter().any(|p| p == &ctx.scheme) {
+            let scheme_matches = route.protocols.iter().any(|p| {
+                p == &ctx.scheme
+                    || (p == "grpc" && ctx.scheme == "http")
+                    || (p == "grpcs" && ctx.scheme == "https")
+                    || (p == "ws" && ctx.scheme == "http")
+                    || (p == "wss" && ctx.scheme == "https")
+            });
+            if !scheme_matches {
                 return false;
             }
         }

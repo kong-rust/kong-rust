@@ -419,6 +419,14 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
     // Phase 3: Create Proxy Service, bind all proxy_listen addresses — 阶段 3：创建 Proxy Service，绑定所有 proxy_listen 地址
     let mut proxy_service =
         pingora_proxy::http_proxy_service(&server.configuration, kong_proxy.clone());
+
+    // Enable h2c (plaintext HTTP/2) for gRPC support — 启用 h2c（明文 HTTP/2）以支持 gRPC
+    // Pingora will peek for the h2 preface on plaintext connections and auto-detect HTTP/2
+    if let Some(proxy) = proxy_service.app_logic_mut() {
+        let mut server_opts = pingora_core::apps::HttpServerOptions::default();
+        server_opts.h2c = true;
+        proxy.server_options = Some(server_opts);
+    }
     for addr in &config.proxy_listen {
         let listen_addr = format!("{}:{}", addr.ip, addr.port);
         if addr.ssl {
