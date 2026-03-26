@@ -874,7 +874,25 @@ pub async fn post_config(
                 ).into_response();
             }
         };
-        (body_str, parsed)
+        // If JSON has a "config" field with a string value, parse it as YAML
+        // 如果 JSON 有 "config" 字段且值为字符串，将其作为 YAML 解析
+        if let Some(config_str) = parsed.get("config").and_then(|v| v.as_str()) {
+            let inner: Value = match serde_yaml::from_str(config_str) {
+                Ok(v) => v,
+                Err(_) => match serde_json::from_str(config_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                        ).into_response();
+                    }
+                }
+            };
+            (config_str.to_string(), inner)
+        } else {
+            (body_str, parsed)
+        }
     };
 
     // Validate declarative config: must be an object with _format_version — 验证声明式配置：必须是包含 _format_version 的对象

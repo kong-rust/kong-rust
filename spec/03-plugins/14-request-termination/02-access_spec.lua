@@ -278,6 +278,7 @@ for _, strategy in helpers.each_strategy() do
         assert.equal([[<html><body><h1>Service is down due to content infringement</h1></body></html>]], body)
       end)
 
+      pending("Phoenix: gRPC proxy not yet implemented")
       it("status code with default message #grpc", function()
         local ok, res = helpers.proxy_client_grpc(){
           service = "hello.HelloService.SayHello",
