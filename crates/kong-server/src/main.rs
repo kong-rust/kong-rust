@@ -4,6 +4,7 @@ pub mod mock_upstream;
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -811,16 +812,41 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
         let app = kong_admin::build_admin_router(self.state.clone());
         if let Some(status_bind_addr) = status_bind {
             let status_app = kong_admin::build_status_router(self.state.clone());
+            let status_addr = self.config.status_listen.first().cloned();
+            let ssl_cert = self.config.ssl_cert.first().cloned();
+            let ssl_cert_key = self.config.ssl_cert_key.first().cloned();
             tracing::info!("Status API 监听于: {}", status_bind_addr);
             tokio::spawn(async move {
-                match tokio::net::TcpListener::bind(&status_bind_addr).await {
-                    Ok(listener) => {
-                        if let Err(e) = axum::serve(listener, status_app).await {
-                            tracing::error!("Status API 异常退出: {e}");
+                let needs_tls = status_addr.as_ref().map_or(false, |a| a.ssl);
+                if needs_tls {
+                    // TLS + HTTP/2 mode for Status API — Status API 的 TLS + HTTP/2 模式
+                    if let (Some(cert_path), Some(key_path)) = (ssl_cert, ssl_cert_key) {
+                        match start_tls_server(
+                            &status_bind_addr,
+                            &cert_path,
+                            &key_path,
+                            status_app,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(e) => tracing::error!("Status API TLS 异常退出: {e}"),
                         }
+                    } else {
+                        tracing::error!(
+                            "Status API SSL 配置缺少 ssl_cert/ssl_cert_key"
+                        );
                     }
-                    Err(e) => {
-                        tracing::error!("Status API 绑定失败 {}: {e}", status_bind_addr);
+                } else {
+                    match tokio::net::TcpListener::bind(&status_bind_addr).await {
+                        Ok(listener) => {
+                            if let Err(e) = axum::serve(listener, status_app).await {
+                                tracing::error!("Status API 异常退出: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Status API 绑定失败 {}: {e}", status_bind_addr);
+                        }
                     }
                 }
             });
@@ -845,5 +871,61 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
                 tracing::info!("Admin API 收到关闭信号，正在停止...");
             }
         }
+    }
+}
+
+/// Start a TLS server with HTTP/2 support using openssl — 使用 openssl 启动支持 HTTP/2 的 TLS 服务器
+async fn start_tls_server(
+    addr: &str,
+    cert_path: &str,
+    key_path: &str,
+    app: axum::Router,
+) -> anyhow::Result<()> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder as HttpBuilder;
+    use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
+    use tower::ServiceExt;
+
+    // Build OpenSSL acceptor with ALPN h2 — 构建带 ALPN h2 的 OpenSSL acceptor
+    let mut acceptor_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+    acceptor_builder.set_certificate_file(cert_path, SslFiletype::PEM)?;
+    acceptor_builder.set_private_key_file(key_path, SslFiletype::PEM)?;
+    // Server-side ALPN selection callback — 服务端 ALPN 选择回调
+    acceptor_builder.set_alpn_select_callback(|_ssl, client_protos| {
+        // Prefer h2, fallback to http/1.1 — 优先 h2，回退到 http/1.1
+        openssl::ssl::select_next_proto(b"\x02h2\x08http/1.1", client_protos)
+            .ok_or(openssl::ssl::AlpnError::NOACK)
+    });
+    let acceptor = acceptor_builder.build();
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("Status API TLS+HTTP/2 监听于: {}", addr);
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let ssl = Ssl::new(acceptor.context())?;
+        let mut tls_stream = tokio_openssl::SslStream::new(ssl, stream)?;
+        if Pin::new(&mut tls_stream).accept().await.is_err() {
+            continue;
+        }
+        let app = app.clone();
+        tokio::spawn(async move {
+            let io = TokioIo::new(tls_stream);
+            let builder = HttpBuilder::new(TokioExecutor::new());
+            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let app = app.clone();
+                async move {
+                    use tower::ServiceExt as _;
+                    let req = req.map(axum::body::Body::new);
+                    Ok::<_, std::convert::Infallible>(app.oneshot(req).await.unwrap_or_else(|e| {
+                        axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Internal error: {e}"),
+                        ))
+                    }))
+                }
+            });
+            let _ = builder.serve_connection_with_upgrades(io, svc).await;
+        });
     }
 }
