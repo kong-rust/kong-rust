@@ -820,22 +820,30 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
                 let needs_tls = status_addr.as_ref().map_or(false, |a| a.ssl);
                 if needs_tls {
                     // TLS + HTTP/2 mode for Status API — Status API 的 TLS + HTTP/2 模式
-                    if let (Some(cert_path), Some(key_path)) = (ssl_cert, ssl_cert_key) {
-                        match start_tls_server(
-                            &status_bind_addr,
-                            &cert_path,
-                            &key_path,
-                            status_app,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(e) => tracing::error!("Status API TLS 异常退出: {e}"),
-                        }
+                    // If no explicit cert, generate self-signed — 如果没有显式证书，生成自签证书
+                    let (cert_path, key_path) = if let (Some(c), Some(k)) = (ssl_cert, ssl_cert_key) {
+                        (c, k)
                     } else {
-                        tracing::error!(
-                            "Status API SSL 配置缺少 ssl_cert/ssl_cert_key"
-                        );
+                        // Generate self-signed cert — 生成自签证书
+                        let cert_file = "/tmp/kong_status_self_signed.pem";
+                        let key_file = "/tmp/kong_status_self_signed_key.pem";
+                        let _ = std::process::Command::new("openssl")
+                            .args(["req", "-x509", "-newkey", "rsa:2048",
+                                   "-keyout", key_file, "-out", cert_file,
+                                   "-days", "365", "-nodes", "-subj", "/CN=localhost"])
+                            .output();
+                        (cert_file.to_string(), key_file.to_string())
+                    };
+                    match start_tls_server(
+                        &status_bind_addr,
+                        &cert_path,
+                        &key_path,
+                        status_app,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => tracing::error!("Status API TLS 异常退出: {e}"),
                     }
                 } else {
                     match tokio::net::TcpListener::bind(&status_bind_addr).await {

@@ -2507,18 +2507,19 @@ function _M.http2_client(host, port, tls)
         end
 
         local tls_opts = tls and "-k" or ""
+        local hdr_file = "/tmp/h2_headers_" .. tostring(math.random(100000, 999999)) .. ".txt"
         local cmd = string.format(
-            "curl -s %s --http2 -X %s -D /dev/stderr '%s://%s%s' -H 'Host: %s'%s 2>/tmp/h2_headers.txt",
-            tls_opts, method, scheme, authority, path, authority, extra_headers
+            "curl -s %s --http2 -X %s -D '%s' '%s://%s%s' -H 'Host: %s'%s",
+            tls_opts, method, hdr_file, scheme, authority, path, authority, extra_headers
         )
 
         local handle = io.popen(cmd)
         local body = handle:read("*a") or ""
         handle:close()
 
-        -- Read response headers from stderr redirect
-        -- 从 stderr 重定向读取响应头
-        local hf = io.open("/tmp/h2_headers.txt", "r")
+        -- Read response headers from dump file
+        -- 从 dump 文件读取响应头
+        local hf = io.open(hdr_file, "r")
         local raw_headers = ""
         local status_code = "200"
         if hf then
@@ -2528,6 +2529,7 @@ function _M.http2_client(host, port, tls)
             status_code = raw_headers:match("HTTP/[%d.]+ (%d+)") or "200"
         end
 
+        os.remove(hdr_file)
         local headers = make_headers(status_code, raw_headers)
         return body, headers
     end
