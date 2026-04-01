@@ -1244,13 +1244,16 @@ function _M.get_db_utils(strategy, tables, plugins)
         "certificates", "targets", "upstreams",
         "consumers", "ca_certificates",
     }
+    local cjson = require("cjson")
     for _, entity in ipairs(cleanup_entities) do
         -- Paginate and delete all — 分页删除所有记录
         for _ = 1, 50 do  -- max 50 pages to avoid infinite loop — 最多 50 页防止死循环
             local res = admin:get("/" .. entity .. "?size=100")
             if not res or res.status ~= 200 then break end
-            local body = require("cjson").decode(assert.res_status(200, res))
-            if not body.data or #body.data == 0 then break end
+            local raw_body = res:read_body()
+            if not raw_body or raw_body == "" then break end
+            local ok, body = pcall(cjson.decode, raw_body)
+            if not ok or not body.data or #body.data == 0 then break end
             for _, item in ipairs(body.data) do
                 admin:delete("/" .. entity .. "/" .. item.id)
             end
