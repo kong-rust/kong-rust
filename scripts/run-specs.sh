@@ -19,9 +19,11 @@ if ! command -v busted &>/dev/null; then
     exit 1
 fi
 
-# Build kong — 编译 kong
-echo "=== 编译 kong ==="
-cargo build --quiet 2>&1 || cargo build 2>&1
+# Build kong (skip if binary exists and is newer than source) — 编译 kong（如果二进制已存在且较新则跳过）
+if [ ! -f "${ROOT}/target/debug/kong" ]; then
+    echo "=== 编译 kong ==="
+    cargo build --quiet 2>&1 || cargo build 2>&1
+fi
 
 # Set up Lua paths — 设置 Lua 路径
 export LUA_PATH="${ROOT}/spec/?.lua;${ROOT}/spec/?/init.lua;${ROOT}/?.lua;${ROOT}/?/?.lua;${ROOT}/?.lua;${ROOT}/?/init.lua;${LUA_PATH:-}"

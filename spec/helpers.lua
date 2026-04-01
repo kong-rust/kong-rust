@@ -1237,25 +1237,36 @@ function _M.get_db_utils(strategy, tables, plugins)
         end
     end
 
-    -- Cleanup via Admin API DELETE — 通过 Admin API 逐表删除清理数据
-    -- Delete in dependency order (children first) — 按依赖顺序删除（子表先删）
-    local cleanup_entities = tables or {
-        "plugins", "snis", "routes", "services",
-        "certificates", "targets", "upstreams",
-        "consumers", "ca_certificates",
-    }
-    local cjson = require("cjson")
-    for _, entity in ipairs(cleanup_entities) do
-        -- Paginate and delete all — 分页删除所有记录
-        for _ = 1, 50 do  -- max 50 pages to avoid infinite loop — 最多 50 页防止死循环
-            local res = admin:get("/" .. entity .. "?size=100")
-            if not res or res.status ~= 200 then break end
-            local raw_body = res:read_body()
-            if not raw_body or raw_body == "" then break end
-            local ok, body = pcall(cjson.decode, raw_body)
-            if not ok or not body.data or #body.data == 0 then break end
-            for _, item in ipairs(body.data) do
-                admin:delete("/" .. entity .. "/" .. item.id)
+    -- Cleanup: try psql TRUNCATE first (fast + reliable), fallback to Admin API DELETE
+    -- 清理：优先 psql TRUNCATE（快速可靠），回退到 Admin API DELETE
+    local pg_host = _M.test_conf.pg_host or "127.0.0.1"
+    local pg_port = _M.test_conf.pg_port or "5432"
+    local pg_user = _M.test_conf.pg_user or "kong"
+    local pg_pass = _M.test_conf.pg_password or "kong"
+    local pg_db   = _M.test_conf.pg_database or "kong_tests"
+    local truncate_sql = "TRUNCATE plugins, snis, routes, services, certificates, targets, upstreams, consumers, ca_certificates CASCADE"
+    local psql_cmd = string.format("PGPASSWORD=%s psql -h %s -p %s -U %s %s -c %q 2>/dev/null",
+        pg_pass, pg_host, pg_port, pg_user, pg_db, truncate_sql)
+    local psql_ok = os.execute(psql_cmd)
+    if psql_ok ~= 0 and psql_ok ~= true then
+        -- psql not available, fallback to Admin API DELETE — psql 不可用，回退到 Admin API DELETE
+        local cleanup_entities = tables or {
+            "plugins", "snis", "routes", "services",
+            "certificates", "targets", "upstreams",
+            "consumers", "ca_certificates",
+        }
+        local cjson = require("cjson")
+        for _, entity in ipairs(cleanup_entities) do
+            for _ = 1, 50 do
+                local res = admin:get("/" .. entity .. "?size=100")
+                if not res or res.status ~= 200 then break end
+                local raw_body = res:read_body()
+                if not raw_body or raw_body == "" then break end
+                local ok, body = pcall(cjson.decode, raw_body)
+                if not ok or not body.data or #body.data == 0 then break end
+                for _, item in ipairs(body.data) do
+                    admin:delete("/" .. entity .. "/" .. item.id)
+                end
             end
         end
     end

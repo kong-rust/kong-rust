@@ -41,7 +41,8 @@ jobs:
             build-essential \
             cmake \
             protobuf-compiler \
-            luarocks
+            luarocks \
+            postgresql-client
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -105,11 +106,16 @@ jobs:
           FAILED=0
           for spec in "${SPECS[@]}"; do
             echo "=== Running: $spec ==="
+            # Kill any leftover Kong processes between specs — 清理 spec 之间残留的 Kong 进程
+            pkill -f 'target/debug/kong' 2>/dev/null || true
+            sleep 2
             if ! bash scripts/run-specs.sh "$spec"; then
               echo "FAILED: $spec"
               FAILED=$((FAILED + 1))
             fi
           done
+          # Final cleanup — 最终清理
+          pkill -f 'target/debug/kong' 2>/dev/null || true
           if [ $FAILED -gt 0 ]; then
             echo "=== $FAILED spec(s) failed ==="
             exit 1
