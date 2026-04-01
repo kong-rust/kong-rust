@@ -1237,38 +1237,24 @@ function _M.get_db_utils(strategy, tables, plugins)
         end
     end
 
-    -- truncate: use SQL TRUNCATE CASCADE for reliable cleanup — 使用 SQL TRUNCATE CASCADE 可靠清理
-    -- This avoids FK constraint issues when deleting via Admin API — 避免通过 Admin API 删除时的外键约束问题
-    local pg_host = _M.test_conf.pg_host or "127.0.0.1"
-    local pg_port = _M.test_conf.pg_port or "5432"
-    local pg_user = _M.test_conf.pg_user or "kong"
-    local pg_pass = _M.test_conf.pg_password or "kong"
-    local pg_db   = _M.test_conf.pg_database or "kong_tests"
-
-    -- Try docker exec first (psql may not be on host), fallback to host psql — 优先 docker exec，宿主机可能没有 psql
-    local pg_cmd
-    local docker_check = os.execute("docker exec kong-rust-dev-postgres-1 true 2>/dev/null")
-    if docker_check == 0 or docker_check == true then
-        pg_cmd = string.format("docker exec -e PGPASSWORD=%s kong-rust-dev-postgres-1 psql -h %s -p %s -U %s %s -c",
-            pg_pass, pg_host, pg_port, pg_user, pg_db)
-    else
-        local pg_env = string.format("PGPASSWORD=%s", pg_pass)
-        pg_cmd = string.format("%s psql -h %s -p %s -U %s %s -c",
-            pg_env, pg_host, pg_port, pg_user, pg_db)
-    end
-
-    if tables then
-        -- Build TRUNCATE statement for specified tables — 构建指定表的 TRUNCATE 语句
-        local sql_tables = {}
-        for _, tbl in ipairs(tables) do
-            sql_tables[#sql_tables + 1] = tbl
+    -- Cleanup via Admin API DELETE — 通过 Admin API 逐表删除清理数据
+    -- Delete in dependency order (children first) — 按依赖顺序删除（子表先删）
+    local cleanup_entities = tables or {
+        "plugins", "snis", "routes", "services",
+        "certificates", "targets", "upstreams",
+        "consumers", "ca_certificates",
+    }
+    for _, entity in ipairs(cleanup_entities) do
+        -- Paginate and delete all — 分页删除所有记录
+        for _ = 1, 50 do  -- max 50 pages to avoid infinite loop — 最多 50 页防止死循环
+            local res = admin:get("/" .. entity .. "?size=100")
+            if not res or res.status ~= 200 then break end
+            local body = require("cjson").decode(assert.res_status(200, res))
+            if not body.data or #body.data == 0 then break end
+            for _, item in ipairs(body.data) do
+                admin:delete("/" .. entity .. "/" .. item.id)
+            end
         end
-        local truncate_sql = "TRUNCATE " .. table.concat(sql_tables, ", ") .. " CASCADE"
-        os.execute(string.format("%s %q 2>/dev/null", pg_cmd, truncate_sql))
-    else
-        -- Truncate all known tables — 清空所有已知表
-        os.execute(string.format("%s %q 2>/dev/null", pg_cmd,
-            "TRUNCATE plugins, snis, routes, services, certificates, targets, upstreams, consumers, ca_certificates CASCADE"))
     end
 
     local bp = Blueprint:new(admin)
