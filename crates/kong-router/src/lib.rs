@@ -14,6 +14,15 @@ use uuid::Uuid;
 
 use kong_core::models::{PathHandling, Route};
 
+/// URI captures from regex path matching — 正则路径匹配的 URI 捕获结果
+#[derive(Debug, Clone, Default)]
+pub struct UriCaptures {
+    /// Named captures (e.g. `(?<name>...)`) — 命名捕获组
+    pub named: HashMap<String, String>,
+    /// Unnamed/positional captures — 位置捕获组
+    pub unnamed: Vec<String>,
+}
+
 /// Request context — fields extracted from the HTTP request for matching — 请求上下文 — 从 HTTP 请求中提取的匹配字段
 #[derive(Debug, Clone, Default)]
 pub struct RequestContext {
@@ -54,6 +63,8 @@ pub struct RouteMatch {
     pub request_buffering: bool,
     /// Whether to buffer the response body before sending to client — 是否在发送给客户端前缓冲响应体
     pub response_buffering: bool,
+    /// URI captures from regex path matching — 正则路径匹配的 URI 捕获结果
+    pub uri_captures: UriCaptures,
 }
 
 /// Unified router — selects concrete implementation based on router_flavor — 统一路由器 — 根据 router_flavor 选择具体实现

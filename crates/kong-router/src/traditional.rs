@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{RequestContext, RouteMatch};
+use crate::{RequestContext, RouteMatch, UriCaptures};
 use kong_core::models::{PathHandling, Protocol, Route};
 
 // ============ Match rule bit value definitions — 匹配规则位值定义 ============
@@ -278,8 +278,9 @@ impl TraditionalRouter {
                 let route = &self.routes[route_idx];
 
                 if self.match_route(route, ctx, req_host, req_host_no_port) {
-                    // Calculate the matched path — 计算匹配的路径
-                    let matched_path = self.find_matched_path(route, &ctx.uri);
+                    // Calculate the matched path and extract URI captures — 计算匹配路径并提取 URI 捕获组
+                    let (matched_path, uri_captures) =
+                        self.find_matched_path_and_captures(route, &ctx.uri);
 
                     return Some(RouteMatch {
                         route_id: route.route_id,
@@ -292,6 +293,7 @@ impl TraditionalRouter {
                         protocols: Arc::clone(&route.protocols),
                         request_buffering: route.request_buffering,
                         response_buffering: route.response_buffering,
+                        uri_captures,
                     });
                 }
             }
@@ -352,8 +354,17 @@ impl TraditionalRouter {
 
         // Protocol matching — 协议匹配
         // If route defines protocols, request scheme must be in the list — 如果路由定义了 protocols，请求 scheme 必须在列表中
+        // gRPC routes use "grpc"/"grpcs" but actual requests arrive as "http"/"https",
+        // so we treat them as compatible — gRPC 路由使用 "grpc"/"grpcs" 但实际请求以 "http"/"https" 到达，视为兼容
         if !route.protocols.is_empty() {
-            if !route.protocols.iter().any(|p| p == &ctx.scheme) {
+            let scheme_matches = route.protocols.iter().any(|p| {
+                p == &ctx.scheme
+                    || (p == "grpc" && ctx.scheme == "http")
+                    || (p == "grpcs" && ctx.scheme == "https")
+                    || (p == "ws" && ctx.scheme == "http")
+                    || (p == "wss" && ctx.scheme == "https")
+            });
+            if !scheme_matches {
                 return false;
             }
         }
@@ -429,12 +440,38 @@ impl TraditionalRouter {
         false
     }
 
-    /// Find the matched path (used for strip_path) — 查找匹配的路径（用于 strip_path）
-    fn find_matched_path(&self, route: &ProcessedRoute, req_uri: &str) -> Option<String> {
+    /// Find the matched path and extract URI captures — 查找匹配的路径并提取 URI 捕获组
+    fn find_matched_path_and_captures(
+        &self,
+        route: &ProcessedRoute,
+        req_uri: &str,
+    ) -> (Option<String>, UriCaptures) {
         // Check regex — 检查正则
         for (pattern, regex) in &route.regex_paths {
-            if regex.is_match(req_uri) {
-                return Some(pattern.clone());
+            if let Some(caps) = regex.captures(req_uri) {
+                let mut named = HashMap::new();
+                let mut unnamed = Vec::new();
+
+                // Extract named and unnamed captures — 提取命名和位置捕获组
+                for (i, name) in regex.capture_names().enumerate() {
+                    if i == 0 {
+                        continue; // skip full match — 跳过完整匹配
+                    }
+                    if let Some(m) = caps.get(i) {
+                        let val = m.as_str().to_string();
+                        unnamed.push(val.clone());
+                        if let Some(name) = name {
+                            named.insert(name.to_string(), val);
+                        }
+                    }
+                }
+
+                // Return the actual matched text (not the pattern) for strip_path — 返回实际匹配的文本（而非模式）用于 strip_path
+                let matched_text = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_else(|| pattern.clone());
+                return (
+                    Some(matched_text),
+                    UriCaptures { named, unnamed },
+                );
             }
         }
 
@@ -451,7 +488,7 @@ impl TraditionalRouter {
             }
         }
 
-        best_match.map(|s| s.to_string())
+        (best_match.map(|s| s.to_string()), UriCaptures::default())
     }
 
     /// Number of routes — 路由数量

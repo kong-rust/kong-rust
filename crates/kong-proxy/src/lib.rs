@@ -50,6 +50,8 @@ pub struct KongCtx {
     pub upstream_addr: Option<String>,
     /// Whether to use TLS for upstream connection — 是否使用 TLS 连接上游
     pub upstream_tls: bool,
+    /// Whether upstream is gRPC (needs h2c for plaintext) — 上游是否为 gRPC（明文时需要 h2c）
+    pub upstream_is_grpc: bool,
     /// Upstream SNI — 上游 SNI
     pub upstream_sni: String,
     /// Plugin context — 插件上下文
@@ -324,15 +326,21 @@ impl KongProxy {
     }
 
     /// Resolve upstream address — 解析上游地址
+    /// Returns (addr, use_tls, sni, is_grpc) — 返回 (地址, 是否TLS, SNI, 是否gRPC)
     fn resolve_upstream(
         &self,
         service: &Service,
-    ) -> std::result::Result<(String, bool, String), Box<pingora_core::Error>> {
+    ) -> std::result::Result<(String, bool, String, bool), Box<pingora_core::Error>> {
         let use_tls = matches!(
             service.protocol,
             kong_core::models::Protocol::Https
                 | kong_core::models::Protocol::Grpcs
                 | kong_core::models::Protocol::Tls
+        );
+
+        let is_grpc = matches!(
+            service.protocol,
+            kong_core::models::Protocol::Grpc | kong_core::models::Protocol::Grpcs
         );
 
         // Try resolving upstream address via load balancer — 尝试通过负载均衡器解析上游地址
@@ -343,7 +351,7 @@ impl KongProxy {
                     let sni = lb
                         .host_header()
                         .unwrap_or_else(|| addr.split(':').next().unwrap_or(&addr).to_string());
-                    return Ok((addr, use_tls, sni));
+                    return Ok((addr, use_tls, sni, is_grpc));
                 }
             }
         }
@@ -351,7 +359,7 @@ impl KongProxy {
         // Use Service's host:port directly — 直接使用 Service 的 host:port
         let addr = format!("{}:{}", service.host, service.port);
         let sni = service.host.clone();
-        Ok((addr, use_tls, sni))
+        Ok((addr, use_tls, sni, is_grpc))
     }
 
     // Helper: check if a specific header feature is enabled in config.headers — 检查配置中是否启用了特定 header 功能
@@ -610,6 +618,7 @@ impl ProxyHttp for KongProxy {
             service: None,
             upstream_addr: None,
             upstream_tls: false,
+            upstream_is_grpc: false,
             upstream_sni: String::new(),
             plugin_ctx: RequestCtx::new(),
             resolved_plugins: Arc::new(Vec::new()),
@@ -670,6 +679,9 @@ impl ProxyHttp for KongProxy {
         // 4. Set up plugin context (before service check so plugins can short-circuit serviceless routes) — 设置插件上下文（在服务检查之前，以便插件可以短路无服务路由）
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
         ctx.plugin_ctx.service_id = route_match.service_id;
+        // Pass URI captures from regex path matching to plugin context — 将正则路径匹配的 URI 捕获组传递给插件上下文
+        ctx.plugin_ctx.uri_captures_named = route_match.uri_captures.named.clone();
+        ctx.plugin_ctx.uri_captures_unnamed = route_match.uri_captures.unnamed.clone();
 
         // Populate matched route JSON for kong.router.get_route() — 填充匹配路由 JSON 供 kong.router.get_route() 使用
         if let Ok(routes_cache) = self.routes_by_id.read() {
@@ -769,7 +781,7 @@ impl ProxyHttp for KongProxy {
         }
 
         // Resolve upstream address — 解析上游地址
-        let (mut upstream_addr, mut upstream_tls, mut upstream_sni) = self
+        let (mut upstream_addr, mut upstream_tls, mut upstream_sni, upstream_is_grpc) = self
             .resolve_upstream(&service)
             .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
 
@@ -786,6 +798,7 @@ impl ProxyHttp for KongProxy {
         ctx.upstream_addr = Some(upstream_addr);
         ctx.upstream_tls = upstream_tls;
         ctx.upstream_sni = upstream_sni;
+        ctx.upstream_is_grpc = upstream_is_grpc;
         ctx.resolved_plugins = resolved_plugins;
 
         Ok(false) // Continue to upstream — 继续到上游
@@ -825,9 +838,13 @@ impl ProxyHttp for KongProxy {
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
-        // Set ALPN to prefer HTTP/2 over HTTP/1.1 if TLS is used
+        // Set HTTP version for upstream connection — 设置上游连接的 HTTP 版本
         if ctx.upstream_tls {
+            // TLS: prefer HTTP/2 via ALPN — TLS：通过 ALPN 优先使用 HTTP/2
             peer.options.alpn = pingora_core::protocols::tls::ALPN::H2H1;
+        } else if ctx.upstream_is_grpc {
+            // Plaintext gRPC: force HTTP/2 (h2c prior knowledge) — 明文 gRPC：强制 HTTP/2（h2c 先验知识）
+            peer.options.set_http_version(2, 2);
         }
 
         // Apply Service timeouts — 应用 Service 超时设置
@@ -1016,12 +1033,22 @@ impl ProxyHttp for KongProxy {
             }
         }
 
+        // 4.5 Remove hop-by-hop headers from upstream request (RFC 7230 §6.1) — 移除逐跳头（RFC 7230 §6.1）
+        // Only remove headers that Kong explicitly strips; Pingora manages Connection/TE/Transfer-Encoding
+        // 仅移除 Kong 明确要剥离的头；Pingora 管理 Connection/TE/Transfer-Encoding
+        {
+            upstream_request.remove_header("keep-alive");
+            upstream_request.remove_header("proxy-authenticate");
+            upstream_request.remove_header("trailer");
+        }
+
         // 5. If a plugin replaced the upstream body, fix Content-Length for the replayed payload. — 若插件替换了上游请求体，修正回放 payload 的 Content-Length。
         if let Some(body) = ctx.plugin_ctx.upstream_body.as_ref() {
             let _ = upstream_request.insert_header("content-length", body.len().to_string());
         }
 
-        // 6. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，默认全部注入）
+        // 6. X-Real-IP / X-Forwarded-* 头注入（按配置列表按需注入，实现 Kong trusted_ips 信任模型）
+        // Kong trust model: if client IP is in trusted_ips, preserve original headers; otherwise replace them.
         if !self.config.proxy_real_ip_headers.is_empty() {
             let headers_set: std::collections::HashSet<String> = self
                 .config
@@ -1038,13 +1065,42 @@ impl ProxyHttp for KongProxy {
                 })
                 .unwrap_or_default();
 
+            // Check if client IP is trusted — 检查客户端 IP 是否可信
+            let is_trusted = !self.config.trusted_ips.is_empty()
+                && self.config.trusted_ips.iter().any(|tip| {
+                    let tip = tip.trim();
+                    if tip.contains('/') {
+                        // CIDR match — CIDR 匹配
+                        cidr_contains(tip, &client_ip)
+                    } else {
+                        tip == client_ip
+                    }
+                });
+
             if !client_ip.is_empty() {
                 if headers_set.contains("x-real-ip") {
-                    let _ = upstream_request.insert_header("x-real-ip", &client_ip);
-                    ctx.injected_real_ip_headers
-                        .push(("X-Real-IP".to_string(), client_ip.clone()));
+                    if is_trusted {
+                        // Trusted: preserve original X-Real-IP if present — 可信客户端：保留原始 X-Real-IP
+                        let existing = session
+                            .req_header()
+                            .headers
+                            .get("x-real-ip")
+                            .and_then(|v| v.to_str().ok());
+                        if existing.is_none() {
+                            let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                        }
+                        let val = existing.unwrap_or(&client_ip).to_string();
+                        ctx.injected_real_ip_headers
+                            .push(("X-Real-IP".to_string(), val));
+                    } else {
+                        // Untrusted: always replace with real client IP — 不可信客户端：替换为真实 IP
+                        let _ = upstream_request.insert_header("x-real-ip", &client_ip);
+                        ctx.injected_real_ip_headers
+                            .push(("X-Real-IP".to_string(), client_ip.clone()));
+                    }
                 }
                 if headers_set.contains("x-forwarded-for") {
+                    // X-Forwarded-For: always append (trusted or not) — X-Forwarded-For：始终追加
                     let existing_xff = session
                         .req_header()
                         .headers
@@ -1071,14 +1127,28 @@ impl ProxyHttp for KongProxy {
                 } else {
                     "http"
                 };
-                let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                if is_trusted {
+                    // Trusted: preserve original if present — 可信客户端：保留原值
+                    if session.req_header().headers.get("x-forwarded-proto").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-proto", proto);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Proto".to_string(), proto.to_string()));
             }
 
             if headers_set.contains("x-forwarded-host") {
                 if let Some(host) = session.req_header().headers.get("host") {
-                    let _ = upstream_request.insert_header("x-forwarded-host", host);
+                    if is_trusted {
+                        // Trusted: preserve original if present — 可信客户端：保留原值
+                        if session.req_header().headers.get("x-forwarded-host").is_none() {
+                            let _ = upstream_request.insert_header("x-forwarded-host", host);
+                        }
+                    } else {
+                        let _ = upstream_request.insert_header("x-forwarded-host", host);
+                    }
                     if let Ok(v) = host.to_str() {
                         ctx.injected_real_ip_headers
                             .push(("X-Forwarded-Host".to_string(), v.to_string()));
@@ -1087,19 +1157,34 @@ impl ProxyHttp for KongProxy {
             }
 
             if headers_set.contains("x-forwarded-port") {
-                let port = session.req_header().uri.port_u16().unwrap_or(
-                    if session
-                        .digest()
-                        .map(|d| d.ssl_digest.is_some())
-                        .unwrap_or(false)
-                    {
-                        443
-                    } else {
-                        80
-                    },
-                );
+                // Use the proxy's actual listening port, not the URI port — 使用代理的实际监听端口
+                let port = session
+                    .server_addr()
+                    .map(|a| a.as_inet().map(|s| s.port()).unwrap_or(0))
+                    .unwrap_or(0);
+                let port = if port == 0 {
+                    session.req_header().uri.port_u16().unwrap_or(
+                        if session
+                            .digest()
+                            .map(|d| d.ssl_digest.is_some())
+                            .unwrap_or(false)
+                        {
+                            443
+                        } else {
+                            80
+                        },
+                    )
+                } else {
+                    port
+                };
                 let port_str = port.to_string();
-                let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                if is_trusted {
+                    if session.req_header().headers.get("x-forwarded-port").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Port".to_string(), port_str));
             }
@@ -1111,15 +1196,40 @@ impl ProxyHttp for KongProxy {
                     .path_and_query()
                     .map(|pq| pq.as_str())
                     .unwrap_or("/");
-                let _ = upstream_request.insert_header("x-forwarded-path", path);
+                if is_trusted {
+                    if session.req_header().headers.get("x-forwarded-path").is_none() {
+                        let _ = upstream_request.insert_header("x-forwarded-path", path);
+                    }
+                } else {
+                    let _ = upstream_request.insert_header("x-forwarded-path", path);
+                }
                 ctx.injected_real_ip_headers
                     .push(("X-Forwarded-Path".to_string(), path.to_string()));
             }
 
             if headers_set.contains("x-forwarded-prefix") {
-                let _ = upstream_request.insert_header("x-forwarded-prefix", "");
-                ctx.injected_real_ip_headers
-                    .push(("X-Forwarded-Prefix".to_string(), String::new()));
+                if is_trusted {
+                    // Trusted: preserve original X-Forwarded-Prefix — 可信客户端：保留原值
+                } else {
+                    // Untrusted: set to matched path prefix if strip_path is active — 不可信客户端：若 strip_path 生效则设置为匹配路径前缀
+                    if let Some(ref rm) = ctx.route_match {
+                        if rm.strip_path {
+                            if let Some(ref matched) = rm.matched_path {
+                                if matched != "/" {
+                                    let _ = upstream_request.insert_header("x-forwarded-prefix", matched.as_str());
+                                    ctx.injected_real_ip_headers
+                                        .push(("X-Forwarded-Prefix".to_string(), matched.clone()));
+                                } else {
+                                    // Root path: remove prefix header — 根路径：移除前缀头
+                                    upstream_request.remove_header("x-forwarded-prefix");
+                                }
+                            }
+                        } else {
+                            // strip_path=false: remove prefix header — strip_path=false：移除前缀头
+                            upstream_request.remove_header("x-forwarded-prefix");
+                        }
+                    }
+                }
             }
         }
 
@@ -1246,6 +1356,11 @@ impl ProxyHttp for KongProxy {
     ) -> pingora_core::Result<()> {
         // Record upstream response time for latency tracking — 记录上游响应时间用于延迟统计
         ctx.upstream_response_time = Some(std::time::Instant::now());
+
+        // Remove hop-by-hop headers from upstream response — 移除上游响应中的逐跳头
+        upstream_response.headers.remove("keep-alive");
+        upstream_response.headers.remove("proxy-authenticate");
+        upstream_response.headers.remove("trailer");
 
         // Populate response snapshot into RequestCtx — 填充响应快照到 RequestCtx
         ctx.plugin_ctx.response_status = Some(upstream_response.status.as_u16());
@@ -1691,5 +1806,32 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Log 阶段执行失败: {}", e);
         }
+    }
+}
+
+/// Check if a client IP is within a CIDR range — 检查客户端 IP 是否在 CIDR 范围内
+fn cidr_contains(cidr: &str, client_ip: &str) -> bool {
+    let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix_len) = prefix_str.parse::<u8>() else {
+        return false;
+    };
+    let Ok(net_ip) = net_str.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let Ok(client) = client_ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match (net_ip, client) {
+        (std::net::IpAddr::V4(net), std::net::IpAddr::V4(cli)) => {
+            let mask = if prefix_len >= 32 { u32::MAX } else { u32::MAX << (32 - prefix_len) };
+            (u32::from(net) & mask) == (u32::from(cli) & mask)
+        }
+        (std::net::IpAddr::V6(net), std::net::IpAddr::V6(cli)) => {
+            let mask = if prefix_len >= 128 { u128::MAX } else { u128::MAX << (128 - prefix_len) };
+            (u128::from(net) & mask) == (u128::from(cli) & mask)
+        }
+        _ => false, // v4 vs v6 mismatch — IPv4 与 IPv6 不匹配
     }
 }

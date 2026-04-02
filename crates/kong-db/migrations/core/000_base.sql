@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS snis (
     updated_at      TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP(0) AT TIME ZONE 'UTC'),
     name            TEXT                     NOT NULL UNIQUE,
     tags            TEXT[],
-    certificate_id  UUID                     NOT NULL REFERENCES certificates(id)
+    certificate_id  UUID                     NOT NULL REFERENCES certificates(id) ON DELETE CASCADE
 );
 
 -- ============================================================

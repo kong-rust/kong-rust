@@ -10,14 +10,16 @@
 pub mod extractors;
 pub mod handlers;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use std::sync::RwLock;
 
+use axum::extract::State;
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use kong_core::models::*;
@@ -55,6 +57,9 @@ pub struct AdminState {
     /// DB-less store reference for hot-reloading via POST /config — DB-less 存储引用，用于 POST /config 热重载
     /// None in PostgreSQL mode — PostgreSQL 模式下为 None
     pub dbless_store: Option<Arc<kong_db::dbless::DblessStore>>,
+    /// In-memory target health status store: key = "upstream_id:target_address", value = health status string
+    /// 内存中 target 健康状态存储：key = "upstream_id:target地址"，value = 健康状态字符串
+    pub target_health: Arc<RwLock<HashMap<String, String>>>,
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
@@ -160,6 +165,8 @@ fn is_known_route(path: &str) -> bool {
         ["services", _, sub] if matches!(*sub, "routes" | "plugins") => true,
         // /services/{id}/plugins/{id}
         ["services", _, "plugins", _] => true,
+        // /routes/{id}/service
+        ["routes", _, "service"] => true,
         // /routes/{id}/plugins
         ["routes", _, "plugins"] => true,
         // /routes/{id}/plugins/{id}
@@ -168,8 +175,11 @@ fn is_known_route(path: &str) -> bool {
         ["consumers", _, "plugins"] => true,
         // /consumers/{id}/plugins/{id}
         ["consumers", _, "plugins", _] => true,
-        // /upstreams/{id}/targets
+        // /certificates/{id}/snis
+        ["certificates", _, "snis"] => true,
+        // /upstreams/{id}/targets and /upstreams/{id}/health
         ["upstreams", _, "targets"] => true,
+        ["upstreams", _, "health"] => true,
         // /upstreams/{id}/targets/{id}
         ["upstreams", _, "targets", _] => true,
         // /ai-providers/{id}/ai-models
@@ -177,6 +187,42 @@ fn is_known_route(path: &str) -> bool {
         // /ai-virtual-keys/{id}/rotate
         ["ai-virtual-keys", _, "rotate"] => true,
         _ => false,
+    }
+}
+
+/// Determine allowed HTTP methods based on endpoint type — 根据端点类型确定允许的 HTTP 方法
+fn determine_allowed_methods(path: &str) -> &'static str {
+    // Read-only endpoints — 只读端点
+    match path {
+        "/" | "/status" | "/endpoints" | "/plugins/enabled" => return "GET, HEAD, OPTIONS",
+        _ => {}
+    }
+
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.len() {
+        // Collection endpoints: /services, /routes, etc. — 集合端点
+        1 => "GET, HEAD, OPTIONS, POST",
+        2 => {
+            match segments[0] {
+                // /schemas/{entity} — read-only
+                "schemas" => "GET, HEAD, OPTIONS",
+                // /tags/{value} — read-only
+                "tags" => "GET, HEAD, OPTIONS",
+                // /entity/{id} — entity endpoints support CRUD
+                _ => "DELETE, GET, HEAD, OPTIONS, PATCH, PUT",
+            }
+        }
+        3 => {
+            match segments[2] {
+                // /schemas/{entity}/validate — POST only
+                "validate" => "OPTIONS, POST",
+                // /entity/{id}/sub-collection — collection endpoint
+                _ => "GET, HEAD, OPTIONS, POST",
+            }
+        }
+        // /entity/{id}/sub/{id} — entity endpoint
+        4 => "DELETE, GET, HEAD, OPTIONS, PATCH, PUT",
+        _ => "GET, HEAD, OPTIONS",
     }
 }
 
@@ -201,11 +247,8 @@ async fn options_middleware(
             ).into_response();
         }
 
-        // Read-only endpoints only support GET/HEAD — 只读端点只支持 GET/HEAD
-        let allow = match path.as_str() {
-            "/" | "/status" | "/endpoints" | "/plugins/enabled" => "GET, HEAD, OPTIONS",
-            _ => "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS",
-        };
+        // Determine allowed methods based on endpoint type — 根据端点类型确定允许的方法
+        let allow = determine_allowed_methods(&path);
 
         return axum::http::Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -331,10 +374,27 @@ pub fn build_admin_router(state: AdminState) -> Router {
             get(list_nested_targets).post(create_nested_target),
         )
         .route(
+            "/upstreams/{upstream_id_or_name}/targets/all",
+            get(list_nested_targets),
+        )
+        .route(
             "/upstreams/{upstream_id_or_name}/targets/{id_or_name}",
             get(get_nested_target)
                 .patch(update_nested_target)
+                .put(upsert_nested_target)
                 .delete(delete_nested_target),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets/{id_or_name}/healthy",
+            put(handlers::set_target_health),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/targets/{id_or_name}/unhealthy",
+            put(handlers::set_target_health),
+        )
+        .route(
+            "/upstreams/{upstream_id_or_name}/health",
+            get(handlers::upstream_health),
         )
         // Certificates
         .route(
@@ -356,6 +416,19 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .patch(update_sni)
                 .put(upsert_sni)
                 .delete(delete_sni),
+        )
+        // Routes nested service — 路由嵌套 service 端点
+        .route(
+            "/routes/{route_id_or_name}/service",
+            get(handlers::get_route_service)
+                .patch(handlers::update_route_service)
+                .put(handlers::upsert_route_service)
+                .delete(handlers::delete_route_service),
+        )
+        // Certificates nested SNIs — 证书嵌套 SNI 路由
+        .route(
+            "/certificates/{cert_id_or_name}/snis",
+            get(handlers::list_certificate_snis).post(handlers::create_certificate_sni),
         )
         // CA Certificates
         .route(
@@ -407,7 +480,7 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(handlers::ai_virtual_keys::delete_one),
         )
         .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
-        .fallback(admin_fallback)
+        .fallback(admin_fallback_with_trailing_slash)
         // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
         .method_not_allowed_fallback(method_not_allowed_handler)
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
@@ -427,8 +500,30 @@ async fn method_not_allowed_handler() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Admin API 404 fallback — Kong 兼容的 404 JSON 响应
-async fn admin_fallback() -> (StatusCode, Json<Value>) {
+/// Admin API 404 fallback with trailing slash normalization — 带尾部斜杠归一化的 404 fallback
+/// If path ends with '/', retry without it — 如果路径以 '/' 结尾，去掉后重试
+async fn admin_fallback_with_trailing_slash(
+    State(state): State<AdminState>,
+    mut req: axum::extract::Request,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if path.len() > 1 && path.ends_with('/') {
+        let trimmed = path.trim_end_matches('/');
+        let new_uri = if let Some(q) = req.uri().query() {
+            format!("{}?{}", trimmed, q)
+        } else {
+            trimmed.to_string()
+        };
+        if let Ok(uri) = new_uri.parse::<axum::http::Uri>() {
+            *req.uri_mut() = uri;
+            // Re-route through the admin router — 通过 admin router 重新路由
+            let router = build_admin_router(state);
+            let mut svc = router.into_service();
+            return tower::Service::<axum::extract::Request>::call(&mut svc, req).await.unwrap_or_else(|e| {
+                match e {}
+            });
+        }
+    }
     (
         StatusCode::NOT_FOUND,
         Json(json!({
@@ -436,7 +531,7 @@ async fn admin_fallback() -> (StatusCode, Json<Value>) {
             "name": "not found",
             "code": 3,
         })),
-    )
+    ).into_response()
 }
 
 /// Build the Status API router — 构建 Status API 路由
@@ -445,8 +540,16 @@ pub fn build_status_router(state: AdminState) -> Router {
 
     Router::new()
         .route("/status", get(status_info))
+        .route("/status/ready", get(status_ready))
         .route("/metrics", get(status_metrics))
+        // admin-api-method plugin test endpoint — admin-api-method 测试插件端点
+        .route("/hello", get(status_hello))
         .with_state(state)
+}
+
+/// GET /hello — test endpoint for admin-api-method plugin compatibility — 测试端点，用于 admin-api-method 插件兼容性
+async fn status_hello() -> impl axum::response::IntoResponse {
+    Json(json!({ "hello": "from status api" }))
 }
 
 /// Build the Kong Manager GUI router (static file server for SPA) — 构建 Kong Manager GUI 路由（SPA 静态文件服务）

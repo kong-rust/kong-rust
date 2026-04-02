@@ -223,6 +223,13 @@ for _, name in ipairs({"services", "routes", "consumers", "plugins", "upstreams"
     _M.db.daos[name] = { schema = { name = name } }
 end
 
+-- Provide global 'kong' object for test compatibility (used by some spec files) — 提供全局 kong 对象供测试兼容性使用
+if not kong then
+    kong = {
+        configuration = _M.test_conf,
+    }
+end
+
 local KONG_RUST_BIN = os.getenv("KONG_RUST_BIN") or "./target/debug/kong"
 
 local PID_FILE = os.getenv("KONG_SPEC_PID_FILE") or "/tmp/kong-rust-spec.pid"
@@ -383,7 +390,7 @@ local function build_env_str(conf)
     return table.concat(env_parts, " "), env
 end
 
-function _M.start_kong(conf)
+function _M.start_kong(conf, _, _, fixtures)
     conf = conf or {}
 
     -- Stop any existing Kong instance before starting a new one — 启动新实例前先停止已有实例
@@ -398,6 +405,20 @@ function _M.start_kong(conf)
         _M.test_conf.proxy_port,
         _M.test_conf.status_port,
     }
+    -- Also wait for custom status_listen port if specified — 同时等待自定义 status_listen 端口
+    if conf.status_listen then
+        local custom_port = conf.status_listen:match(":(%d+)")
+        if custom_port then
+            custom_port = tonumber(custom_port)
+            local found = false
+            for _, p in ipairs(ports_to_check) do
+                if p == custom_port then found = true; break end
+            end
+            if not found then
+                ports_to_check[#ports_to_check + 1] = custom_port
+            end
+        end
+    end
     _M.wait_until(function()
         for _, port in ipairs(ports_to_check) do
             local s = socket.tcp()
@@ -408,6 +429,29 @@ function _M.start_kong(conf)
         return true
     end, 10)
     socket.sleep(0.5)
+
+    -- If dns_mock fixtures provided, generate a temporary hosts file — 如果提供了 dns_mock fixtures，生成临时 hosts 文件
+    if fixtures and fixtures.dns_mock and fixtures.dns_mock.records then
+        local hostsfile = "/tmp/kong_test_hosts"
+        local f = io.open(hostsfile, "w")
+        if f then
+            -- Write system /etc/hosts first — 先写入系统 /etc/hosts
+            local sys_hosts = io.open("/etc/hosts", "r")
+            if sys_hosts then
+                f:write(sys_hosts:read("*a"))
+                f:write("\n")
+                sys_hosts:close()
+            end
+            -- Add mock DNS A records — 添加 DNS mock A 记录
+            for _, rec in ipairs(fixtures.dns_mock.records) do
+                if rec.type == "A" and rec.name and rec.address then
+                    f:write(rec.address .. " " .. rec.name .. "\n")
+                end
+            end
+            f:close()
+            conf.dns_hostsfile = hostsfile
+        end
+    end
 
     local env_str, env = build_env_str(conf)
 
@@ -421,6 +465,34 @@ function _M.start_kong(conf)
         env_str, KONG_RUST_BIN, PID_FILE)
     os.execute(cmd)
 
+    -- When admin_listen=off, health check via status API or just wait — admin_listen=off 时通过 status API 或等待来检查健康
+    local admin_off = conf.admin_listen == "off"
+    local status_listen_val = conf.status_listen
+
+    if admin_off and status_listen_val and status_listen_val ~= "off" then
+        -- Parse status host:port for health check — 解析 status 的 host:port 用于健康检查
+        local shost, sport = status_listen_val:match("([^:]+):(%d+)")
+        if shost and sport then
+            local ok = _M.wait_until(function()
+                local client = _M.http_client(shost, tonumber(sport), 5000)
+                if not client then return false end
+                local res = client:send({ method = "GET", path = "/status" })
+                return res and res.status == 200
+            end, 30)
+            if not ok then
+                _M.stop_kong()
+                error("Kong-Rust failed to start within 30 seconds (status API check). Check /tmp/gw-spec.log")
+            end
+            return true
+        end
+    end
+
+    if admin_off then
+        -- No admin or status API to check, just wait — 没有可检查的 API，仅等待
+        socket.sleep(3)
+        return true
+    end
+
     local ok = _M.wait_until(function()
         local client = _M.admin_client()
         if not client then return false end
@@ -430,7 +502,7 @@ function _M.start_kong(conf)
 
     if not ok then
         _M.stop_kong()
-        error("Kong-Rust failed to start within 30 seconds. Check /tmp/kong-rust-spec.log")
+        error("Kong-Rust failed to start within 30 seconds. Check /tmp/gw-spec.log")
     end
 
     return true
@@ -443,10 +515,18 @@ function _M.stop_kong(prefix, preserve_prefix, preserve_dc)
         f:close()
         if pid and pid ~= "" then
             os.execute(string.format("kill -TERM %s 2>/dev/null || true", pid))
-            _M.wait_until(function()
+            local stopped = _M.wait_until(function()
                 local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
                 return ret ~= 0 and ret ~= true
-            end, 10)
+            end, 5)
+            -- Force kill if SIGTERM didn't work — SIGTERM 无效时使用 SIGKILL 强制杀死
+            if not stopped then
+                os.execute(string.format("kill -9 %s 2>/dev/null || true", pid))
+                _M.wait_until(function()
+                    local ret = os.execute(string.format("kill -0 %s 2>/dev/null", pid))
+                    return ret ~= 0 and ret ~= true
+                end, 5)
+            end
         end
         os.remove(PID_FILE)
     end
@@ -618,7 +698,7 @@ function Blueprint:new(admin_client)
         targets      = "/upstreams/%s/targets",
         certificates = "/certificates",
         snis         = "/snis",
-        ca_certificates = "/ca-certificates",
+        ca_certificates = "/ca_certificates",
         vaults       = "/vaults",
     }
 
@@ -698,13 +778,16 @@ function Blueprint:new(admin_client)
     end
 
     -- default data generators for "named_*" entities — "named_*" 实体的默认数据生成器
-    local defaults_generators = {
+    -- Declare first so closures can reference it — 先声明使闭包能引用
+    local defaults_generators
+    defaults_generators = {
         named_services = function(overrides)
             local n = next_seq()
+            local rand = math.random(100000, 999999)
             local defaults = {
                 protocol = "http",
-                name = "service-" .. n,
-                host = "service" .. n .. ".test",
+                name = "service-" .. n .. "-" .. rand,
+                host = "service" .. n .. "-" .. rand .. ".test",
                 port = 15555,
             }
             if overrides then
@@ -850,12 +933,24 @@ function Blueprint:new(admin_client)
                 data = data or {}
 
                 local actual_endpoint = endpoint
-                if key == "targets" and data.upstream then
-                    local uid = type(data.upstream) == "table"
-                        and (data.upstream.id or data.upstream.name)
-                        or data.upstream
-                    actual_endpoint = string.format(endpoint, uid)
-                    data.upstream = nil
+                if key == "targets" then
+                    if data.upstream then
+                        local uid = type(data.upstream) == "table"
+                            and (data.upstream.id or data.upstream.name)
+                            or data.upstream
+                        actual_endpoint = string.format(endpoint, uid)
+                        data.upstream = nil
+                    else
+                        -- Create a temporary upstream for standalone target — 为独立 target 创建临时 upstream
+                        local tmp_res = bp.admin:post("/upstreams", {
+                            body = { name = "tmp-ups-" .. math.random(100000, 999999) },
+                            headers = { ["Content-Type"] = "application/json" },
+                        })
+                        if tmp_res and tmp_res.status == 201 then
+                            local tmp = cjson.decode(tmp_res.body)
+                            actual_endpoint = string.format(endpoint, tmp.id)
+                        end
+                    end
                 end
                 local res, err = bp.admin:post(actual_endpoint, {
                     body = data,
@@ -940,20 +1035,37 @@ function DbProxy:new(admin_client_fn)
         targets      = "/upstreams/%s/targets",
         certificates = "/certificates",
         snis         = "/snis",
-        ca_certificates = "/ca-certificates",
+        ca_certificates = "/ca_certificates",
         vaults       = "/vaults",
     }
 
     -- truncate: delete all entities of a type — 清空某类型的所有实体
+    -- For entities with FK dependencies, delete dependents first — 对有外键依赖的实体，先删除依赖实体
     function db:truncate(entity_name)
         local endpoint = entity_endpoints[entity_name]
         if not endpoint then
-            endpoint = "/" .. entity_name:gsub("_", "-")
+            -- Use underscore paths (Rust admin API convention) — 使用下划线路径（Rust admin API 惯例）
+            endpoint = "/" .. entity_name
         end
         if endpoint:find("%%s") then return true end
 
         local admin = admin_client_fn()
         if not admin then return true end
+
+        -- Delete dependents first to avoid FK constraint failures — 先删除依赖实体，避免外键约束失败
+        local dependents = {
+            services = { "routes", "plugins" },
+            routes = { "plugins" },
+            consumers = { "plugins" },
+            upstreams = {},  -- targets handled via nested endpoint
+            certificates = { "snis" },
+        }
+        local deps = dependents[entity_name]
+        if deps then
+            for _, dep in ipairs(deps) do
+                db:truncate(dep)
+            end
+        end
 
         -- paginate through all and delete — 分页遍历并删除
         local deleted = true
@@ -1070,6 +1182,12 @@ function DbProxy:new(admin_client_fn)
             return {}, nil, nil
         end
 
+        -- select_with_name_list: Kong-specific method for certificates — Kong 特有的证书查询方法
+        -- In Kong-Rust, GET /certificates/{id} already includes snis — 在 Kong-Rust 中，GET /certificates/{id} 已包含 snis
+        function proxy:select_with_name_list(pk_or_filter, opts)
+            return proxy:select(pk_or_filter, opts)
+        end
+
         return proxy
     end
 
@@ -1119,17 +1237,35 @@ function _M.get_db_utils(strategy, tables, plugins)
         end
     end
 
-    -- truncate specified tables or all — 清空指定表或所有表
-    if tables then
-        for _, tbl in ipairs(tables) do
-            local endpoint = "/" .. tbl:gsub("_", "-")
-            local res = admin:get(endpoint)
-            if res and res.status == 200 then
-                local ok, body = pcall(cjson.decode, res.body)
-                if ok and body and body.data then
-                    for _, item in ipairs(body.data) do
-                        admin:delete(endpoint .. "/" .. item.id)
-                    end
+    -- Cleanup: try psql TRUNCATE first (fast + reliable), fallback to Admin API DELETE
+    -- 清理：优先 psql TRUNCATE（快速可靠），回退到 Admin API DELETE
+    local pg_host = _M.test_conf.pg_host or "127.0.0.1"
+    local pg_port = _M.test_conf.pg_port or "5432"
+    local pg_user = _M.test_conf.pg_user or "kong"
+    local pg_pass = _M.test_conf.pg_password or "kong"
+    local pg_db   = _M.test_conf.pg_database or "kong_tests"
+    local truncate_sql = "TRUNCATE plugins, snis, routes, services, certificates, targets, upstreams, consumers, ca_certificates CASCADE"
+    local psql_cmd = string.format("PGPASSWORD=%s psql -h %s -p %s -U %s %s -c %q 2>/dev/null",
+        pg_pass, pg_host, pg_port, pg_user, pg_db, truncate_sql)
+    local psql_ok = os.execute(psql_cmd)
+    if psql_ok ~= 0 and psql_ok ~= true then
+        -- psql not available, fallback to Admin API DELETE — psql 不可用，回退到 Admin API DELETE
+        local cleanup_entities = tables or {
+            "plugins", "snis", "routes", "services",
+            "certificates", "targets", "upstreams",
+            "consumers", "ca_certificates",
+        }
+        local cjson = require("cjson")
+        for _, entity in ipairs(cleanup_entities) do
+            for _ = 1, 50 do
+                local res = admin:get("/" .. entity .. "?size=100")
+                if not res or res.status ~= 200 then break end
+                local raw_body = res:read_body()
+                if not raw_body or raw_body == "" then break end
+                local ok, body = pcall(cjson.decode, raw_body)
+                if not ok or not body.data or #body.data == 0 then break end
+                for _, item in ipairs(body.data) do
+                    admin:delete("/" .. entity .. "/" .. item.id)
                 end
             end
         end
@@ -1884,15 +2020,16 @@ function _M.clean_db()
     local admin = _M.admin_client()
     if not admin then return end
 
+    -- Use actual API paths (underscore, not hyphen) — 使用实际的 API 路径（下划线，非连字符）
     local entities = { "plugins", "snis", "routes", "services", "consumers",
                        "targets", "upstreams", "certificates", "ca_certificates" }
     for _, entity in ipairs(entities) do
-        local res = admin:get("/" .. entity:gsub("_", "-"))
+        local res = admin:get("/" .. entity)
         if res and res.status == 200 then
             local ok, body = pcall(cjson.decode, res.body)
             if ok and body and body.data then
                 for _, item in ipairs(body.data) do
-                    admin:delete("/" .. entity:gsub("_", "-") .. "/" .. item.id)
+                    admin:delete("/" .. entity .. "/" .. item.id)
                 end
             end
         end
@@ -2175,5 +2312,243 @@ function _M.get_available_port()
   server:close()
   return tonumber(port)
 end
+
+---------------------------------------------------------------------------
+-- Log file helpers — 日志文件辅助函数
+---------------------------------------------------------------------------
+
+function _M.clean_logfile(logfile)
+    logfile = logfile or "/tmp/gw-spec.log"
+    local f = io.open(logfile, "w")
+    if f then f:close() end
+end
+
+function _M.wait_for_log(fn, timeout)
+    return _M.wait_until(fn, timeout or 10)
+end
+
+---------------------------------------------------------------------------
+-- DNS mock stub — DNS 模拟桩
+-- Kong-Rust uses system DNS; this stub collects records for compatibility.
+-- Actual DNS override is not yet implemented.
+---------------------------------------------------------------------------
+
+local DnsMock = {}
+DnsMock.__index = DnsMock
+
+function DnsMock:A(record)
+    self.records[#self.records + 1] = { type = "A", name = record.name, address = record.address }
+end
+
+function DnsMock:SRV(record)
+    self.records[#self.records + 1] = { type = "SRV", name = record.name, target = record.target, port = record.port }
+end
+
+function DnsMock:CNAME(record)
+    self.records[#self.records + 1] = { type = "CNAME", name = record.name, cname = record.cname }
+end
+
+_M.dns_mock = {
+    new = function()
+        return setmetatable({ records = {} }, DnsMock)
+    end,
+}
+
+---------------------------------------------------------------------------
+-- Worker helpers stubs — Worker 辅助函数桩
+---------------------------------------------------------------------------
+
+function _M.get_kong_workers()
+    return 1
+end
+
+function _M.wait_for_all_config_update(opts)
+    -- Kong-Rust doesn't have multi-worker config propagation; config is immediate — Kong-Rust 没有多 worker 配置传播，配置立即生效
+    socket.sleep(0.5)
+    return true
+end
+
+---------------------------------------------------------------------------
+-- gRPC / HTTP2 — gRPC / HTTP2 客户端
+-- Uses grpcurl CLI tool — 使用 grpcurl 命令行工具
+---------------------------------------------------------------------------
+
+_M.grpcbin_url = "grpc://127.0.0.1:15002"
+_M.grpcbin_ssl_url = "grpcs://127.0.0.1:15003"
+
+-- Proto file path — Proto 文件路径
+local MOCK_GRPC_UPSTREAM_PROTO_PATH = "./spec/fixtures/grpc/hello.proto"
+
+-- Generate grpcurl flags from a table of flag-value pairs — 从 flag-value 对生成 grpcurl 参数
+-- If value is not a string, the flag is passed as-is — 如果 value 不是字符串，flag 原样传递
+local function gen_grpcurl_opts(opts_t)
+    local opts_l = {}
+    for opt, val in pairs(opts_t) do
+        if val ~= false then
+            opts_l[#opts_l + 1] = opt .. " " .. (type(val) == "string" and val or "")
+        end
+    end
+    return table.concat(opts_l, " ")
+end
+
+-- Create a gRPC client using grpcurl — 使用 grpcurl 创建 gRPC 客户端
+-- @param host hostname to connect to
+-- @param port port to connect to
+-- @param opts table of grpcurl flags
+-- @return callable gRPC client
+local function grpc_client(host, port, opts)
+    host = assert(host)
+    port = assert(tostring(port))
+    opts = opts or {}
+    if not opts["-proto"] then
+        opts["-proto"] = MOCK_GRPC_UPSTREAM_PROTO_PATH
+    end
+
+    local t = {
+        opts = opts,
+        cmd_template = string.format("grpcurl %%s %s:%s %%s", host, port),
+    }
+
+    return setmetatable(t, {
+        __call = function(self, args)
+            local service = assert(args.service)
+            local body = args.body
+            local arg_opts = args.opts or {}
+
+            local t_body = type(body)
+            if t_body ~= "nil" then
+                if t_body == "table" then
+                    body = require("cjson").encode(body)
+                end
+                arg_opts["-d"] = string.format("'%s'", body)
+            end
+
+            -- Merge base opts with call-specific opts — 合并基础选项和调用特定选项
+            local merged = {}
+            for k, v in pairs(self.opts) do merged[k] = v end
+            for k, v in pairs(arg_opts) do merged[k] = v end
+
+            local cmd_opts = gen_grpcurl_opts(merged)
+            local cmd = string.format(self.cmd_template, cmd_opts, service)
+
+            -- Use temp files to capture output + exit code (LuaJIT io.popen:close() always returns true)
+            -- 使用临时文件捕获输出和退出码（LuaJIT 的 io.popen:close() 总是返回 true）
+            local stdout_file = os.tmpname()
+            local stderr_file = os.tmpname()
+            local full_cmd = string.format("%s >%s 2>%s", cmd, stdout_file, stderr_file)
+            local exit_code = os.execute(full_cmd)
+
+            local stdout_f = io.open(stdout_file, "r")
+            local stdout = stdout_f and stdout_f:read("*a") or ""
+            if stdout_f then stdout_f:close() end
+
+            local stderr_f = io.open(stderr_file, "r")
+            local stderr = stderr_f and stderr_f:read("*a") or ""
+            if stderr_f then stderr_f:close() end
+
+            os.remove(stdout_file)
+            os.remove(stderr_file)
+
+            local output = (stdout or "") .. (stderr or "")
+            -- LuaJIT os.execute returns exit code (0 = success) — LuaJIT os.execute 返回退出码（0 = 成功）
+            if exit_code == 0 then
+                return true, output
+            else
+                return nil, output
+            end
+        end,
+    })
+end
+
+-- proxy_client_grpc — plaintext gRPC client for proxy port — 代理端口的明文 gRPC 客户端
+-- @param host hostname (default: 127.0.0.1)
+-- @param port port (default: proxy_port)
+-- @return gRPC client
+function _M.proxy_client_grpc(host, port)
+    local proxy_ip = host or "127.0.0.1"
+    local proxy_port = port or (_M.test_conf and _M.test_conf.proxy_port) or 9000
+    return grpc_client(proxy_ip, proxy_port, {["-plaintext"] = true})
+end
+
+-- proxy_client_grpcs — TLS gRPC client for proxy SSL port — 代理 SSL 端口的 TLS gRPC 客户端
+-- @param host hostname (default: 127.0.0.1)
+-- @param port port (default: proxy_ssl_port)
+-- @return gRPC client
+function _M.proxy_client_grpcs(host, port)
+    local proxy_ip = host or "127.0.0.1"
+    local proxy_port = port or (_M.test_conf and _M.test_conf.proxy_ssl_port) or 9443
+    return grpc_client(proxy_ip, proxy_port, {["-insecure"] = true})
+end
+
+-- http2_client — HTTP/2 客户端（使用 curl --http2 实现）
+function _M.http2_client(host, port, tls)
+    -- Return a callable HTTP/2 client using curl
+    -- 返回使用 curl 实现的 HTTP/2 客户端
+    local scheme = tls and "https" or "http"
+
+    -- Pseudo-headers object with :get method — 带 :get 方法的伪 headers 对象
+    local function make_headers(status, raw_headers)
+        local h = { [":status"] = tostring(status) }
+        for line in raw_headers:gmatch("[^\r\n]+") do
+            local k, v = line:match("^([^:]+):%s*(.+)$")
+            if k then
+                h[k:lower()] = v
+            end
+        end
+        function h:get(key)
+            return self[key]
+        end
+        return h
+    end
+
+    return function(opts)
+        local h = opts.headers or {}
+        local method = h[":method"] or "GET"
+        local path = h[":path"] or "/"
+        local authority = h[":authority"] or string.format("%s:%d", host, port)
+
+        -- Build curl command with HTTP/2
+        -- 构建 HTTP/2 curl 命令
+        local extra_headers = ""
+        for k, v in pairs(h) do
+            if k:sub(1,1) ~= ":" then
+                extra_headers = extra_headers .. string.format(" -H '%s: %s'", k, v)
+            end
+        end
+
+        local tls_opts = tls and "-k" or ""
+        local hdr_file = "/tmp/h2_headers_" .. tostring(math.random(100000, 999999)) .. ".txt"
+        local cmd = string.format(
+            "curl -s %s --http2 -X %s -D '%s' '%s://%s%s' -H 'Host: %s'%s",
+            tls_opts, method, hdr_file, scheme, authority, path, authority, extra_headers
+        )
+
+        local handle = io.popen(cmd)
+        local body = handle:read("*a") or ""
+        handle:close()
+
+        -- Read response headers from dump file
+        -- 从 dump 文件读取响应头
+        local hf = io.open(hdr_file, "r")
+        local raw_headers = ""
+        local status_code = "200"
+        if hf then
+            raw_headers = hf:read("*a") or ""
+            hf:close()
+            -- Parse status line: "HTTP/2 200" or "HTTP/1.1 200 OK"
+            status_code = raw_headers:match("HTTP/[%d.]+ (%d+)") or "200"
+        end
+
+        os.remove(hdr_file)
+        local headers = make_headers(status_code, raw_headers)
+        return body, headers
+    end
+end
+
+---------------------------------------------------------------------------
+-- Load wait/eventually assertions (with_timeout, eventually, etc.) — 加载 wait/eventually 断言扩展
+-- Must be loaded after busted environment is available — 必须在 busted 环境可用后加载
+---------------------------------------------------------------------------
+pcall(require, "spec.helpers.wait")
 
 return _M

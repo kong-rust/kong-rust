@@ -99,23 +99,33 @@ impl DblessStore {
                 let ek_map = endpoint_keys.entry(table_name.to_string()).or_default();
 
                 for entity_json in arr {
-                    // Extract ID — 提取 ID
-                    let id = extract_uuid(entity_json, "id")?;
-
-                    // Store entity — 存储实体
-                    table.insert(id, entity_json.clone());
+                    // Extract or auto-generate ID — 提取或自动生成 ID
+                    let (id, entity) = if let Ok(id) = extract_uuid(entity_json, "id") {
+                        (id, entity_json.clone())
+                    } else {
+                        // Auto-generate UUID if missing — 缺少时自动生成 UUID
+                        let id = Uuid::new_v4();
+                        let mut entity = entity_json.clone();
+                        if let Some(obj) = entity.as_object_mut() {
+                            obj.insert("id".to_string(), Value::String(id.to_string()));
+                        }
+                        (id, entity)
+                    };
 
                     // Build endpoint key index — 建立端点键索引
                     if !endpoint_key.is_empty() {
                         if let Some(key_val) =
-                            entity_json.get(endpoint_key).and_then(|v| v.as_str())
+                            entity.get(endpoint_key).and_then(|v| v.as_str())
                         {
                             ek_map.insert(key_val.to_string(), id);
                         }
                     }
 
                     // Build foreign key index — 建立外键索引
-                    build_fk_index(&mut foreign_keys, table_name, entity_json);
+                    build_fk_index(&mut foreign_keys, table_name, &entity);
+
+                    // Store entity — 存储实体
+                    table.insert(id, entity);
                 }
 
                 tracing::info!("加载 {} 条 {} 实体", table.len(), table_name);

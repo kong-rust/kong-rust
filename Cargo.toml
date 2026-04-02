@@ -24,7 +24,8 @@ license = "Apache-2.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
+serde_yaml = "0.9"
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
@@ -36,7 +37,7 @@ bytes = "1"
 # HTTP / Web
 axum = { version = "0.8", features = ["json", "multipart"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "normalize-path"] }
 hyper = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 

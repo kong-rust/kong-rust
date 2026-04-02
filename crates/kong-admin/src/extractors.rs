@@ -225,7 +225,15 @@ fn form_pairs_to_json(pairs: &[(String, String)]) -> Value {
         // Determine if this should be an array — 判断是否应该为数组
         let is_array = entries.len() > 1 || entries.iter().any(|(idx, _)| idx.is_some());
 
+        // Also treat known array fields as arrays even with single value — 已知数组字段即使单值也当数组处理
+        let is_array = is_array || is_known_array_field(key);
+
         if is_array {
+            // If single empty value for a known array field, treat as null (clear field) — 已知数组字段的单个空值视为 null（清除字段）
+            if entries.len() == 1 && entries[0].1.is_empty() {
+                map.insert(key.clone(), Value::Null);
+                continue;
+            }
             // Build array, respecting dotted indices if present — 构建数组，如有点号索引则按索引排列
             let has_indices = entries.iter().any(|(idx, _)| idx.is_some());
             if has_indices {
@@ -264,6 +272,20 @@ fn normalize_form_key(raw: &str) -> (String, Option<usize>) {
     // Handle `key[]` pattern — 处理 `key[]` 模式
     if let Some(base) = raw.strip_suffix("[]") {
         return (base.to_string(), Some(0)); // use 0 as placeholder, will be ordered by insertion — 用 0 占位，按插入顺序排列
+    }
+
+    // Handle `key[N]` pattern (bracket index) — 处理 `key[N]` 模式（括号索引）
+    // e.g. config.key_names[1] → ("config.key_names", Some(1))
+    if let Some(bracket_pos) = raw.rfind('[') {
+        if let Some(close_pos) = raw.rfind(']') {
+            if close_pos > bracket_pos {
+                let idx_str = &raw[bracket_pos + 1..close_pos];
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    let base = &raw[..bracket_pos];
+                    return (base.to_string(), Some(idx));
+                }
+            }
+        }
     }
 
     // Handle `key.N` pattern (only if N is a digit) — 处理 `key.N` 模式（仅当 N 是数字时）
@@ -326,6 +348,20 @@ fn revert_non_numeric_form_values(value: &mut Value) {
             }
         }
     }
+}
+
+/// Check if a field should always be an array even with single value — 检查字段是否应始终为数组（即使只有单个值）
+/// These are entity fields typed as Vec/Array in the model — 这些是模型中类型为 Vec/Array 的实体字段
+fn is_known_array_field(field: &str) -> bool {
+    matches!(
+        field,
+        // Route fields
+        "protocols" | "methods" | "hosts" | "paths" | "snis" | "sources" | "destinations"
+        // Service fields
+        | "ca_certificates"
+        // Plugin fields
+        | "tags"
+    )
 }
 
 /// Check if a field name is a known numeric (integer/float) entity field — 检查字段名是否为已知的数字类型实体字段

@@ -32,21 +32,51 @@ do
     if ok then cjson_null = cj.null end
 end
 
+-- Recursive form encoder (mirrors Kong's kong.tools.http.encode_args)
+-- 递归表单编码器（模仿 Kong 原始实现）
+local function recursive_encode_args(parent_key, value, query)
+    local sub_keys = {}
+    for sk in pairs(value) do
+        sub_keys[#sub_keys + 1] = sk
+    end
+    table.sort(sub_keys, function(a, b)
+        local ta = type(a)
+        if ta == type(b) then return a < b end
+        return ta == "number"
+    end)
+    for _, sub_key in ipairs(sub_keys) do
+        local sub_value = value[sub_key]
+        local next_sub_key
+        if type(sub_key) == "number" then
+            next_sub_key = string.format("%s[%s]", parent_key, tostring(sub_key))
+        else
+            next_sub_key = string.format("%s.%s", parent_key, tostring(sub_key))
+        end
+        if sub_value == cjson_null then
+            query[#query + 1] = url_mod.escape(next_sub_key) .. "="
+        elseif type(sub_value) == "table" then
+            recursive_encode_args(next_sub_key, sub_value, query)
+        else
+            query[#query + 1] = url_mod.escape(next_sub_key) .. "=" .. url_mod.escape(tostring(sub_value))
+        end
+    end
+end
+
 -- encode_args: encode table to application/x-www-form-urlencoded — 编码表为 form-urlencoded 格式
 local function encode_args(args)
     local parts = {}
-    for k, v in pairs(args) do
-        -- cjson.null values → encode as key= (empty value) so server receives empty string — cjson.null 值 → 编码为 key=（空值）以便服务端收到空字符串
+    local keys = {}
+    for k in pairs(args) do
+        keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        local v = args[k]
         if v == cjson_null then
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "="
         elseif type(v) == "table" then
-            -- multi-value: key=v1&key=v2 — 多值
-            for _, item in ipairs(v) do
-                if item ~= cjson_null then
-                    parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(item))
-                end
-            end
-        else
+            recursive_encode_args(k, v, parts)
+        elseif v ~= nil then
             parts[#parts + 1] = url_mod.escape(tostring(k)) .. "=" .. url_mod.escape(tostring(v))
         end
     end
@@ -55,7 +85,7 @@ end
 
 -- generate multipart boundary — 生成 multipart 边界
 local function generate_boundary()
-    return "----FormBoundary" .. string.format("%x%x", math.random(0, 0xFFFFFFFF), math.random(0, 0xFFFFFFFF))
+    return "----FormBoundary" .. string.format("%04x%04x%04x%04x", math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF))
 end
 
 -- encode multipart/form-data body — 编码 multipart/form-data 请求体
@@ -177,30 +207,29 @@ function Client:send(opts)
 
     -- normalize response headers (lowercase keys, case-insensitive lookup)
     -- 标准化响应头（小写键，大小写无关查找）
-    local norm_headers_raw = {}
+    -- Store headers directly in table for pairs() compatibility (LuaJIT doesn't call __pairs)
+    -- 将头部直接存储在表中以兼容 pairs()（LuaJIT 不调用 __pairs）
+    local norm_headers = {}
     if response_headers then
         for k, v in pairs(response_headers) do
-            norm_headers_raw[k:lower()] = v
+            norm_headers[k:lower()] = v
         end
     end
     -- Case-insensitive header access: res.headers["Allow"] → lookup "allow"
     -- 大小写无关的头部访问：res.headers["Allow"] → 查找 "allow"
-    local norm_headers = setmetatable({}, {
-        __index = function(_, key)
+    setmetatable(norm_headers, {
+        __index = function(self, key)
             if type(key) == "string" then
-                return norm_headers_raw[key:lower()]
+                return rawget(self, key:lower())
             end
-            return norm_headers_raw[key]
+            return nil
         end,
-        __newindex = function(_, key, value)
+        __newindex = function(self, key, value)
             if type(key) == "string" then
-                norm_headers_raw[key:lower()] = value
+                rawset(self, key:lower(), value)
             else
-                norm_headers_raw[key] = value
+                rawset(self, key, value)
             end
-        end,
-        __pairs = function(_)
-            return pairs(norm_headers_raw)
         end,
     })
 

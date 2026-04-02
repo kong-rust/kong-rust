@@ -13,7 +13,7 @@ pub use schemas::*;
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequest, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -97,7 +97,7 @@ impl AdminState {
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
-    pub size: Option<usize>,
+    pub size: Option<String>,
     pub offset: Option<String>,
     pub tags: Option<String>,
     /// Filter consumers by custom_id — 按 custom_id 过滤 consumer
@@ -194,7 +194,7 @@ impl ListParams {
             }
         });
         PageParams {
-            size: self.size.unwrap_or(100).min(1000),
+            size: self.size.as_ref().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100).min(1000),
             offset: self.offset.clone(),
             tags,
             tags_mode: if is_or { TagFilterMode::Or } else { TagFilterMode::And },
@@ -218,9 +218,230 @@ fn error_response(err: KongError) -> Response {
     (status, Json(body)).into_response()
 }
 
+/// Validate integer fields and required fields in request body — 验证请求体中的整数字段和必填字段
+fn validate_integer_fields(table_name: &str, body: &Value) -> Option<(StatusCode, Json<Value>)> {
+    validate_integer_fields_ext(table_name, body, false)
+}
+
+fn validate_integer_fields_create(table_name: &str, body: &Value) -> Option<(StatusCode, Json<Value>)> {
+    validate_integer_fields_ext(table_name, body, true)
+}
+
+fn validate_integer_fields_ext(table_name: &str, body: &Value, check_required: bool) -> Option<(StatusCode, Json<Value>)> {
+    let int_fields: &[&str] = match table_name {
+        "routes" => &["regex_priority", "https_redirect_status_code", "priority"],
+        "services" => &["port", "retries", "connect_timeout", "write_timeout", "read_timeout", "tls_verify_depth"],
+        "upstreams" => &["slots"],
+        "targets" => &["weight"],
+        _ => return None,
+    };
+    if let Some(obj) = body.as_object() {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        for &field in int_fields {
+            if let Some(val) = obj.get(field) {
+                if val.is_string() {
+                    violations.push(format!("{}: expected an integer", field));
+                    fields.insert(field.to_string(), json!("expected an integer"));
+                }
+            }
+        }
+        // Also check required fields for service on create/upsert — 创建/upsert 时也检查 service 必填字段
+        if table_name == "services" && check_required {
+            let host_missing = match obj.get("host") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(h) => h.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if host_missing && !violations.is_empty() {
+                violations.push("host: required field missing".to_string());
+                fields.insert("host".to_string(), json!("required field missing"));
+            }
+        }
+        if !violations.is_empty() {
+            let msg = if violations.len() == 1 {
+                format!("schema violation ({})", violations[0])
+            } else {
+                format!("{} schema violations ({})", violations.len(), violations.join("; "))
+            };
+            return Some((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": msg,
+                    "name": "schema violation",
+                    "code": 2,
+                    "fields": Value::Object(fields),
+                })),
+            ));
+        }
+    }
+    None
+}
+
+/// Convert empty JSON objects {} to empty arrays [] for known array fields — 将已知数组字段的空 JSON 对象转为空数组
+fn normalize_empty_objects_to_arrays(body: &Value) -> Value {
+    let known_array_fields = [
+        "protocols", "methods", "hosts", "paths", "snis",
+        "sources", "destinations", "ca_certificates", "tags",
+    ];
+    let mut body = body.clone();
+    if let Some(obj) = body.as_object_mut() {
+        for &field in &known_array_fields {
+            if let Some(val) = obj.get(field) {
+                if let Some(map) = val.as_object() {
+                    if map.is_empty() {
+                        obj.insert(field.to_string(), json!([]));
+                    }
+                }
+            }
+        }
+    }
+    body
+}
+
 /// Enrich UNIQUE violation error with actual field values from the request body
 /// 用请求体中的实际字段值丰富 UNIQUE 冲突错误消息
 /// Returns (message, optional fields object) — 返回 (消息, 可选的 fields 对象)
+/// Validate upstream name: must be valid hostname, not IP — 验证 upstream 名称：有效主机名，不能是 IP
+fn validate_upstream_name(name: &str) -> Option<(StatusCode, Json<Value>)> {
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("Invalid name ('{}'); no ip addresses allowed", name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": { "name": format!("Invalid name ('{}'); no ip addresses allowed", name) },
+            })),
+        ));
+    }
+    let is_valid = !name.is_empty() && !name.contains(' ')
+        && name.split('.').all(|label| {
+            !label.is_empty() && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+    if !is_valid {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("schema violation (name: Invalid name ('{}'); must be a valid hostname)", name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": { "name": format!("Invalid name ('{}'); must be a valid hostname", name) },
+            })),
+        ));
+    }
+    None
+}
+
+
+/// Validate upstream hash_on / hash_fallback related fields
+/// 验证 upstream 的 hash_on / hash_fallback 相关字段
+fn validate_upstream_hash_fields(obj: &serde_json::Map<String, Value>) -> Option<(StatusCode, Json<Value>)> {
+    let valid_hash_on = ["none", "consumer", "ip", "header", "cookie", "path", "query_arg", "uri_capture"];
+    let valid_hash_fallback = ["none", "ip", "header", "cookie", "path", "query_arg", "uri_capture"];
+    let schema_err = |fields: Value| -> (StatusCode, Json<Value>) {
+        let fields_str = fields.as_object()
+            .map(|o| o.iter().map(|(k, v)| format!("{}: {}", k, v.as_str().unwrap_or(&v.to_string()))).collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        (StatusCode::BAD_REQUEST, Json(json!({
+            "message": format!("schema violation ({})", fields_str),
+            "name": "schema violation",
+            "code": 2,
+            "fields": fields,
+        })))
+    };
+    let get_str = |key: &str| -> Option<&str> { obj.get(key).and_then(|v| v.as_str()) };
+    if let Some(hash_on) = get_str("hash_on") {
+        if !valid_hash_on.contains(&hash_on) {
+            return Some(schema_err(json!({"hash_on": "expected one of: none, consumer, ip, header, cookie, path, query_arg, uri_capture"})));
+        }
+        if hash_on == "header" {
+            match get_str("hash_on_header") {
+                None | Some("") => {
+                    return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_on_header": "required field missing"})));
+                }
+                Some(h) => {
+                    if !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                        return Some(schema_err(json!({"hash_on_header": format!("bad header name '{}', allowed characters are A-Z, a-z, 0-9, '_', and '-'", h)})));
+                    }
+                }
+            }
+        }
+        if hash_on == "cookie" {
+            if let Some(cookie) = get_str("hash_on_cookie") {
+                if !is_valid_cookie_name(cookie) {
+                    return Some(schema_err(json!({"hash_on_cookie": r#"contains one or more invalid characters. ASCII control characters (0-31;127), space, tab and the characters ()<>@,;:\"/?={}[] are not allowed."#})));
+                }
+            }
+            if let Some(path) = get_str("hash_on_cookie_path") {
+                if !path.starts_with('/') {
+                    return Some(schema_err(json!({"hash_on_cookie_path": "should start with: /"})));
+                }
+            }
+        }
+        if let Some(hash_fallback) = get_str("hash_fallback") {
+            if hash_on == "cookie" && hash_fallback != "none" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none"})));
+            }
+            if !valid_hash_fallback.contains(&hash_fallback) && hash_fallback != "consumer" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none, ip, header, cookie, path, query_arg, uri_capture"})));
+            }
+            if hash_on == "consumer" && hash_fallback == "consumer" {
+                return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_on'"], "hash_fallback": "expected one of: none, ip, header, cookie, path, query_arg, uri_capture"})));
+            }
+            if hash_fallback == "header" {
+                match get_str("hash_fallback_header") {
+                    None | Some("") => {
+                        return Some(schema_err(json!({"@entity": ["failed conditional validation given value of field 'hash_fallback'"], "hash_fallback_header": "required field missing"})));
+                    }
+                    Some(h) => {
+                        if !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                            return Some(schema_err(json!({"hash_fallback_header": format!("bad header name '{}', allowed characters are A-Z, a-z, 0-9, '_', and '-'", h)})));
+                        }
+                    }
+                }
+            }
+            if hash_on == "header" && hash_fallback == "header" {
+                if let (Some(h1), Some(h2)) = (get_str("hash_on_header"), get_str("hash_fallback_header")) {
+                    if h1 == h2 {
+                        return Some(schema_err(json!({"@entity": ["values of these fields must be distinct: 'hash_on_header', 'hash_fallback_header'"]})));
+                    }
+                }
+            }
+            if hash_fallback == "cookie" {
+                if let Some(cookie) = get_str("hash_on_cookie") {
+                    if !is_valid_cookie_name(cookie) {
+                        return Some(schema_err(json!({"hash_on_cookie": r#"contains one or more invalid characters. ASCII control characters (0-31;127), space, tab and the characters ()<>@,;:\"/?={}[] are not allowed."#})));
+                    }
+                }
+                if let Some(path) = get_str("hash_on_cookie_path") {
+                    if !path.starts_with('/') {
+                        return Some(schema_err(json!({"hash_on_cookie_path": "should start with: /"})));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_valid_cookie_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    for c in name.chars() {
+        let b = c as u32;
+        if b <= 31 || b == 127 {
+            return false;
+        }
+        if matches!(c, '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '?' | '=' | '{' | '}' | '[' | ']' | ' ' | '\t') {
+            return false;
+        }
+    }
+    true
+}
+
 fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Value>) {
     let msg = err.to_string();
     if let KongError::UniqueViolation(inner) = err {
@@ -295,9 +516,10 @@ fn enrich_unique_violation(err: &KongError, body: &Value) -> (String, Option<Val
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
                         };
+                        let fields = json!({ field_name: val_str });
                         return (
                             format!("UNIQUE violation detected on '{{{field_name}=\"{val_str}\"}}'"),
-                            None,
+                            Some(fields),
                         );
                     }
                 }
@@ -542,26 +764,146 @@ pub async fn status_info(
     Json(body).into_response()
 }
 
+/// GET /status/ready — Readiness check — GET /status/ready — 就绪检查
+/// Returns 200 when the node is ready to serve traffic, 503 otherwise.
+/// DB mode: always ready after startup. DB-less mode: ready only after a valid config is loaded.
+/// DB 模式：启动后即就绪。DB-less 模式：仅在加载有效配置后就绪。
+pub async fn status_ready(
+    State(state): State<AdminState>,
+) -> Response {
+    let is_dbless = state.config.database == "off";
+
+    if is_dbless {
+        // In db-less mode, check if a config has been loaded — db-less 模式下检查是否已加载配置
+        // Empty string or all-zeros hash means no valid config loaded — 空字符串或全零哈希表示没有加载有效配置
+        let hash = state.configuration_hash.read()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        let no_config = hash.is_empty() || hash.chars().all(|c| c == '0');
+        if no_config {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "message": "no configuration loaded" })),
+            ).into_response();
+        }
+    }
+
+    Json(json!({ "message": "ready" })).into_response()
+}
+
 /// POST /config — Accept declarative config (db-less mode) — POST /config — 接受声明式配置（db-less 模式）
+/// Supports both JSON body and multipart/form-data with a `config` YAML/JSON field.
+/// 支持 JSON 请求体和 multipart/form-data（含 `config` YAML/JSON 字段）。
 pub async fn post_config(
     State(state): State<AdminState>,
-    body: String,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Parse the config body as JSON — 将配置内容解析为 JSON
-    let config: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => {
+    // Extract config body depending on Content-Type — 根据 Content-Type 提取配置内容
+    let content_type = request.headers().get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let (body, config) = if content_type.contains("multipart/form-data") {
+        // Parse multipart form data — 解析 multipart 表单数据
+        let mut multipart: axum::extract::Multipart = match axum::extract::Multipart::from_request(request, &()).await {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to parse multipart form: {}", e) })),
+                ).into_response();
+            }
+        };
+
+        let mut config_str = String::new();
+        while let Ok(Some(field)) = multipart.next_field().await {
+            let name = field.name().map(|n| n.to_string());
+            if name.as_deref() == Some("config") {
+                config_str = field.text().await.unwrap_or_default();
+                break;
+            }
+        }
+
+        if config_str.is_empty() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "message": format!("failed to parse declarative config: {}", e),
-                })),
+                Json(json!({ "message": "missing 'config' field in multipart form" })),
             ).into_response();
         }
+
+        // Try JSON first, then YAML — 先尝试 JSON，再尝试 YAML
+        let parsed: Value = match serde_json::from_str(&config_str) {
+            Ok(v) => v,
+            Err(_) => {
+                // Try YAML — 尝试 YAML
+                match serde_yaml::from_str(&config_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                        ).into_response();
+                    }
+                }
+            }
+        };
+
+        (config_str, parsed)
+    } else {
+        // JSON body — JSON 请求体
+        let body_bytes = match axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to read request body: {}", e) })),
+                ).into_response();
+            }
+        };
+        let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+        let parsed: Value = match serde_json::from_str(&body_str) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                ).into_response();
+            }
+        };
+        // If JSON has a "config" field with a string value, parse it as YAML
+        // 如果 JSON 有 "config" 字段且值为字符串，将其作为 YAML 解析
+        if let Some(config_str) = parsed.get("config").and_then(|v| v.as_str()) {
+            let inner: Value = match serde_yaml::from_str(config_str) {
+                Ok(v) => v,
+                Err(_) => match serde_json::from_str(config_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "message": format!("failed to parse declarative config: {}", e) })),
+                        ).into_response();
+                    }
+                }
+            };
+            (config_str.to_string(), inner)
+        } else {
+            (body_str, parsed)
+        }
     };
+
+    // Validate declarative config: must be an object with _format_version — 验证声明式配置：必须是包含 _format_version 的对象
+    if !config.is_object() || !config.as_object().unwrap().contains_key("_format_version") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "failed to parse declarative config: expected object with '_format_version' key",
+            })),
+        ).into_response();
+    }
 
     // In db-less mode, load the config into the in-memory store — db-less 模式下将配置加载到内存存储
     if let Some(ref store) = state.dbless_store {
@@ -894,6 +1236,36 @@ pub(crate) async fn do_list<T: Entity + Serialize + Send + Sync + 'static>(
     dao: &Arc<dyn Dao<T>>,
     params: &ListParams,
 ) -> (StatusCode, Json<Value>) {
+    // Validate size parameter — 验证 size 参数
+    if let Some(ref s) = params.size {
+        if s.parse::<usize>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "code": 9,
+                    "name": "invalid size",
+                    "message": "size must be a number",
+                })),
+            );
+        }
+    }
+    // Validate offset parameter — 验证 offset 参数
+    if let Some(ref offset) = params.offset {
+        // base64 strings must have length >= 4 and valid chars — base64 字符串长度须 >= 4 且字符有效
+        let valid_b64 = offset.len() >= 4
+            && offset.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+            && offset.trim_end_matches('=').len() >= 2;
+        if !valid_b64 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "code": 7,
+                    "name": "invalid offset",
+                    "message": format!("'{}' is not a valid offset: bad base64 encoding", offset),
+                })),
+            );
+        }
+    }
     // Validate tags before query — 查询前验证 tags 参数
     if let Err(err) = params.validate_tags() {
         return err;
@@ -1064,8 +1436,12 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
     dao: &Arc<dyn Dao<T>>,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
+    // Normalize empty objects and validate integer fields — 归一化空对象并验证整数字段
+    let mut body = normalize_empty_objects_to_arrays(&body);
+    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+        return err;
+    }
     // Auto-inject id and timestamps (Kong-compatible: these fields are optional on create) — 自动注入 id 和时间戳（Kong 兼容：创建时这些字段可选）
-    let mut body = body;
     if let Some(obj) = body.as_object_mut() {
         if !obj.contains_key("id") {
             obj.insert("id".to_string(), json!(uuid::Uuid::new_v4()));
@@ -1282,6 +1658,201 @@ pub(crate) async fn do_create<T: Entity + Serialize + for<'de> Deserialize<'de> 
                 );
             }
         }
+
+        // Upstream.name is required — Upstream.name 必填
+        if T::table_name() == "upstreams" {
+            let name_missing = match obj.get("name") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(n) => n.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if name_missing {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (name: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": "required field missing"
+                        },
+                    })),
+                );
+            }
+            // Validate upstream name format — 验证上游名称格式
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                if let Some(err) = validate_upstream_name(name) {
+                    return err;
+                }
+            }
+            // Validate upstream slots range [10, 65536] — 验证 slots 范围
+            if let Some(slots_val) = obj.get("slots") {
+                let slots_invalid = if let Some(n) = slots_val.as_i64() {
+                    n < 10 || n > 65536
+                } else if let Some(n) = slots_val.as_f64() {
+                    (n as i64) < 10 || (n as i64) > 65536
+                } else {
+                    false
+                };
+                if slots_invalid {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (slots: value should be between 10 and 65536)",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "slots": "value should be between 10 and 65536"
+                            },
+                        })),
+                    );
+                }
+            }
+            // Validate hash_on / hash_fallback fields — 验证 hash 相关字段
+            if let Some(err) = validate_upstream_hash_fields(obj) {
+                return err;
+            }
+        }
+
+        // Route must have at least one of methods/hosts/headers/paths/snis — Route 至少需要一个路由匹配字段
+        if T::table_name() == "routes" {
+            if let Some(obj) = body.as_object_mut() {
+                let has_field = |name: &str| -> bool {
+                    match obj.get(name) {
+                        Some(Value::Array(a)) => !a.is_empty(),
+                        Some(Value::Object(o)) => !o.is_empty(),
+                        Some(Value::Null) | None => false,
+                        Some(_) => true,
+                    }
+                };
+                let has_routing_field = has_field("methods") || has_field("hosts") || has_field("headers")
+                    || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
+                // Determine protocols — 确定协议
+                let protocols = obj.get("protocols").and_then(|v| v.as_array());
+                let is_grpc = protocols.map_or(false, |arr| {
+                    arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
+                });
+
+                // Validate protocol values and service.protocol — 验证协议值和 service.protocol
+                {
+                    let valid_protos = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                    let mut proto_violations = Vec::new();
+                    let mut proto_fields = serde_json::Map::new();
+
+                    if let Some(Value::Array(protos)) = obj.get("protocols") {
+                        for (i, p) in protos.iter().enumerate() {
+                            if let Some(ps) = p.as_str() {
+                                if !valid_protos.contains(&ps) {
+                                    proto_violations.push(format!("protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp", i + 1));
+                                    proto_fields.insert("protocols".to_string(), json!(["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"]));
+                                    break; // only report first bad protocol — 只报告第一个坏协议
+                                }
+                            }
+                        }
+                    }
+
+                    // Also check service.protocol — 也检查 service.protocol
+                    if let Some(svc) = obj.get("service").and_then(|v| v.as_object()) {
+                        if let Some(proto) = svc.get("protocol").and_then(|v| v.as_str()) {
+                            if !valid_protos.contains(&proto) {
+                                proto_violations.push("service.protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp".to_string());
+                                let mut svc_fields = serde_json::Map::new();
+                                svc_fields.insert("protocol".to_string(), json!("expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"));
+                                proto_fields.insert("service".to_string(), Value::Object(svc_fields));
+                            }
+                        }
+                    }
+
+                    if !proto_violations.is_empty() {
+                        let msg = if proto_violations.len() == 1 {
+                            format!("schema violation ({})", proto_violations[0])
+                        } else {
+                            format!("{} schema violations ({})", proto_violations.len(), proto_violations.join("; "))
+                        };
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": msg,
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": Value::Object(proto_fields),
+                            })),
+                        );
+                    }
+                }
+
+                if !has_routing_field {
+                    // Kong shows the most restrictive (TLS/secure) protocol — Kong 只显示最受限的协议
+                    let proto_display = if let Some(arr) = protocols {
+                        let pl: Vec<&str> = arr.iter().filter_map(|p| p.as_str()).collect();
+                        if pl.contains(&"grpcs") { "grpcs".to_string() }
+                        else if pl.contains(&"https") { "https".to_string() }
+                        else if pl.contains(&"tls") { "tls".to_string() }
+                        else { pl.join("', '") }
+                    } else {
+                        "https".to_string()
+                    };
+                    let rf = if is_grpc { "'hosts', 'headers', 'paths', 'snis'" }
+                             else { "'methods', 'hosts', 'headers', 'paths', 'snis'" };
+                    let emsg = format!("must set one of {} when 'protocols' is '{}'", rf, proto_display);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": format!("schema violation ({})", emsg),
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": { "@entity": [emsg] },
+                        })),
+                    );
+                }
+
+                // gRPC routes: validate constraints — gRPC 路由约束验证
+                if is_grpc {
+                    if obj.get("strip_path").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": "schema violation (strip_path: cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs')",
+                                "name": "schema violation",
+                                "code": 2,
+                                "fields": { "strip_path": "cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs'" },
+                            })),
+                        );
+                    }
+                    if let Some(Value::Array(arr)) = obj.get("methods") {
+                        if !arr.is_empty() {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": "schema violation (methods: cannot set 'methods' when 'protocols' is 'grpc' or 'grpcs')",
+                                    "name": "schema violation",
+                                    "code": 2,
+                                    "fields": { "methods": "cannot set 'methods' when 'protocols' is 'grpc' or 'grpcs'" },
+                                })),
+                            );
+                        }
+                    }
+                    obj.insert("strip_path".to_string(), json!(false));
+                }
+            }
+        }
+    }
+
+    // Route: validate service has id or name — 路由：验证 service 有 id 或 name
+    if T::table_name() == "routes" {
+        if let Some(svc) = body.as_object().and_then(|o| o.get("service")).and_then(|v| v.as_object()) {
+            if !svc.contains_key("id") && !svc.contains_key("name") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (service.id: missing primary key)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": { "service": { "id": "missing primary key" } },
+                    })),
+                );
+            }
+        }
     }
 
     // Clone body for UNIQUE violation error enrichment — 克隆请求体以便 UNIQUE 冲突时提取字段值
@@ -1335,6 +1906,12 @@ pub(crate) async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
         Ok(b) => b,
         Err(e) => return e,
     };
+
+    // Normalize empty objects and validate integer fields — 归一化空对象并验证整数字段
+    let body = normalize_empty_objects_to_arrays(&body);
+    if let Some(err) = validate_integer_fields(T::table_name(), &body) {
+        return err;
+    }
 
     // Plugin unknown field validation on PATCH — PATCH 时验证插件未知字段
     if T::table_name() == "plugins" {
@@ -1486,6 +2063,11 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
         Err(e) => return e,
     };
 
+    // Validate integer fields (with required field check for create/upsert) — 验证整数字段（含必填字段检查）
+    if let Some(err) = validate_integer_fields_create(T::table_name(), &body) {
+        return err;
+    }
+
     // Inject id/endpoint_key from URL path — 从 URL 路径注入 id 或 endpoint_key
     if let Some(obj) = body.as_object_mut() {
         if let Ok(uuid) = uuid::Uuid::parse_str(id_or_name) {
@@ -1581,6 +2163,132 @@ pub(crate) async fn do_upsert<T: Entity + Serialize + for<'de> Deserialize<'de> 
                         },
                     })),
                 );
+            }
+        }
+    }
+
+    // Upstream.name is required for upsert — upsert 时 Upstream.name 必填
+    if T::table_name() == "upstreams" {
+        if let Some(obj) = body.as_object() {
+            let name_missing = match obj.get("name") {
+                None => true,
+                Some(Value::Null) => true,
+                Some(n) => n.as_str().map_or(false, |s| s.is_empty()),
+            };
+            if name_missing {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (name: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {
+                            "name": "required field missing"
+                        },
+                    })),
+                );
+            }
+            // Validate upstream name format — 验证上游名称格式
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                if let Some(err) = validate_upstream_name(name) {
+                    return err;
+                }
+            }
+            // Validate upstream slots range [10, 65536] — 验证 slots 范围
+            if let Some(slots_val) = obj.get("slots") {
+                let slots_invalid = if let Some(n) = slots_val.as_i64() {
+                    n < 10 || n > 65536
+                } else if let Some(n) = slots_val.as_f64() {
+                    (n as i64) < 10 || (n as i64) > 65536
+                } else {
+                    false
+                };
+                if slots_invalid {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "message": "schema violation (slots: value should be between 10 and 65536)",
+                            "name": "schema violation",
+                            "code": 2,
+                            "fields": {
+                                "slots": "value should be between 10 and 65536"
+                            },
+                        })),
+                    );
+                }
+            }
+            // Validate hash_on / hash_fallback fields — 验证 hash 相关字段
+            if let Some(err) = validate_upstream_hash_fields(obj) {
+                return err;
+            }
+        }
+    }
+
+    // Route must have at least one routing field for upsert — upsert 时 Route 也需要至少一个路由匹配字段
+    if T::table_name() == "routes" {
+        if let Some(obj) = body.as_object_mut() {
+            let has_field = |name: &str| -> bool {
+                match obj.get(name) {
+                    Some(Value::Array(a)) => !a.is_empty(),
+                    Some(Value::Object(o)) => !o.is_empty(),
+                    Some(Value::Null) | None => false,
+                    Some(_) => true,
+                }
+            };
+            let has_routing = has_field("methods") || has_field("hosts") || has_field("headers")
+                || has_field("paths") || has_field("snis") || has_field("sources") || has_field("destinations");
+
+            let protocols = obj.get("protocols").and_then(|v| v.as_array());
+            let is_grpc = protocols.map_or(false, |arr| {
+                arr.iter().any(|p| p.as_str().map_or(false, |s| s == "grpc" || s == "grpcs"))
+            });
+
+            // Validate protocol values in upsert — upsert 中验证协议值
+            if let Some(Value::Array(protos)) = obj.get("protocols") {
+                let valid_protos = ["grpc", "grpcs", "http", "https", "tcp", "tls", "tls_passthrough", "udp"];
+                for (i, p) in protos.iter().enumerate() {
+                    if let Some(ps) = p.as_str() {
+                        if !valid_protos.contains(&ps) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "message": format!("schema violation (protocols.{}: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)", i + 1),
+                                    "name": "schema violation",
+                                    "code": 2,
+                                    "fields": { "protocols": ["expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"] },
+                                })),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if !has_routing {
+                let proto_display = if let Some(arr) = protocols {
+                    let pl: Vec<&str> = arr.iter().filter_map(|p| p.as_str()).collect();
+                    if pl.contains(&"grpcs") { "grpcs".to_string() }
+                    else if pl.contains(&"https") { "https".to_string() }
+                    else if pl.contains(&"tls") { "tls".to_string() }
+                    else { pl.join("', '") }
+                } else {
+                    "https".to_string()
+                };
+                let rf = if is_grpc { "'hosts', 'headers', 'paths', 'snis'" }
+                         else { "'methods', 'hosts', 'headers', 'paths', 'snis'" };
+                let emsg = format!("must set one of {} when 'protocols' is '{}'", rf, proto_display);
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": format!("schema violation ({})", emsg),
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": { "@entity": [emsg] },
+                    })),
+                );
+            }
+            // gRPC routes: strip_path forced to false — gRPC 路由：strip_path 强制为 false
+            if is_grpc {
+                obj.insert("strip_path".to_string(), json!(false));
             }
         }
     }
@@ -1731,17 +2439,117 @@ entity_handlers!(
     upsert_service,
     delete_service
 );
-entity_handlers!(
-    Route,
-    routes,
-    "routes",
-    list_routes,
-    get_route,
-    create_route,
-    update_route,
-    upsert_route,
-    delete_route
-);
+// Route handlers (custom, with service name resolution) — 路由处理器（自定义，支持 service name 解析）
+pub async fn list_routes(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    do_list::<Route>(&state.routes, &params).await
+}
+
+pub async fn get_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_get::<Route>(&state.routes, &id_or_name).await
+}
+
+pub async fn create_route(
+    State(state): State<AdminState>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_service_name_ref(&state, &mut body).await {
+        return e;
+    }
+    let result = do_create::<Route>(&state.routes, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn update_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let result = do_update::<Route>(&state.routes, &id_or_name, &body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn upsert_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_service_name_ref(&state, &mut body).await {
+        return e;
+    }
+    let result = do_upsert::<Route>(&state.routes, &id_or_name, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("routes");
+    }
+    result
+}
+
+pub async fn delete_route(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let result = do_delete::<Route>(&state.routes, &id_or_name).await;
+    let _ = state.refresh_tx.send("routes");
+    result
+}
+
+/// Resolve service.name reference to service.id — 将 service.name 引用解析为 service.id
+async fn resolve_service_name_ref(state: &AdminState, body: &mut Value) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Some(svc_obj) = body.as_object_mut().and_then(|o| o.get_mut("service")).and_then(|v| v.as_object_mut()) {
+        if !svc_obj.contains_key("id") && svc_obj.contains_key("name") {
+            let name_val = svc_obj.get("name").cloned();
+            let name_str = name_val.as_ref().and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            if name_str.is_none() {
+                // name is null/empty → missing primary key — name 为 null/空 → 缺少主键
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (service.id: missing primary key)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": { "service": { "id": "missing primary key" } },
+                    })),
+                ));
+            }
+            if let Some(name) = name_str.map(|s| s.to_string()) {
+                let pk = PrimaryKey::EndpointKey(name.clone());
+                match state.services.select(&pk).await {
+                    Ok(Some(svc)) => {
+                        let svc_json = serde_json::to_value(&svc).unwrap_or(json!(null));
+                        if let Some(id) = svc_json.get("id").and_then(|v| v.as_str()) {
+                            svc_obj.remove("name");
+                            svc_obj.insert("id".to_string(), json!(id));
+                        }
+                    }
+                    _ => {
+                        let fk_msg = String::from("the foreign key cannot be resolved with '{name=\"") + &name + "\"}' for an existing 'services' entity";
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "message": format!("foreign key unresolved (service.name: {})", fk_msg),
+                                "name": "foreign keys unresolved",
+                                "code": 13,
+                                "fields": { "service": { "name": fk_msg } },
+                            })),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 entity_handlers!(
     Consumer,
     consumers,
@@ -1833,31 +2641,876 @@ entity_handlers!(
     upsert_upstream,
     delete_upstream
 );
-entity_handlers!(
-    Certificate,
-    certificates,
-    "certificates",
-    list_certificates,
-    get_certificate,
-    create_certificate,
-    update_certificate,
-    upsert_certificate,
-    delete_certificate
-);
-entity_handlers!(
-    Sni, snis, "snis", list_snis, get_sni, create_sni, update_sni, upsert_sni, delete_sni
-);
-entity_handlers!(
-    CaCertificate,
-    ca_certificates,
-    "ca_certificates",
-    list_ca_certificates,
-    get_ca_certificate,
-    create_ca_certificate,
-    update_ca_certificate,
-    upsert_ca_certificate,
-    delete_ca_certificate
-);
+// ============ Certificate handlers (custom, with SNI embedding) — 证书处理器（自定义，嵌入 SNI） ============
+
+/// Percent-decode PEM fields (cert, key, cert_alt, key_alt) that may be URL-encoded from form-urlencoded bodies
+/// 对可能来自 form-urlencoded 的 PEM 字段进行百分号解码
+fn percent_decode_pem_fields(body: &mut Value) {
+    let pem_fields = ["cert", "key", "cert_alt", "key_alt"];
+    if let Some(obj) = body.as_object_mut() {
+        for field in &pem_fields {
+            if let Some(val) = obj.get_mut(*field) {
+                if let Some(s) = val.as_str() {
+                    if s.contains('%') {
+                        if let Ok(decoded) = url::form_urlencoded::parse(s.as_bytes())
+                            .into_owned()
+                            .next()
+                            .map(|(k, _)| k)
+                            .ok_or(()) {
+                            // form_urlencoded::parse treats the whole string as key if no = — 如果没有 = 号则整个字符串作为 key
+                            *val = Value::String(decoded);
+                        } else {
+                            // Fallback: manual percent decode — 后备：手动百分号解码
+                            let decoded = percent_decode_str(s);
+                            *val = Value::String(decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn percent_decode_str(s: &str) -> String {
+    // Proper percent decoding — 百分号解码
+    let mut result = Vec::new();
+    let input = s.as_bytes();
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            let hi = hex_val(input[i + 1]);
+            let lo = hex_val(input[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                result.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Fetch SNI names associated with a certificate — 获取关联证书的 SNI 名称列表
+async fn fetch_sni_names_for_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_id: &uuid::Uuid) -> Vec<String> {
+    let all_params = PageParams { size: 10000, ..Default::default() };
+    match snis_dao.select_by_foreign_key("certificate", cert_id, &all_params).await {
+        Ok(page) => page.data.into_iter().map(|s| s.name).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Embed snis array into a certificate JSON value (sorted alphabetically) — 将 snis 数组嵌入证书 JSON 值（按字母排序）
+async fn embed_snis_in_cert(snis_dao: &Arc<dyn Dao<Sni>>, cert_json: &mut Value) {
+    if let Some(id_str) = cert_json.get("id").and_then(|v| v.as_str()) {
+        if let Ok(cert_id) = uuid::Uuid::parse_str(id_str) {
+            let mut sni_names = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+            sni_names.sort();
+            cert_json.as_object_mut().unwrap().insert("snis".to_string(), json!(sni_names));
+        }
+    }
+}
+
+/// Validate SNI name: wildcards must be only at start or end, not both — 验证 SNI 名称通配符
+fn validate_sni_name(name: &str) -> Result<(), String> {
+    let wildcard_count = name.matches('*').count();
+    if wildcard_count > 1 {
+        return Err("only one wildcard must be specified".to_string());
+    }
+    if wildcard_count == 1 {
+        if !name.starts_with("*.") && !name.ends_with(".*") {
+            return Err("wildcard must be leftmost or rightmost character".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Validate SNI names: check for duplicates, wildcard format, and pre-existing SNIs — 验证 SNI 名称
+async fn validate_sni_names_for_create(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    sni_names: &[String],
+    exclude_cert_id: Option<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let mut seen = std::collections::HashSet::new();
+    for name in sni_names {
+        if !seen.insert(name.as_str()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (snis: {} is duplicated)", name),
+                "name": "schema violation", "code": 2,
+                "fields": { "snis": format!("{} is duplicated", name) },
+            }))));
+        }
+        if let Err(msg) = validate_sni_name(name) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (name: {})", msg),
+                "name": "schema violation", "code": 2,
+                "fields": { "name": msg },
+            }))));
+        }
+    }
+    for name in sni_names {
+        let sni_pk = PrimaryKey::EndpointKey(name.clone());
+        if let Ok(Some(existing_sni)) = snis_dao.select(&sni_pk).await {
+            let is_same_cert = exclude_cert_id.map_or(false, |id| existing_sni.certificate.id == id);
+            if !is_same_cert {
+                let cert_id_str = existing_sni.certificate.id.to_string();
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
+                    "message": format!("schema violation (snis: {} already associated with existing certificate '{}')", name, cert_id_str),
+                    "name": "schema violation", "code": 2,
+                    "fields": { "snis": format!("{} already associated with existing certificate '{}'", name, cert_id_str) },
+                }))));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate certificate PEM: cert/key match, cert_alt/key_alt pairing, non-distinct certs — 验证证书 PEM
+fn validate_certificate_pem(body: &Value) -> Result<(), (StatusCode, Json<Value>)> {
+    use openssl::x509::X509;
+    use openssl::pkey::PKey;
+
+    let cert_str = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+    let key_str = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let cert_alt_str = body.get("cert_alt").and_then(|v| v.as_str());
+    let key_alt_str = body.get("key_alt").and_then(|v| v.as_str());
+
+    if cert_str.is_empty() || key_str.is_empty() {
+        return Ok(());
+    }
+
+    let cert = X509::from_pem(cert_str.as_bytes()).map_err(|_| cert_schema_violation("certificate is not valid PEM format"))?;
+    let key = PKey::private_key_from_pem(key_str.as_bytes()).map_err(|_| cert_schema_violation("key is not valid PEM format"))?;
+
+    if cert.public_key().ok().and_then(|pk| pk.public_eq(&key).then_some(())).is_none() {
+        return Err(cert_schema_violation("certificate does not match key"));
+    }
+
+    let has_cert_alt = cert_alt_str.map_or(false, |s| !s.is_empty()) && !body.get("cert_alt").map_or(false, |v| v.is_null());
+    let has_key_alt = key_alt_str.map_or(false, |s| !s.is_empty()) && !body.get("key_alt").map_or(false, |v| v.is_null());
+
+    if has_cert_alt != has_key_alt {
+        return Err(cert_schema_violation("all or none of these fields must be set: 'cert_alt', 'key_alt'"));
+    }
+
+    if has_cert_alt && has_key_alt {
+        let cert_alt_pem = cert_alt_str.unwrap();
+        let key_alt_pem = key_alt_str.unwrap();
+
+        let cert_alt = X509::from_pem(cert_alt_pem.as_bytes()).map_err(|_| cert_schema_violation("alternative certificate is not valid PEM format"))?;
+        let key_alt = PKey::private_key_from_pem(key_alt_pem.as_bytes()).map_err(|_| cert_schema_violation("alternative key is not valid PEM format"))?;
+
+        if cert_alt.public_key().ok().and_then(|pk| pk.public_eq(&key_alt).then_some(())).is_none() {
+            return Err(cert_schema_violation("alternative certificate does not match key"));
+        }
+
+        let cert_key_type = cert.public_key().ok().map(|pk| pk.id());
+        let cert_alt_key_type = cert_alt.public_key().ok().map(|pk| pk.id());
+        if cert_key_type == cert_alt_key_type {
+            return Err(cert_schema_violation("certificate and alternative certificate need to have different type (e.g. RSA and ECDSA), the provided certificates were both of the same type"));
+        }
+    }
+
+    Ok(())
+}
+
+fn cert_schema_violation(msg: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({
+        "message": format!("schema violation ({})", msg),
+        "name": "schema violation", "code": 2,
+        "fields": { "@entity": [msg] },
+    })))
+}
+
+/// Extract snis field from request body, returning (cleaned body, snis list) — 从请求体提取 snis 字段
+fn extract_snis_from_body(body: &mut Value) -> Option<Vec<String>> {
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(snis_val) = obj.remove("snis") {
+            if snis_val.is_null() {
+                return Some(vec![]);
+            }
+            if let Some(arr) = snis_val.as_array() {
+                let names: Vec<String> = arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                return Some(names);
+            }
+        }
+    }
+    None
+}
+
+/// Create SNI records for a certificate — 为证书创建 SNI 记录
+async fn create_snis_for_cert(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    cert_id: uuid::Uuid,
+    sni_names: &[String],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now().timestamp();
+    for name in sni_names {
+        let sni = Sni {
+            id: uuid::Uuid::new_v4(),
+            name: name.clone(),
+            created_at: now,
+            updated_at: now,
+            tags: None,
+            certificate: ForeignKey::new(cert_id),
+            ws_id: None,
+        };
+        if let Err(e) = snis_dao.insert(&sni).await {
+            return Err((
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({ "message": e.to_string(), "name": e.error_name(), "code": e.error_code() })),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Replace all SNIs for a certificate (delete existing, create new) — 替换证书的所有 SNI（删除已有，创建新的）
+async fn replace_snis_for_cert(
+    snis_dao: &Arc<dyn Dao<Sni>>,
+    cert_id: uuid::Uuid,
+    sni_names: &[String],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let existing = fetch_sni_names_for_cert(snis_dao, &cert_id).await;
+    for name in &existing {
+        let pk = PrimaryKey::EndpointKey(name.clone());
+        let _ = snis_dao.delete(&pk).await;
+    }
+    create_snis_for_cert(snis_dao, cert_id, sni_names).await
+}
+
+/// GET /certificates — list all certificates with embedded snis — 列出所有证书（嵌入 snis）
+pub async fn list_certificates(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+    match state.certificates.page(&params.to_page_params()).await {
+        Ok(page) => {
+            let mut resp = build_page_response_with_tags(&page, params.tags.as_deref());
+            if let Some(data_arr) = resp.get_mut("data").and_then(|v| v.as_array_mut()) {
+                for cert_json in data_arr.iter_mut() {
+                    embed_snis_in_cert(&state.snis, cert_json).await;
+                }
+            }
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status, Json(json!({"message": e.to_string()})))
+        }
+    }
+}
+
+/// GET /certificates/{id_or_sni} — get certificate by ID, UUID, or SNI name — 按 ID、UUID 或 SNI 名称获取证书
+pub async fn get_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&id_or_name);
+    let cert_opt = match &pk {
+        PrimaryKey::Id(_) => {
+            match state.certificates.select(&pk).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    return (status, Json(json!({"message": e.to_string()})));
+                }
+            }
+        }
+        PrimaryKey::EndpointKey(_) => None,
+    };
+
+    let cert = if let Some(c) = cert_opt {
+        c
+    } else {
+        let sni_pk = PrimaryKey::EndpointKey(id_or_name.clone());
+        match state.snis.select(&sni_pk).await {
+            Ok(Some(sni)) => {
+                let cert_pk = PrimaryKey::Id(sni.certificate.id);
+                match state.certificates.select(&cert_pk).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) | Err(_) => {
+                        return (StatusCode::NOT_FOUND, Json(json!({"message": "certificates not found", "name": "not found", "code": 3})));
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {
+                return (StatusCode::NOT_FOUND, Json(json!({"message": "certificates not found", "name": "not found", "code": 3})));
+            }
+        }
+    };
+
+    let mut body = serde_json::to_value(&cert).unwrap_or(json!(null));
+    embed_snis_in_cert(&state.snis, &mut body).await;
+    (StatusCode::OK, Json(body))
+}
+
+/// POST /certificates — create certificate with optional snis — 创建证书（可选带 snis）
+pub async fn create_certificate(
+    State(state): State<AdminState>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    percent_decode_pem_fields(&mut body);
+    let sni_names = extract_snis_from_body(&mut body);
+
+    // Validate certificate PEM — 验证证书 PEM
+    if let Err(err) = validate_certificate_pem(&body) {
+        return err;
+    }
+    // Pre-validate SNI names — 预验证 SNI 名称
+    if let Some(ref names) = sni_names {
+        if let Err(err) = validate_sni_names_for_create(&state.snis, names, None).await {
+            return err;
+        }
+    }
+
+    let result = do_create::<Certificate>(&state.certificates, body).await;
+    if result.0.is_success() {
+        if let Some(ref names) = sni_names {
+            if !names.is_empty() {
+                if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+                    if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                        if let Err(err) = create_snis_for_cert(&state.snis, cert_id, names).await {
+                            return err;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::CREATED, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// PATCH /certificates/{id_or_sni} — update certificate with optional snis replacement — 更新证书（可选替换 snis）
+pub async fn update_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    percent_decode_pem_fields(&mut body);
+    let sni_names = extract_snis_from_body(&mut body);
+
+    // Pre-validate SNI names for PATCH — PATCH 时预验证 SNI 名称
+    let cert_id_or_name = resolve_cert_id_or_name(&state, &id_or_name).await;
+    let resolved = match cert_id_or_name {
+        Some(id) => id,
+        None => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "message": "certificates not found", "name": "not found", "code": 3 })));
+        }
+    };
+
+    let exclude_cert_id = uuid::Uuid::parse_str(&resolved).ok();
+    if let Some(ref names) = sni_names {
+        if let Err(err) = validate_sni_names_for_create(&state.snis, names, exclude_cert_id).await {
+            return err;
+        }
+    }
+
+    let result = do_update::<Certificate>(&state.certificates, &resolved, &body).await;
+    if result.0.is_success() {
+        if let Some(ref names) = sni_names {
+            if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+                if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                    if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, names).await {
+                        return err;
+                    }
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::OK, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// PUT /certificates/{id_or_sni} — upsert certificate with optional snis replacement — upsert 证书（可选替换 snis）
+pub async fn upsert_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    let mut body = body;
+    let sni_names = extract_snis_from_body(&mut body);
+
+    // Validate required fields for PUT — 验证 PUT 必填字段
+    {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        let cert_val = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+        let key_val = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        if cert_val.is_empty() {
+            violations.push("cert: required field missing");
+            fields.insert("cert".to_string(), json!("required field missing"));
+        }
+        if key_val.is_empty() {
+            violations.push("key: required field missing");
+            fields.insert("key".to_string(), json!("required field missing"));
+        }
+        if !violations.is_empty() {
+            let msg = if violations.len() > 1 {
+                format!("{} schema violations ({})", violations.len(), violations.join("; "))
+            } else {
+                format!("schema violation ({})", violations[0])
+            };
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": msg, "name": "schema violation", "code": 2, "fields": Value::Object(fields)})));
+        }
+    }
+
+    // Validate certificate PEM — 验证证书 PEM
+    if let Err(err) = validate_certificate_pem(&body) {
+        return err;
+    }
+
+    // Check if the URL path is an SNI name (not UUID) — 检查 URL 路径是否为 SNI 名称
+    let url_is_sni_name = uuid::Uuid::parse_str(&id_or_name).is_err();
+
+    // Build combined SNI list: URL SNI + body snis (deduplicated) — 构建合并 SNI 列表
+    let mut combined_snis: Vec<String> = Vec::new();
+    if url_is_sni_name {
+        combined_snis.push(id_or_name.clone());
+    }
+    if let Some(ref names) = sni_names {
+        for name in names {
+            if !combined_snis.contains(name) {
+                combined_snis.push(name.clone());
+            }
+        }
+    }
+
+    let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
+        .unwrap_or_else(|| id_or_name.clone());
+
+    let result = do_upsert::<Certificate>(&state.certificates, &resolved, body).await;
+    if result.0.is_success() {
+        if let Some(cert_id_str) = result.1.get("id").and_then(|v| v.as_str()) {
+            if let Ok(cert_id) = uuid::Uuid::parse_str(cert_id_str) {
+                // PUT always replaces SNIs (full replacement semantics) — PUT 始终替换 SNI（全量替换语义）
+                if let Err(err) = replace_snis_for_cert(&state.snis, cert_id, &combined_snis).await {
+                    return err;
+                }
+            }
+        }
+        let _ = state.refresh_tx.send("certificates");
+        let _ = state.refresh_tx.send("snis");
+
+        let mut cert_json = result.1.0;
+        embed_snis_in_cert(&state.snis, &mut cert_json).await;
+        (StatusCode::OK, Json(cert_json))
+    } else {
+        (result.0, Json(result.1.0))
+    }
+}
+
+/// DELETE /certificates/{id_or_sni} — delete certificate (SNIs cascade-deleted) — 删除证书（SNI 级联删除）
+pub async fn delete_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let resolved = resolve_cert_id_or_name(&state, &id_or_name).await
+        .unwrap_or_else(|| id_or_name.clone());
+
+    // Delete associated SNIs first (DB CASCADE as backup) — 先删 SNI（DB CASCADE 作为后备）
+    if let Ok(cert_id) = uuid::Uuid::parse_str(&resolved) {
+        let existing_snis = fetch_sni_names_for_cert(&state.snis, &cert_id).await;
+        for name in &existing_snis {
+            let pk = PrimaryKey::EndpointKey(name.clone());
+            let _ = state.snis.delete(&pk).await;
+        }
+    }
+
+    let result = do_delete::<Certificate>(&state.certificates, &resolved).await;
+    let _ = state.refresh_tx.send("certificates");
+    let _ = state.refresh_tx.send("snis");
+    result
+}
+
+/// GET /certificates/{cert_id_or_name}/snis — list SNIs for a certificate — 列出证书关联的 SNI
+pub async fn list_certificate_snis(
+    State(state): State<AdminState>,
+    Path(cert_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    let resolved = resolve_cert_id_or_name(&state, &cert_id_or_name).await;
+    let cert_id = match resolved.and_then(|s| uuid::Uuid::parse_str(&s).ok()) {
+        Some(id) => id,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let page_params = params.to_page_params();
+    match state.snis.select_by_foreign_key("certificate", &cert_id, &page_params).await {
+        Ok(page) => {
+            let resp = build_page_response_with_tags(&page, params.tags.as_deref());
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => (StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()}))),
+    }
+}
+
+/// POST /certificates/{cert_id_or_name}/snis — create SNI for a certificate — 为证书创建 SNI
+pub async fn create_certificate_sni(
+    State(state): State<AdminState>,
+    Path(cert_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let resolved = resolve_cert_id_or_name(&state, &cert_id_or_name).await;
+    let cert_id = match resolved.and_then(|s| uuid::Uuid::parse_str(&s).ok()) {
+        Some(id) => id,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    // Verify the certificate actually exists — 验证证书是否确实存在
+    let cert_pk = PrimaryKey::Id(cert_id);
+    match state.certificates.select(&cert_pk).await {
+        Ok(Some(_)) => {}
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    }
+    let mut body = body.0;
+    // Force certificate FK to the path cert — 强制 certificate 外键指向路径中的证书
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("certificate".to_string(), json!({"id": cert_id.to_string()}));
+    }
+    let result = do_create::<Sni>(&state.snis, body).await;
+    let _ = state.refresh_tx.send("snis");
+    result
+}
+
+// ============ Route ↔ Service nested endpoints — 路由 ↔ 服务嵌套端点 ============
+
+/// GET /routes/{route_id_or_name}/service — get the service associated with a route — 获取路由关联的服务
+pub async fn get_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let service_id = match &route.service {
+        Some(fk) => fk.id.to_string(),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    match state.services.select(&PrimaryKey::Id(uuid::Uuid::parse_str(&service_id).unwrap())).await {
+        Ok(Some(svc)) => (StatusCode::OK, Json(serde_json::to_value(&svc).unwrap_or(json!(null)))),
+        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    }
+}
+
+/// PATCH /routes/{route_id_or_name}/service — update the service associated with a route — 更新路由关联的服务
+pub async fn update_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let service_id = match &route.service {
+        Some(fk) => fk.id.to_string(),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let result = do_update::<Service>(&state.services, &service_id, &body.0).await;
+    let _ = state.refresh_tx.send("services");
+    result
+}
+
+/// PUT /routes/{route_id_or_name}/service — create or replace the service associated with a route — 创建或替换路由关联的服务
+pub async fn upsert_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+    body: crate::extractors::FlexibleBody,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    let route: Route = match state.routes.select(&pk).await {
+        Ok(Some(r)) => r,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))),
+    };
+    let body = body.0;
+    if let Some(fk) = &route.service {
+        let result = do_upsert::<Service>(&state.services, &fk.id.to_string(), body).await;
+        let _ = state.refresh_tx.send("services");
+        result
+    } else {
+        let result = do_create::<Service>(&state.services, body.clone()).await;
+        let _ = state.refresh_tx.send("services");
+        if let (StatusCode::CREATED, Json(ref svc_json)) = result {
+            if let Some(svc_id) = svc_json.get("id").and_then(|v| v.as_str()) {
+                let update_body = json!({"service": {"id": svc_id}});
+                let _ = do_update::<Route>(&state.routes, &route_id_or_name, &update_body).await;
+                let _ = state.refresh_tx.send("routes");
+            }
+        }
+        result
+    }
+}
+
+/// DELETE /routes/{route_id_or_name}/service — route exists→405, not found→404
+pub async fn delete_route_service(
+    State(state): State<AdminState>,
+    Path(route_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let pk = PrimaryKey::from_str_or_uuid(&route_id_or_name);
+    match state.routes.select(&pk).await {
+        Ok(Some(_)) => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({"message": "Method not allowed"})),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"message": "Not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Resolve a certificate identifier that may be a UUID or an SNI name — 解析可能是 UUID 或 SNI 名称的证书标识符
+/// Returns the UUID string if resolved, None if not found — 如果解析成功返回 UUID 字符串，未找到返回 None
+async fn resolve_cert_id_or_name(state: &AdminState, id_or_name: &str) -> Option<String> {
+    // If it's a valid UUID, return as-is — 如果是有效 UUID，直接返回
+    if uuid::Uuid::parse_str(id_or_name).is_ok() {
+        return Some(id_or_name.to_string());
+    }
+    // Try SNI name lookup — 尝试 SNI 名称查找
+    let sni_pk = PrimaryKey::EndpointKey(id_or_name.to_string());
+    if let Ok(Some(sni)) = state.snis.select(&sni_pk).await {
+        return Some(sni.certificate.id.to_string());
+    }
+    None
+}
+// Custom SNI handlers with wildcard validation — 自定义 SNI handler 含通配符验证
+pub async fn list_snis(State(state): State<AdminState>, Query(params): Query<ListParams>) -> impl IntoResponse {
+    do_list::<Sni>(&state.snis, &params).await
+}
+pub async fn get_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>) -> impl IntoResponse {
+    do_get::<Sni>(&state.snis, &id_or_name).await
+}
+pub async fn create_sni(State(state): State<AdminState>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_create::<Sni>(&state.snis, body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn update_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_update::<Sni>(&state.snis, &id_or_name, &body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn upsert_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>, FlexibleBody(body): FlexibleBody) -> impl IntoResponse {
+    // Validate required fields for PUT SNI — PUT SNI 必填字段验证
+    {
+        let mut violations = Vec::new();
+        let mut fields = serde_json::Map::new();
+        let has_cert = body.get("certificate").and_then(|v| v.as_object()).and_then(|o| o.get("id")).is_some();
+        let has_name = body.get("name").and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty());
+        if !has_cert { violations.push("certificate: required field missing"); fields.insert("certificate".to_string(), json!("required field missing")); }
+        if !has_name { violations.push("name: required field missing"); fields.insert("name".to_string(), json!("required field missing")); }
+        if !violations.is_empty() {
+            let msg = if violations.len() > 1 { format!("{} schema violations ({})", violations.len(), violations.join("; ")) } else { format!("schema violation ({})", violations[0]) };
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": msg, "name": "schema violation", "code": 2, "fields": Value::Object(fields)})));
+        }
+    }
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        if let Err(msg) = validate_sni_name(name) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"message": format!("schema violation (name: {})", msg), "name": "schema violation", "code": 2, "fields": {"name": msg}})));
+        }
+    }
+    let result = do_upsert::<Sni>(&state.snis, &id_or_name, body).await;
+    if result.0.is_success() { let _ = state.refresh_tx.send("snis"); }
+    result
+}
+pub async fn delete_sni(State(state): State<AdminState>, Path(id_or_name): Path<String>) -> impl IntoResponse {
+    let result = do_delete::<Sni>(&state.snis, &id_or_name).await;
+    let _ = state.refresh_tx.send("snis");
+    result
+}
+// ---- CA Certificate custom handlers (validation: CA constraint, expiry, FK references) ----
+// ---- CA Certificate 自定义处理器（验证：CA 约束、过期检查、FK 引用检查）----
+
+pub async fn list_ca_certificates(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    do_list::<CaCertificate>(&state.ca_certificates, &params).await
+}
+
+pub async fn get_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_get::<CaCertificate>(&state.ca_certificates, &id_or_name).await
+}
+
+pub async fn create_ca_certificate(
+    State(state): State<AdminState>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Err(err) = validate_ca_certificate_cert(&body) {
+        return err;
+    }
+    let result = do_create::<CaCertificate>(&state.ca_certificates, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn update_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    // PATCH: validate cert if provided — PATCH：如果提供了 cert 则验证
+    if body.get("cert").and_then(|v| v.as_str()).is_some() {
+        if let Err(err) = validate_ca_certificate_cert(&body) {
+            return err;
+        }
+    }
+    let result = do_update::<CaCertificate>(&state.ca_certificates, &id_or_name, &body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn upsert_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(body): FlexibleBody,
+) -> impl IntoResponse {
+    // PUT: cert is required — PUT：cert 是必填字段
+    let cert_str = body.get("cert").and_then(|v| v.as_str()).unwrap_or("");
+    if cert_str.is_empty() {
+        return cert_schema_violation("cert: required field missing");
+    }
+    if let Err(err) = validate_ca_certificate_cert(&body) {
+        return err;
+    }
+    let result = do_upsert::<CaCertificate>(&state.ca_certificates, &id_or_name, body).await;
+    if result.0.is_success() {
+        let _ = state.refresh_tx.send("ca_certificates");
+    }
+    result
+}
+
+pub async fn delete_ca_certificate(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> axum::response::Response {
+    // Check if any service references this CA certificate — 检查是否有 service 引用此 CA 证书
+    let ca_id = match uuid::Uuid::parse_str(&id_or_name) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            // Try to look up the entity to get its UUID — 尝试查找实体获取 UUID
+            let (status, Json(body)) = do_get::<CaCertificate>(&state.ca_certificates, &id_or_name).await;
+            if status.is_success() {
+                body.get("id").and_then(|v| v.as_str()).and_then(|s| uuid::Uuid::parse_str(s).ok())
+            } else {
+                // Entity not found, let do_delete handle the error — 实体未找到，交给 do_delete 处理
+                None
+            }
+        }
+    };
+    if let Some(ca_id) = ca_id {
+        // Scan services for references to this CA cert — 扫描 services 是否引用了此 CA 证书
+        let all_params = PageParams { size: 1000, ..Default::default() };
+        if let Ok(page) = state.services.page(&all_params).await {
+            for svc in &page.data {
+                if let Some(ref ca_certs) = svc.ca_certificates {
+                    if ca_certs.contains(&ca_id) {
+                        return (StatusCode::BAD_REQUEST, Json(json!({
+                            "message": format!("ca certificate {} is still referenced by services (id = {})", ca_id, svc.id),
+                            "name": "foreign key violation",
+                            "code": 4,
+                        }))).into_response();
+                    }
+                }
+            }
+        }
+    }
+    let result = do_delete::<CaCertificate>(&state.ca_certificates, &id_or_name).await;
+    let _ = state.refresh_tx.send("ca_certificates");
+    result
+}
+
+/// Validate CA certificate: must be valid PEM, must have CA basic constraint, must not be expired
+/// 验证 CA 证书：必须是有效 PEM、必须有 CA 基本约束、不能已过期
+fn validate_ca_certificate_cert(body: &Value) -> Result<(), (StatusCode, Json<Value>)> {
+    use openssl::x509::X509;
+
+    let cert_str = match body.get("cert").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()), // No cert provided, skip validation — 未提供 cert，跳过验证
+    };
+
+    // Check for multiple certificates — 检查是否包含多个证书
+    let pem_count = cert_str.matches("-----BEGIN CERTIFICATE-----").count();
+    if pem_count > 1 {
+        return Err(cert_schema_violation("please submit only one certificate at a time"));
+    }
+
+    let cert = X509::from_pem(cert_str.as_bytes())
+        .map_err(|_| cert_schema_violation("certificate is not valid PEM format"))?;
+
+    // Check expiry first (Kong checks expiry before CA constraint) — 先检查过期（Kong 先检查过期再检查 CA 约束）
+    let not_after = cert.not_after();
+    let now = openssl::asn1::Asn1Time::days_from_now(0).map_err(|_| cert_schema_violation("internal error checking certificate expiry"))?;
+    if not_after < now {
+        return Err(cert_schema_violation("certificate expired, \"Not After\" time is in the past"));
+    }
+
+    // Check CA basic constraint via X509v3 text output — 通过 X509v3 文本输出检查 CA 基本约束
+    let is_ca = {
+        let text_bytes = cert.to_text().unwrap_or_default();
+        let text = String::from_utf8_lossy(&text_bytes);
+        text.contains("CA:TRUE")
+    };
+
+    if !is_ca {
+        return Err(cert_schema_violation("certificate does not appear to be a CA because it is missing the \"CA\" basic constraint"));
+    }
+
+    Ok(())
+}
 entity_handlers!(
     Vault,
     vaults,
@@ -2207,8 +3860,34 @@ fn validate_transformer_plugin_config(
     match plugin_name {
         "response-transformer" => validate_response_transformer_config(config),
         "request-transformer" => validate_request_transformer_config(config),
+        "rate-limiting" => validate_rate_limiting_config(config),
         _ => None,
     }
+}
+
+/// Validate rate-limiting plugin config: at least one rate limit period must be set — 验证 rate-limiting 插件配置：至少需要设置一个限流周期
+fn validate_rate_limiting_config(config: &Value) -> Option<(StatusCode, Json<Value>)> {
+    let periods = ["second", "minute", "hour", "day", "month", "year"];
+    let has_any = periods.iter().any(|p| {
+        config.get(p).map_or(false, |v| !v.is_null())
+    });
+    if !has_any {
+        let msg = "at least one of these fields must be non-empty: \
+                   'config.second', 'config.minute', 'config.hour', \
+                   'config.day', 'config.month', 'config.year'";
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": 2,
+                "name": "schema violation",
+                "message": format!("schema violation ({})", msg),
+                "fields": {
+                    "@entity": [msg]
+                }
+            })),
+        ));
+    }
+    None
 }
 
 /// Check if a header name is valid (no commas, spaces, or other invalid chars) — 检查 header 名称是否有效
@@ -3132,43 +4811,108 @@ pub async fn create_nested_route(
     result
 }
 
+/// Validate target hostname — 验证 target 主机名
+fn validate_target_host(target_val: &str) -> Result<(), &'static str> {
+    let host = if target_val.starts_with('[') {
+        target_val.split(']').next().unwrap_or(target_val)
+    } else {
+        target_val.split(':').next().unwrap_or(target_val)
+    };
+    if host.contains(' ') || host.contains('\t') || host.is_empty() {
+        return Err("Invalid target; not a valid hostname or ip address");
+    }
+    for ch in host.chars() {
+        if ch == '[' || ch == ']' { continue; }
+        if !(ch.is_alphanumeric() || ch == '-' || ch == '.' || ch == '_' || ch == ':') {
+            return Err("Invalid target; not a valid hostname or ip address");
+        }
+    }
+    Ok(())
+}
+
+/// Find a target within an upstream by name or UUID — 在 upstream 中按名称或 UUID 查找 target
+async fn find_target_in_upstream(
+    targets_dao: &Arc<dyn Dao<Target>>,
+    upstream_id: &uuid::Uuid,
+    target_id_or_name: &str,
+) -> Result<Option<Target>, (StatusCode, Json<Value>)> {
+    if let Ok(uuid) = uuid::Uuid::parse_str(target_id_or_name) {
+        match targets_dao.select(&PrimaryKey::Id(uuid)).await {
+            Ok(Some(t)) => {
+                if t.upstream.id == *upstream_id { return Ok(Some(t)); }
+                return Ok(None);
+            }
+            Ok(None) => return Ok(None),
+            Err(e) => return Err((
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            )),
+        }
+    }
+    let page_params = PageParams { size: 10000, ..Default::default() };
+    match targets_dao.select_by_foreign_key("upstream", upstream_id, &page_params).await {
+        Ok(page) => {
+            for t in page.data {
+                if t.target == target_id_or_name { return Ok(Some(t)); }
+            }
+            Ok(None)
+        }
+        Err(e) => Err((
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        )),
+    }
+}
+
+/// Resolve upstream from path — 解析路径中的 upstream
+async fn resolve_upstream(
+    state: &AdminState,
+    upstream_id_or_name: &str,
+) -> Result<Upstream, (StatusCode, Json<Value>)> {
+    let upstream_pk = PrimaryKey::from_str_or_uuid(upstream_id_or_name);
+    match state.upstreams.select(&upstream_pk).await {
+        Ok(Some(u)) => Ok(u),
+        Ok(None) => Err((StatusCode::NOT_FOUND, Json(json!({"message": "upstream not found"})))),
+        Err(e) => Err((
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        )),
+    }
+}
+
+/// Build paginated response with custom next URL prefix — 构建自定义 next URL 前缀的分页响应
+fn build_nested_page_response<T: Serialize>(page: &Page<T>, next_prefix: &str) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("data".to_string(), json!(page.data));
+    body.insert("next".to_string(), match &page.offset {
+        Some(o) => json!(format!("{}?offset={}", next_prefix, o)),
+        None => Value::Null,
+    });
+    if let Some(ref offset) = page.offset {
+        body.insert("offset".to_string(), json!(offset));
+    }
+    Value::Object(body)
+}
+
 /// GET /upstreams/:upstream_id/targets
 pub async fn list_nested_targets(
     State(state): State<AdminState>,
     Path(upstream_id_or_name): Path<String>,
     Query(params): Query<ListParams>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    // Validate tags before query — 查询前验证 tags 参数
     if let Err(err) = params.validate_tags() {
         return err;
     }
-
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    let upstream = match state.upstreams.select(&upstream_pk).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "upstream not found"})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                Json(json!({"message": e.to_string()})),
-            );
-        }
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
     };
-
-    match state
-        .targets
-        .select_by_foreign_key("upstream", &upstream.id, &params.to_page_params())
-        .await
-    {
-        Ok(page) => (
-            StatusCode::OK,
-            Json(build_page_response(&page)),
-        ),
+    match state.targets.select_by_foreign_key("upstream", &upstream.id, &params.to_page_params()).await {
+        Ok(page) => {
+            let path = req.uri().path().trim_end_matches('/');
+            (StatusCode::OK, Json(build_nested_page_response(&page, path)))
+        }
         Err(e) => (
             StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"message": e.to_string()})),
@@ -3200,12 +4944,59 @@ pub async fn create_nested_target(
         }
     };
 
-    // Inject upstream FK — 注入 upstream FK
+    // Inject upstream FK and validate target field — 注入 upstream FK 并验证 target 字段
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
             "upstream".to_string(),
             json!({"id": upstream.id.to_string()}),
         );
+
+        // Validate target field — 验证 target 字段
+        let target_val = obj.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        if target_val.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "message": "schema violation (target: required field missing)",
+                "name": "schema violation", "code": 2,
+                "fields": { "target": "required field missing" },
+            })));
+        }
+        // Validate target hostname — 验证 target 主机名
+        if let Err(msg) = validate_target_host(target_val) {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "message": format!("schema violation (target: {})", msg),
+                "name": "schema violation", "code": 2,
+                "fields": { "target": msg },
+            })));
+        }
+        // Validate weight range — 验证 weight 范围
+        if let Some(w) = obj.get("weight").and_then(|v| v.as_i64()) {
+            if w < 0 || w > 65535 {
+                return (StatusCode::BAD_REQUEST, Json(json!({
+                    "message": "schema violation (weight: value should be between 0 and 65535)",
+                    "name": "schema violation", "code": 2,
+                    "fields": { "weight": "value should be between 0 and 65535" },
+                })));
+            }
+        }
+        // Append default port :8000 if missing — 追加默认端口 :8000
+        if !target_has_port(&target_val) {
+            obj.insert("target".to_string(), json!(format!("{}:8000", target_val)));
+        }
+        // Generate cache_key for uniqueness — 生成 cache_key 保证唯一性
+        let final_target = obj.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        let cache_key = format!("{}:{}:", upstream.id, final_target);
+        obj.insert("cache_key".to_string(), json!(cache_key));
+        // Inject id (UUIDv7 for natural time-ordering) and timestamps — 注入 id（UUIDv7 保证时间顺序）和时间戳
+        if !obj.contains_key("id") {
+            obj.insert("id".to_string(), json!(uuid::Uuid::now_v7()));
+        }
+        let now = chrono::Utc::now().timestamp();
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), json!(now));
+        }
+        if !obj.contains_key("updated_at") {
+            obj.insert("updated_at".to_string(), json!(now));
+        }
     }
 
     let target: Target = match serde_json::from_value(body) {
@@ -3237,40 +5028,47 @@ pub async fn get_nested_target(
     State(state): State<AdminState>,
     Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    // Verify upstream exists — 验证 upstream 存在
-    let upstream_pk = PrimaryKey::from_str_or_uuid(&upstream_id_or_name);
-    if let Ok(None) = state.upstreams.select(&upstream_pk).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"message": "upstream not found"})),
-        );
-    }
-
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
-    match state.targets.select(&pk).await {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
         Ok(Some(target)) => {
             let body = serde_json::to_value(&target).unwrap_or(json!(null));
             (StatusCode::OK, Json(body))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"message": "target not found"})),
-        ),
-        Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(json!({"message": e.to_string()})))
-        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))),
+        Err(e) => e,
     }
 }
 
 /// PATCH /upstreams/:upstream_id/targets/:id
 pub async fn update_nested_target(
     State(state): State<AdminState>,
-    Path((_upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
-    FlexibleBody(body): FlexibleBody,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    FlexibleBody(mut body): FlexibleBody,
 ) -> impl IntoResponse {
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))),
+        Err(e) => return e,
+    };
+    if let Some(obj) = body.as_object_mut() {
+        // Ensure updated_at is strictly greater than created_at — 确保 updated_at 严格大于 created_at
+        let now = chrono::Utc::now().timestamp();
+        let new_updated_at = std::cmp::max(now, target.created_at + 1);
+        obj.insert("updated_at".to_string(), json!(new_updated_at));
+        // Update cache_key if target address changed — 如果 target 地址变了则更新 cache_key
+        if let Some(new_target) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            let t = if !new_target.contains(':') { format!("{}:8000", new_target) } else { new_target };
+            obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
+        }
+    }
+    let pk = PrimaryKey::Id(target.id);
     match state.targets.update(&pk, &body).await {
         Ok(updated) => {
             let _ = state.refresh_tx.send("targets");
@@ -3278,8 +5076,7 @@ pub async fn update_nested_target(
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status, Json(json!({"message": e.to_string()})))
         }
     }
@@ -3288,21 +5085,280 @@ pub async fn update_nested_target(
 /// DELETE /upstreams/:upstream_id/targets/:id
 pub async fn delete_nested_target(
     State(state): State<AdminState>,
-    Path((_upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let pk = PrimaryKey::from_str_or_uuid(&target_id_or_name);
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"message": "target not found"}))).into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let pk = PrimaryKey::Id(target.id);
     match state.targets.delete(&pk).await {
         Ok(_) => {
             let _ = state.refresh_tx.send("targets");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
-            let status =
-                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = json!({"message": e.to_string()});
             (status, Json(body)).into_response()
         }
     }
+}
+
+/// PUT /upstreams/{upstream_id}/targets/{target_id} — upsert target
+pub async fn upsert_nested_target(
+    State(state): State<AdminState>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    // Find existing target scoped to this upstream — 在此 upstream 范围内查找已有 target
+    let existing = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("upstream".to_string(), json!({"id": upstream.id.to_string()}));
+        // Merge existing target fields (PUT preserves unset fields for targets) — 合并已有 target 字段（PUT 保留未设置的字段）
+        if let Some(ref existing_target) = existing {
+            obj.insert("id".to_string(), json!(existing_target.id));
+            // Preserve existing weight if not provided — 如果未提供则保留已有 weight
+            if !obj.contains_key("weight") {
+                obj.insert("weight".to_string(), json!(existing_target.weight));
+            }
+            // Preserve existing cache_key — 保留已有 cache_key
+            if let Some(ref ck) = existing_target.cache_key {
+                if !obj.contains_key("cache_key") {
+                    obj.insert("cache_key".to_string(), json!(ck));
+                }
+            }
+        }
+        // Normalize target address (append :8000 if no port) — 规范化 target 地址（无端口时追加 :8000）
+        if let Some(t) = obj.get("target").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            let t = if !target_has_port(&t) { format!("{}:8000", t) } else { t };
+            obj.insert("target".to_string(), json!(t));
+            // Only set cache_key for new targets (existing keeps original) — 仅为新 target 设置 cache_key（已有保留原值）
+            if existing.is_none() {
+                obj.insert("cache_key".to_string(), json!(format!("{}:{}:", upstream.id, t)));
+            }
+        }
+    }
+    let upsert_key = if let Some(ref t) = existing { t.id.to_string() } else { target_id_or_name };
+    let result = do_upsert::<Target>(&state.targets, &upsert_key, body).await;
+    let _ = state.refresh_tx.send("targets");
+    result
+}
+
+/// PUT /upstreams/{upstream_id}/targets/{target_id}/healthy or /unhealthy — set target health status — 设置 target 健康状态
+pub async fn set_target_health(
+    State(state): State<AdminState>,
+    Path((upstream_id_or_name, target_id_or_name)): Path<(String, String)>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let target = match find_target_in_upstream(&state.targets, &upstream.id, &target_id_or_name).await {
+        Ok(Some(t)) => t,
+        _ => return (StatusCode::NOT_FOUND, Json(json!({"message": "Not found"}))).into_response(),
+    };
+    // Determine health status from request URI — 从请求 URI 确定健康状态
+    let path = req.uri().path();
+    let health_status = if path.ends_with("/healthy") {
+        "HEALTHY"
+    } else {
+        "UNHEALTHY"
+    };
+    // Store health status in memory — 将健康状态存储在内存中
+    let key = format!("{}:{}", upstream.id, target.target);
+    if let Ok(mut map) = state.target_health.write() {
+        map.insert(key, health_status.to_string());
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Check if a target string already has a port — 检查 target 字符串是否已有端口
+/// IPv6: [::1]:8000 has port, [::1] does not. IPv4/hostname: foo:8000 has port, foo does not.
+fn target_has_port(target: &str) -> bool {
+    if target.starts_with('[') {
+        // IPv6: port present only if "]:" exists — IPv6 格式：仅当存在 "]:" 时有端口
+        target.contains("]:")
+    } else {
+        target.contains(':')
+    }
+}
+
+/// Check if upstream has healthchecks enabled (passive or active) — 检查 upstream 是否启用了健康检查
+fn is_healthchecks_enabled(upstream: &Upstream) -> bool {
+    let hc = &upstream.healthchecks;
+    // Passive healthcheck is "on" if any threshold is non-zero — 被动健康检查"启用"条件：任一阈值非零
+    let passive_on = hc.passive.healthy.successes > 0
+        || hc.passive.unhealthy.tcp_failures > 0
+        || hc.passive.unhealthy.http_failures > 0
+        || hc.passive.unhealthy.timeouts > 0;
+    // Active healthcheck is "on" if any interval is non-zero — 主动健康检查"启用"条件：任一检查间隔非零
+    let active_on = hc.active.healthy.interval > 0.0
+        || hc.active.unhealthy.interval > 0.0;
+    passive_on || active_on
+}
+
+/// Resolve target IP address for health endpoint, using dns_hostsfile and system DNS — 为 health 端点解析 target IP 地址，使用 dns_hostsfile 和系统 DNS
+fn resolve_target_ip(target_host: &str, dns_hostsfile: &str) -> Option<String> {
+    // If it's already an IP address, return as-is — 如果已经是 IP 地址，直接返回
+    if target_host.starts_with('[') || target_host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(target_host.to_string());
+    }
+    // Check dns_hostsfile for custom hostname mappings — 检查 dns_hostsfile 中的自定义主机名映射
+    if !dns_hostsfile.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(dns_hostsfile) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    for hostname in &parts[1..] {
+                        if *hostname == target_host {
+                            return Some(parts[0].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Try system DNS resolution — 尝试系统 DNS 解析
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:0", target_host);
+    match addr_str.to_socket_addrs() {
+        Ok(mut addrs) => addrs.next().map(|a| a.ip().to_string()),
+        Err(_) => None,
+    }
+}
+
+/// GET /upstreams/{upstream_id}/health — upstream health status — 上游健康状态
+pub async fn upstream_health(
+    State(state): State<AdminState>,
+    Path(upstream_id_or_name): Path<String>,
+) -> impl IntoResponse {
+    let upstream = match resolve_upstream(&state, &upstream_id_or_name).await {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let page_params = PageParams { size: 10000, ..Default::default() };
+    let mut targets = match state.targets.select_by_foreign_key("upstream", &upstream.id, &page_params).await {
+        Ok(page) => page.data,
+        Err(_) => vec![],
+    };
+    // Sort by created_at DESC (newest first, like Kong) — 按 created_at 降序排列（最新在前，与 Kong 一致）
+    targets.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+    let hc_enabled = is_healthchecks_enabled(&upstream);
+    let active_hc_enabled = upstream.healthchecks.active.healthy.interval > 0.0
+        || upstream.healthchecks.active.unhealthy.interval > 0.0;
+    let health_map_snapshot: std::collections::HashMap<String, String> = state.target_health.read()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    let dns_hostsfile = state.config.dns_hostsfile.to_string();
+    let upstream_id = upstream.id;
+    // Run DNS resolution + TCP probes in spawn_blocking to avoid blocking tokio — 在 spawn_blocking 中运行 DNS 解析和 TCP 探测，避免阻塞 tokio
+    let health_data: Vec<Value> = tokio::task::spawn_blocking(move || {
+        targets.iter().map(|t| {
+            // Parse target host:port — 解析 target 的 host:port
+            let (host, port) = if t.target.starts_with('[') {
+                // IPv6 format: [::1]:port — split on "]:" to avoid splitting inside the address
+                if let Some(idx) = t.target.find("]:") {
+                    let host = t.target[..idx + 1].to_string(); // includes closing ']'
+                    let port = t.target[idx + 2..].parse::<u16>().unwrap_or(0);
+                    (host, port)
+                } else {
+                    (t.target.clone(), 0u16)
+                }
+            } else {
+                let parts: Vec<&str> = t.target.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].parse::<u16>().unwrap_or(0))
+                } else {
+                    (t.target.clone(), 0u16)
+                }
+            };
+            // Determine health status — 确定健康状态
+            let health_key = format!("{}:{}", upstream_id, t.target);
+            let health_status = if t.weight == 0 {
+                // Weight 0 targets are always HEALTHCHECKS_OFF — weight=0 的 target 始终为 HEALTHCHECKS_OFF
+                "HEALTHCHECKS_OFF".to_string()
+            } else if !hc_enabled {
+                // No healthchecks configured — 未配置健康检查
+                // Try DNS resolution — 尝试 DNS 解析
+                let host_only = host.trim_start_matches('[').trim_end_matches(']');
+                if resolve_target_ip(host_only, &dns_hostsfile).is_none() {
+                    "DNS_ERROR".to_string()
+                } else {
+                    "HEALTHCHECKS_OFF".to_string()
+                }
+            } else {
+                // Healthchecks enabled — 健康检查已启用
+                if let Some(status) = health_map_snapshot.get(&health_key) {
+                    status.clone()
+                } else {
+                    // Try DNS first — 先尝试 DNS
+                    let host_only = host.trim_start_matches('[').trim_end_matches(']');
+                    if resolve_target_ip(host_only, &dns_hostsfile).is_none() {
+                        "DNS_ERROR".to_string()
+                    } else if active_hc_enabled {
+                        // Active healthcheck with probe: try TCP connect — 主动健康检查探测：尝试 TCP 连接
+                        if let Some(ref ip) = resolve_target_ip(host_only, &dns_hostsfile) {
+                            let addr_str = format!("{}:{}", ip, port);
+                            if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                                match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)) {
+                                    Ok(_) => "HEALTHY".to_string(),
+                                    Err(_) => "UNHEALTHY".to_string(),
+                                }
+                            } else {
+                                "HEALTHY".to_string()
+                            }
+                        } else {
+                            "HEALTHY".to_string()
+                        }
+                    } else {
+                        "HEALTHY".to_string()
+                    }
+                }
+            };
+            // Resolve IP for address data — 解析 IP 用于地址数据
+            let host_only = host.trim_start_matches('[').trim_end_matches(']');
+            let resolved_ip = resolve_target_ip(host_only, &dns_hostsfile).unwrap_or_else(|| host_only.to_string());
+            json!({
+                "id": t.id,
+                "target": t.target,
+                "weight": t.weight,
+                "upstream": { "id": upstream_id },
+                "health": health_status,
+                "created_at": t.created_at,
+                "data": {
+                    "addresses": [{
+                        "ip": resolved_ip,
+                        "port": port,
+                        "health": health_status,
+                        "weight": t.weight,
+                    }]
+                },
+            })
+        }).collect()
+    }).await.unwrap_or_default();
+    (StatusCode::OK, Json(json!({
+        "id": upstream.id,
+        "name": upstream.name,
+        "node_id": state.node_id.to_string(),
+        "data": health_data,
+    })))
 }
 
 // ============ Tags API — 标签 API ============

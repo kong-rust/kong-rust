@@ -140,6 +140,26 @@ fn lua_value_to_json(value: LuaValue) -> LuaResult<Value> {
 
 fn table_to_json(table: LuaTable) -> LuaResult<Value> {
     let len = table.raw_len();
+
+    // Empty Lua table {} → JSON array [] (Kong schema convention: empty defaults are arrays)
+    // 空 Lua 表 {} → JSON 数组 []（Kong schema 约定：空默认值为数组）
+    if len == 0 {
+        let mut has_string_keys = false;
+        for pair in table.pairs::<LuaValue, LuaValue>() {
+            let (key, _) = pair?;
+            match key {
+                LuaValue::String(_) => {
+                    has_string_keys = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !has_string_keys {
+            return Ok(Value::Array(vec![]));
+        }
+    }
+
     let mut is_array = len > 0;
 
     for pair in table.pairs::<LuaValue, LuaValue>() {
