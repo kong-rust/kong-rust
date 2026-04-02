@@ -19,18 +19,122 @@ use crate::provider::{DriverRegistry, TokenUsage};
 
 // ============ 插件配置 ============
 
+/// Kong 官方 ai-proxy config.model 格式（record 类型）
+/// Official Kong ai-proxy config.model format (record type)
+#[derive(Debug, Clone, Deserialize)]
+pub struct KongModelConfig {
+    /// provider 类型 — "openai", "gemini", "anthropic" 等
+    pub provider: String,
+    /// 模型名称（可选）— model name (optional)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 模型选项（可选）— model options (optional)
+    #[serde(default)]
+    pub options: Option<serde_json::Value>,
+}
+
+/// Kong 官方 ai-proxy config.auth 格式
+/// Official Kong ai-proxy config.auth format
+#[derive(Debug, Clone, Deserialize)]
+pub struct KongAuthConfig {
+    #[serde(default)]
+    pub header_name: Option<String>,
+    #[serde(default)]
+    pub header_value: Option<String>,
+    #[serde(default)]
+    pub param_name: Option<String>,
+    #[serde(default)]
+    pub param_value: Option<String>,
+    #[serde(default)]
+    pub param_location: Option<String>,
+    #[serde(default)]
+    pub allow_override: Option<bool>,
+    #[serde(default)]
+    pub gcp_use_service_account: Option<bool>,
+}
+
+/// Kong 官方 ai-proxy config.logging 格式
+/// Official Kong ai-proxy config.logging format
+#[derive(Debug, Clone, Deserialize)]
+pub struct KongLoggingConfig {
+    #[serde(default)]
+    pub log_payloads: Option<bool>,
+    #[serde(default)]
+    pub log_statistics: Option<bool>,
+}
+
+/// model 字段的灵活反序列化：支持 String（kong-rust 格式）和 Object（Kong 官方格式）
+/// Flexible deserialization for model field: supports String (kong-rust) and Object (official Kong)
+#[derive(Debug, Clone)]
+pub enum ModelField {
+    /// kong-rust 自定义格式：model 是模型名字符串
+    Simple(String),
+    /// Kong 官方格式：model 是包含 provider/name/options 的对象
+    Kong(KongModelConfig),
+}
+
+impl Default for ModelField {
+    fn default() -> Self {
+        ModelField::Simple(String::new())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelField {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+        // Use serde_json::Value as intermediate representation — 使用 Value 做中间转换
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => Ok(ModelField::Simple(s.clone())),
+            serde_json::Value::Object(_) => {
+                let cfg: KongModelConfig =
+                    serde_json::from_value(value).map_err(de::Error::custom)?;
+                Ok(ModelField::Kong(cfg))
+            }
+            serde_json::Value::Null => Ok(ModelField::Simple(String::new())),
+            _ => Err(de::Error::custom(
+                "model must be a string or object",
+            )),
+        }
+    }
+}
+
+impl ModelField {
+    /// 提取模型名称 — extract model name
+    pub fn model_name(&self) -> &str {
+        match self {
+            ModelField::Simple(s) => s.as_str(),
+            ModelField::Kong(cfg) => cfg.name.as_deref().unwrap_or(""),
+        }
+    }
+
+    /// 提取 provider 类型（仅 Kong 格式有）— extract provider type (Kong format only)
+    pub fn provider_type(&self) -> Option<&str> {
+        match self {
+            ModelField::Simple(_) => None,
+            ModelField::Kong(cfg) => Some(cfg.provider.as_str()),
+        }
+    }
+}
+
 /// ai-proxy 插件配置（从 PluginConfig.config JSON 解析）
+/// Supports both kong-rust custom format and official Kong ai-proxy format
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AiProxyConfig {
-    /// 模型组名称
-    pub model: String,
+    /// 模型配置：String（kong-rust）或 Object（Kong 官方）
+    pub model: ModelField,
     /// 模型来源："config" 从插件配置取，"request" 从请求体取
     pub model_source: String,
     /// 路由类型："llm/v1/chat" | "llm/v1/completions"
     pub route_type: String,
     /// 客户端协议："openai" | "anthropic"
     pub client_protocol: String,
+    /// LLM 格式（Kong 官方字段，等同于 client_protocol）— "openai" | "anthropic"
+    pub llm_format: Option<String>,
     /// 流式响应策略："allow" | "deny" | "always"
     pub response_streaming: String,
     /// 最大请求体大小（KB）
@@ -45,11 +149,15 @@ pub struct AiProxyConfig {
     pub log_payloads: bool,
     /// 是否记录 token 统计
     pub log_statistics: bool,
-    /// 内联 provider 配置（MVP 阶段使用，不走 DAO）
+    /// 内联 provider 配置（kong-rust 格式，不走 DAO）
     pub provider: Option<InlineProviderConfig>,
     /// 模型路由规则（正则匹配 + 加权选择） — model routing rules
     #[serde(default)]
     pub model_routes: Vec<ModelRouteConfig>,
+    /// Kong 官方 auth 配置 — authentication config (official Kong format)
+    pub auth: Option<KongAuthConfig>,
+    /// Kong 官方 logging 配置 — logging config (official Kong format)
+    pub logging: Option<KongLoggingConfig>,
 }
 
 /// 内联 provider 配置（嵌入在插件 config JSON 中）
@@ -67,10 +175,11 @@ pub struct InlineProviderConfig {
 impl Default for AiProxyConfig {
     fn default() -> Self {
         Self {
-            model: String::new(),
+            model: ModelField::Simple(String::new()),
             model_source: "config".to_string(),
             route_type: "llm/v1/chat".to_string(),
             client_protocol: "openai".to_string(),
+            llm_format: None,
             response_streaming: "allow".to_string(),
             max_request_body_size: 128, // 128 KB
             model_name_header: true,
@@ -80,7 +189,83 @@ impl Default for AiProxyConfig {
             log_statistics: true,
             provider: None,
             model_routes: Vec::new(),
+            auth: None,
+            logging: None,
         }
+    }
+}
+
+impl AiProxyConfig {
+    /// 获取有效的客户端协议（优先 client_protocol，其次 llm_format）
+    /// Get effective client protocol (prefer client_protocol, fallback to llm_format)
+    pub fn effective_client_protocol(&self) -> &str {
+        if self.client_protocol != "openai" {
+            return &self.client_protocol;
+        }
+        // client_protocol 是默认值，检查 llm_format 是否有覆盖
+        if let Some(ref fmt) = self.llm_format {
+            return fmt.as_str();
+        }
+        &self.client_protocol
+    }
+
+    /// 获取有效的模型名称 — get effective model name
+    pub fn effective_model_name(&self) -> &str {
+        self.model.model_name()
+    }
+
+    /// 构建有效的 InlineProviderConfig（兼容 Kong 官方格式）
+    /// Build effective InlineProviderConfig (compatible with official Kong format)
+    /// Kong 官方格式：provider 在 model.provider，auth 在顶层 config.auth
+    /// kong-rust 格式：provider 在 config.provider
+    pub fn effective_provider(&self) -> Option<InlineProviderConfig> {
+        // 优先使用 kong-rust 格式的 provider 字段
+        if let Some(ref p) = self.provider {
+            return Some(p.clone());
+        }
+
+        // 尝试从 Kong 官方格式构建：model.provider + config.auth
+        let provider_type = self.model.provider_type()?;
+
+        // 从 config.auth 构建 auth_config JSON — build auth_config from config.auth
+        let auth_config = if let Some(ref auth) = self.auth {
+            let mut map = serde_json::Map::new();
+            if let Some(ref hn) = auth.header_name {
+                map.insert("header_name".to_string(), serde_json::Value::String(hn.clone()));
+            }
+            if let Some(ref hv) = auth.header_value {
+                map.insert("header_value".to_string(), serde_json::Value::String(hv.clone()));
+            }
+            if let Some(ref pn) = auth.param_name {
+                map.insert("param_name".to_string(), serde_json::Value::String(pn.clone()));
+            }
+            if let Some(ref pv) = auth.param_value {
+                map.insert("param_value".to_string(), serde_json::Value::String(pv.clone()));
+            }
+            if let Some(ref pl) = auth.param_location {
+                map.insert("param_location".to_string(), serde_json::Value::String(pl.clone()));
+            }
+            serde_json::Value::Object(map)
+        } else {
+            serde_json::Value::Object(serde_json::Map::new())
+        };
+
+        // 从 model.options.upstream_url 提取 endpoint_url
+        let endpoint_url = match &self.model {
+            ModelField::Kong(cfg) => cfg
+                .options
+                .as_ref()
+                .and_then(|o| o.get("upstream_url"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+
+        Some(InlineProviderConfig {
+            provider_type: provider_type.to_string(),
+            auth_config,
+            endpoint_url,
+        })
     }
 }
 
@@ -149,8 +334,9 @@ impl PluginHandler for AiProxyPlugin {
             return Ok(());
         }
 
-        // 根据 client_protocol 选择解码方式
-        let mut chat_request: ChatRequest = match cfg.client_protocol.as_str() {
+        // 根据 client_protocol 选择解码方式（兼容 llm_format）
+        let effective_protocol = cfg.effective_client_protocol();
+        let mut chat_request: ChatRequest = match effective_protocol {
             "anthropic" => {
                 AnthropicCodec::decode_request(body_str).map_err(|e| KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
@@ -166,6 +352,7 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 2. 确定模型名称
+        let config_model_name = cfg.effective_model_name().to_string();
         let model_name = match cfg.model_source.as_str() {
             "request" => {
                 if chat_request.model.is_empty() {
@@ -179,10 +366,10 @@ impl PluginHandler for AiProxyPlugin {
             }
             _ => {
                 // model_source=config（默认）
-                if !cfg.model.is_empty() {
+                if !config_model_name.is_empty() {
                     // 用配置中的模型覆盖请求中的模型
-                    chat_request.model = cfg.model.clone();
-                    cfg.model.clone()
+                    chat_request.model = config_model_name.clone();
+                    config_model_name
                 } else if !chat_request.model.is_empty() {
                     chat_request.model.clone()
                 } else {
@@ -195,7 +382,7 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 3. 确定客户端协议
-        let client_protocol = match cfg.client_protocol.as_str() {
+        let client_protocol = match effective_protocol {
             "anthropic" => ClientProtocol::Anthropic,
             _ => ClientProtocol::OpenAi,
         };
@@ -235,11 +422,12 @@ impl PluginHandler for AiProxyPlugin {
 
             (driver, resolution.model, resolution.provider_config)
         } else {
-            // Fallback：使用内联 provider 配置（无智能路由时的默认行为）
-            // Fallback: use inline provider config (default behavior without routing)
-            let inline_provider = cfg.provider.as_ref().ok_or_else(|| KongError::PluginError {
+            // Fallback：使用内联 provider 配置（兼容 kong-rust 格式和 Kong 官方格式）
+            // Fallback: use inline provider config (supports both kong-rust and official Kong format)
+            let effective_provider = cfg.effective_provider();
+            let inline_provider = effective_provider.as_ref().ok_or_else(|| KongError::PluginError {
                 plugin_name: "ai-proxy".to_string(),
-                message: "missing provider: configure model_routes or inline provider — 需要配置 model_routes 或 inline provider".to_string(),
+                message: "missing provider: configure model_routes, inline provider, or model.provider — 需要配置 model_routes、inline provider 或 model.provider".to_string(),
             })?;
 
             let provider_type = &inline_provider.provider_type;
