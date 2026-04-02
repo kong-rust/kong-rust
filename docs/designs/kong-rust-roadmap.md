@@ -66,51 +66,79 @@ Lua 插件仅用于向后兼容已有 Kong 部署。新 AI 能力全部 Rust 实
 
 **目标：** 完成 Kong 兼容能力，支持 Traditional + Hybrid 两种部署模式。
 
-**执行拆分（Eng Review 决策）：**
-- **Phase 1a**: V1 全量推送 + mTLS + 心跳 + 重连 + 角色分支 + /clustering/status（最小可用 Hybrid）
-- **Phase 1b**: V2 增量同步 + snappy + 配置哈希 + 混合兼容测试（Kong 互操作）
-- **Phase 1c**: 配置回滚 + 缓存降级 + 审计日志 + Prometheus 集群指标（运维增强）
+**执行拆分（Eng Review 2026-03-22 决策）：**
+- **Phase 1a**: V1 全量推送 + V2 增量同步 + mTLS + 心跳 + 重连 + 角色分支 + /clustering/status + 磁盘缓存降级 + 全部 40+ 测试移植
+- **Phase 1c**: 配置版本回滚 + 审计日志 + Prometheus 集群指标（运维增强）
 
-**Eng Review 架构决策：**
+> Phase 1b 已合并入 1a（2026-03-22 Eng Review 决策：V1+V2 一步到位）。
+> 磁盘缓存降级从 1c 提前到 1a（成本低，只是文件读写）。
+
+**Eng Review 架构决策（2026-03-22 更新）：**
 - **路由表更新**：使用 ArcSwap（原子交换）替代 RwLock，避免配置应用时阻塞代理请求
 - **DP 连接模型**：单状态机 + tokio::select!（不复制 Kong 的三线程模型）
 - **依赖选择**：优先使用 Pingora 框架和周边工具库
-- **配置哈希**：CP/DP 必须哈希同一份规范化 bytes（serialize once, hash once, broadcast same bytes）
+- **配置哈希**：Rust 原生实现多级 MD5 哈希，用 Kong 单元测试已知输入/输出对做回归验证（serialize once, hash once, broadcast same bytes）
 - **互操作性**：Kong CP/DP 兼容不是测试项，是从第一天起的设计约束——协议实现必须参考 Kong 源码逐字节对齐
+- **CP WebSocket 服务**：独立 axum 实例监听 cluster_listen:8005，与 Admin API 端口隔离，独立 mTLS 配置
+- **mTLS 栈**：使用 OpenSSL（与 Pingora/Kong 统一），不用 rustls
+- **DP 配置应用**：复用 db-less 加载路径（DeclarativeConfig → ArcSwap），不新建 ConfigApplier
+- **配置应用失败**：保持当前配置不变 + error log（与 Kong 行为一致），快照回滚延后到 Phase 1c
+- **角色验证**：放在 kong-config 的 validate() 方法中，启动前早期失败
+- **ClusterRole**：在 kong-core 定义枚举，替换 config.rs 的 String 类型
+- **CP 广播**：Arc<Vec<u8>> 零拷贝广播 + 每 DP 独立 bounded channel，队列满时丢弃旧配置
+- **kong-cluster 结构**：紧凑 6 文件（lib.rs, cp.rs, dp.rs, protocol.rs, tls.rs, cache.rs），超 500 行再拆
+- **磁盘缓存损坏处理**：读取时验证 JSON 格式，失败则 warn + 删除 + 按无缓存处理（Phase 1a 直接做）
 
-#### 核心范围（与 Kong 完全兼容）
+#### Phase 1a 完整范围（2026-03-22 Eng Review 确认）
 
-1. **kong-cluster crate** — 新建 crate，包含 CP 和 DP 实现
-2. **CP WebSocket 服务端** — 监听 cluster_listen (默认 :8005)，/v1/outlet 和 /v2/outlet
-3. **DP WebSocket 客户端** — 连接 cluster_control_plane，三线程模型
+**核心功能（与 Kong 完全兼容）：**
+
+1. **kong-cluster crate** — 新建 crate（6 文件：lib.rs, cp.rs, dp.rs, protocol.rs, tls.rs, cache.rs）
+2. **CP WebSocket 服务端** — 独立 axum 实例监听 cluster_listen:8005，/v1/outlet 和 /v2/outlet
+3. **DP WebSocket 客户端** — tokio-tungstenite 连接 cluster_control_plane，单状态机 + tokio::select!
 4. **Sync V1 全量推送** — DB → JSON → GZIP → WebSocket Binary 帧
-5. **Sync V2 增量同步** — JSON-RPC 2.0 (hello, get_delta, notify_new_version, notify_validation_error) + x-snappy-framed
-6. **mTLS 双向认证** — cluster_cert + cluster_cert_key
+5. **Sync V2 增量同步** — JSON-RPC 2.0 (hello, get_delta, notify_new_version, notify_validation_error) + snappy
+6. **mTLS 双向认证** — OpenSSL（与 Pingora 统一），支持 shared + pki 两种模式
 7. **心跳机制** — 30s PING (MD5 哈希负载) + 45s 超时
 8. **断线重连** — 5-10s 随机延迟，避免雷群效应
-9. **多级配置哈希** — routes/services/plugins/upstreams/targets/rest 分别 MD5
-10. **main.rs 角色分支** — Traditional / ControlPlane / DataPlane
+9. **多级配置哈希** — Rust 原生实现，routes/services/plugins/upstreams/targets/rest 分别 MD5
+10. **main.rs 角色分支** — ClusterRole 枚举（kong-core），kong-config validate() 早期验证
 11. **/clustering/status Admin API** — 返回已连接 DP 状态
+12. **DP 配置应用** — 复用 db-less 路径（DeclarativeConfig → ArcSwap），失败保持旧配置
+13. **磁盘缓存降级** — CP 不可达时从磁盘加载，文件权限 0600，损坏时 warn + 删除 + 按无缓存处理
+14. **CP 广播优化** — Arc<Vec<u8>> 零拷贝 + 每 DP 独立 bounded channel
 
-#### 扩展范围（超越 Kong 的增强）
+**测试（全量移植 Kong 40+ 测试文件）：**
 
-12. **配置版本回滚** — DP 保留最近 N 个配置快照，应用失败时自动回滚
-13. **DP 启动配置缓存降级** — CP 不可达时从磁盘缓存加载（文件权限 0600）
-14. **CP 配置变更审计日志** — 推送时间、配置哈希、变更摘要、接收 DP 列表
-15. **Prometheus 集群指标** — kong_data_plane_last_seen 等 5 个指标
-16. **busted + spec.helpers 兼容层** (任务 8.12a)
-17. **CP/DP 混合兼容测试** — Kong CP + Rust DP / Rust CP + Kong DP
+15. **spec/hybrid.lua 完整升级** — 支持 traditional + hybrid 部署 + 3 种 RPC 组合
+16. **spec.helpers 升级** — 支持同时启动 CP + DP 两个实例
+17. **40+ 测试文件移植** — 从 /Users/dawxy/proj/kong 复制并适配
+18. **测试证书复制** — spec/fixtures/kong_clustering.* 系列
 
-#### 关键设计决策
+#### Phase 1c 范围（运维增强，延后）
+
+19. **配置版本回滚** — DP 保留最近 N 个配置快照，应用失败时自动回滚
+20. **CP 配置变更审计日志** — 推送时间、配置哈希、变更摘要、接收 DP 列表
+21. **Prometheus 集群指标** — kong_data_plane_last_seen 等 5 个指标
+22. **CP/DP 混合兼容测试** — Kong CP + Rust DP / Rust CP + Kong DP
+
+#### 关键设计决策（2026-03-22 Eng Review 完整版）
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| CP WebSocket 框架 | axum 内建 WebSocket | 复用 Admin API 框架 |
-| DP WebSocket 框架 | tokio-tungstenite | 纯客户端，轻量 |
-| ClusterRole 定义位置 | kong-core | 底层枚举，多 crate 共用 |
+| CP WebSocket 服务 | 独立 axum 实例 :8005 | 端口隔离 + 独立 mTLS 配置 |
+| DP WebSocket 客户端 | tokio-tungstenite | 纯客户端，轻量 |
+| mTLS 栈 | OpenSSL | 与 Pingora/Kong 统一，互操作性 |
+| ClusterRole 位置 | kong-core 枚举 | 类型安全，替换 config.rs String |
+| 角色验证 | kong-config validate() | 启动前早期失败，与 Kong 行为一致 |
 | 配置导出格式 | 复用 DeclarativeConfig | 与 db-less 共享类型 |
-| DP 配置应用方式 | 直接刷新（不走 debounce） | CP 推送即全量应用 |
-| 磁盘缓存安全 | 文件权限 0600，明文 | 与 Kong 行为一致 |
+| DP 配置应用 | 复用 db-less 路径 | DRY，Kong DP 也是 database=off |
+| 配置应用失败 | 保持旧配置 + error log | 与 Kong 一致，快照回滚延后到 1c |
+| CP 广播 | Arc<Vec<u8>> + bounded channel | 零拷贝，慢 DP 不反压其他 DP |
+| 磁盘缓存安全 | 0600 权限 + 损坏检测 | 与 Kong 一致 + 防静默失败 |
+| 配置哈希 | Rust 原生 MD5 | 用 Kong 单元测试回归验证 |
+| crate 结构 | 6 文件紧凑结构 | 超 500 行再拆 |
+| V1/V2 阶段 | Phase 1a 同时实现 | 一步到位，两个 WebSocket 端点 |
 
 #### 错误处理要求（4 个 Critical Gap 修复）
 
@@ -196,10 +224,477 @@ Lua 插件仅用于向后兼容已有 Kong 部署。新 AI 能力全部 Rust 实
 - Admin API RBAC
 - 磁盘缓存加密
 
+---
+
+## Eng Review 完整记录 — Phase 1 Hybrid CP/DP 模式
+
+**评审日期：** 2026-03-22
+**评审分支：** dawxy/hybrid-mode-plan
+**评审范围：** Phase 1 Hybrid CP/DP 全部设计
+**评审结果：** CLEARED — 12 个架构决策全部确认，0 个未解决问题
+
+---
+
+### Step 0: 范围挑战
+
+#### 已有代码复用分析
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   已有代码 vs 需要新建                        │
+├─────────────────────────────────────────────────────────────┤
+│ ✅ kong-config: role 字段 + 全部 cluster_* 配置项 + 解析     │
+│ ✅ kong-config: is_control_plane() / is_data_plane() 方法    │
+│ ✅ kong-db/dbless.rs: DeclarativeConfig 加载逻辑 (DP 复用)   │
+│ ✅ kong-admin (axum): Admin API 框架 (CP WebSocket 挂载)     │
+│ ✅ spec/hybrid.lua: shim 已存在 (需升级支持 hybrid 模式)     │
+│ ✅ kong-proxy: ArcSwap 路由表 (DP 配置热更新复用)            │
+│ ✅ spec/fixtures/kong_clustering.crt/key: 测试证书待复制      │
+├─────────────────────────────────────────────────────────────┤
+│ 🆕 kong-cluster crate: CP/DP WebSocket + 协议 + 心跳 + 重连  │
+│ 🆕 kong-admin/handlers/clustering.rs: /clustering/status     │
+│ 🆕 kong-server/main.rs: 角色分支启动逻辑                     │
+│ 🆕 spec/hybrid.lua: 升级为真正的 hybrid 测试支持              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 复杂度检查
+
+- **新 crate**: 1 个 (kong-cluster)
+- **新文件**: ~12 个 (kong-cluster 内 ~6 + clustering handler + main.rs 修改 + 测试文件)
+- **修改文件**: ~4 个 (main.rs, admin lib.rs, hybrid.lua, Cargo.toml)
+- 总计 ~16 个文件，超过 8 文件阈值。但这是一个全新 crate，复杂度是领域固有的（WebSocket + mTLS + 心跳 + 重连），不是过度工程
+
+#### 技术选型验证
+
+| 组件 | 选择 | 层级 | 理由 |
+|------|------|------|------|
+| CP WebSocket | axum 内建 `axum::extract::ws` | Layer 1 | 无需额外依赖 |
+| DP WebSocket 客户端 | tokio-tungstenite | Layer 1 | async Rust WS 客户端事实标准 |
+| Snappy 压缩 | `snap` crate | Layer 2 | Rust snappy 标准选择 |
+| GZIP 压缩 | `flate2` crate | Layer 1 | 生态广泛使用 |
+
+#### TODOS 交叉引用
+
+- Phase 1 Hybrid 是 TODOS.md 轨道 A 的 P1，依赖 Phase 0（已完成 ✅）
+- "多 CP 高可用" 是 P2，依赖 Phase 1 — 不阻塞
+- KIC 兼容性验证是独立的 — 不阻塞
+
+---
+
+### Section 1: 架构评审 — 7 个决策
+
+#### 决策 1: V2 增量同步的阶段归属
+
+**问题：** roadmap.md 将 V2 列为 Phase 1b，tasks.md 将 9.4 列在同一阶段，存在矛盾。
+
+**前提：**
+- Kong 的 V1 和 V2 是两个独立 WebSocket 端点（/v1/outlet 和 /v2/outlet），可以分阶段实现
+- V2 涉及 JSON-RPC 2.0 + snappy 压缩 + delta 计算，额外 ~4 个文件
+
+**选项：**
+- A) V2 放 Phase 1b，Phase 1a 只做 V1（Completeness: 8/10）
+- B) V2 放 Phase 1a，一步到位（Completeness: 10/10）
+- C) 只做 V2 跳过 V1，Kong 3.x 已默认 V2（Completeness: 7/10）
+
+**决策：B — V1+V2 一步到位。** 理由：两个端点共享大部分基础设施（WebSocket 连接管理、mTLS、心跳），一起做可以避免重复搭建。
+
+#### 决策 2: CP WebSocket 服务的挂载方式
+
+**问题：** cluster_listen (:8005) 是独立端口，有两种挂载方式。
+
+**前提：**
+- Kong CP 在 cluster_listen (默认 :8005) 上开独立 WebSocket 服务
+- Admin API 在 admin_listen (:8001) 上用 axum
+- cluster_listen 需要独立的 mTLS 配置（cluster_cert/cluster_cert_key）
+
+**选项：**
+- A) 新建独立 axum 实例监听 :8005（Completeness: 10/10）
+- B) 复用 Admin API 的 axum 实例（Completeness: 4/10）
+
+**决策：A — 独立 axum 实例。** 理由：端口隔离 + 独立 mTLS 配置 + 关注点分离。复用 Admin API 会导致 TLS 配置混乱且与 Kong 行为不一致。
+
+#### 决策 3: 配置哈希的互操作性策略
+
+**问题：** Kong 多级 MD5 哈希有严格的字节级规则（对象按键名排序、数组用 `;` 分隔、null 序列化为 `/null/`），哈希不一致会导致 CP 不断重推配置。
+
+**前提：**
+- 哈希是热路径（每 30s 心跳都要计算）
+- Kong 的 `spec/01-unit/19-hybrid/02-clustering_spec.lua` 有已知输入/输出对可用于回归测试
+
+**选项：**
+- A) Rust 原生重写哈希算法 + Kong 单元测试回归验证（Completeness: 9/10）
+- B) 通过 mlua 调用 Kong Lua 哈希函数（Completeness: 7/10）
+
+**决策：A — Rust 原生实现。** 理由：哈希在热路径上，调 Lua 性能开销不可接受。用 Kong 单元测试中的已知哈希值做回归测试来保证一致性。
+
+#### 决策 4: DP 配置应用方式
+
+**问题：** DP 收到 CP 推送的配置后，需要应用到路由表/插件链/upstream 等。已有两个配置加载路径。
+
+**前提：**
+- Kong DP 本质是 `database=off` 模式 + 动态推送
+- 已有 db-less 加载路径：解析 DeclarativeConfig → 内存 HashMap → ArcSwap
+- 已有 Admin API CUD 后刷新路径：DB 查询 → debounce → ArcSwap
+
+**选项：**
+- A) 复用 db-less 加载路径（Completeness: 9/10）
+- B) 新建独立 ConfigApplier（Completeness: 6/10）
+
+**决策：A — 复用 db-less 路径。** 理由：这正是 Kong 的做法（DP = database=off），且符合 DRY 原则。避免维护两套配置加载逻辑。
+
+#### 决策 5: mTLS 实现 — TLS 栈选择
+
+**问题：** CP 的 cluster_listen:8005 需要 mTLS。Rust 生态有 rustls 和 OpenSSL 两种 TLS 栈。
+
+**前提：**
+- Pingora 使用 OpenSSL
+- Kong 使用 OpenSSL
+- 项目 memory 记录了「优先使用 Pingora 框架和工具库」的偏好
+- 互操作性要求证书验证逻辑、密码套件等与 Kong 行为一致
+
+**选项：**
+- A) rustls — Rust 原生（Completeness: 7/10）
+- B) OpenSSL — 与 Pingora/Kong 统一（Completeness: 9/10）
+
+**决策：B — OpenSSL。** 理由：项目已依赖 OpenSSL（通过 Pingora），统一 TLS 栈减少复杂度，且与 Kong 互操作性更好。
+
+#### 决策 6: DP 启动时 CP 不可达的行为
+
+**问题：** DP 启动时如果 CP 不可达，应该怎么做？
+
+**前提：**
+- Kong 行为：尝试磁盘缓存 → 无缓存则 503 → 后台重连
+- `11-status_spec.lua` 测试了「DP 无 CP 时 /status/ready 返回 503」
+- roadmap 将「缓存降级」列在 Phase 1c，但「无配置 503」是 Phase 1a 必须的
+
+**选项：**
+- A) Phase 1a 只做「无配置 503」，磁盘缓存延后（Completeness: 9/10）
+- B) Phase 1a 就做磁盘缓存降级（Completeness: 10/10）
+
+**决策：B — Phase 1a 就做磁盘缓存降级。** 理由：只是一个文件读写，成本极低（CC ~15min），且提升了 DP 的生产可用性。
+
+#### 决策 7: 配置应用失败时 DP 的行为
+
+**问题：** CP 推送了新配置，但 DP 应用失败（解析错误、插件配置无效等），DP 应该怎么做？
+
+**前提：**
+- Kong 行为：失败时保留当前配置不变 + 记录错误日志
+- roadmap 的 Phase 1c 有「配置版本回滚」功能
+
+**选项：**
+- A) 失败保持现状 + error log（Completeness: 9/10）
+- B) 失败自动回滚到上一个快照（Completeness: 10/10，但超出 Phase 1a 范围）
+
+**决策：A — 失败保持现状 + error log。** 理由：与 Kong 行为一致。快照回滚是 Phase 1c 的增强功能，Phase 1a 只需要保证不崩溃。
+
+---
+
+### Section 2: 代码质量评审 — 2 个决策
+
+#### 决策 8: kong-cluster crate 的模块结构
+
+**问题：** design.md 规划了 14 个文件的目录结构，是否需要这么多？
+
+**前提：**
+- Phase 1a 同时做 V1+V2，代码量预估 2000-3000 行
+- 「最小差异」偏好
+
+**选项：**
+- A) 紧凑结构 6 个文件，超 500 行再拆（Completeness: 9/10）
+- B) 按 design.md 原始规划 14 个文件（Completeness: 9/10）
+
+**决策：A — 紧凑 6 文件。** 结构如下：
+
+```
+kong-cluster/src/
+  lib.rs          # ClusterRole, ClusterConfig, 公共类型
+  cp.rs           # CP WebSocket server + config export + hash
+  dp.rs           # DP WebSocket client + config apply + heartbeat + reconnect
+  protocol.rs     # V1 (GZIP) + V2 (JSON-RPC 2.0 + snappy) 协议层
+  tls.rs          # mTLS 配置 (OpenSSL)
+  cache.rs        # 磁盘缓存读写 + 损坏检测
+```
+
+#### 决策 9: ClusterRole 枚举的位置
+
+**问题：** 当前 config.rs 用 `role: String` + 字符串对比，应该改为枚举吗？
+
+**前提：**
+- kong-config 已依赖 kong-core
+- 「显式优于 clever」偏好
+
+**选项：**
+- A) kong-core 定义 ClusterRole 枚举，改 config.rs 字段类型（Completeness: 10/10）
+- B) kong-cluster 内部定义（Completeness: 6/10）
+- C) 保持 String（Completeness: 4/10）
+
+**决策：A — kong-core 定义枚举。** 理由：类型安全，消除字符串对比错误风险。ClusterRole 是底层概念（Traditional/ControlPlane/DataPlane），多个 crate 共用，放 kong-core 最合适。
+
+#### 决策 10: 角色验证的位置
+
+**问题：** Kong 的角色约束（CP 不能 database=off、DP 必须 database=off 等）应该在哪里验证？
+
+**前提：**
+- Kong 在 conf_loader 阶段验证，错误消息格式为 `Error: ...`
+- `02-start_stop_spec.lua` 用 `assert.matches("Error: ...")` 验证
+
+**选项：**
+- A) kong-config 的 validate() 方法（Completeness: 10/10）
+- B) main.rs 启动逻辑（Completeness: 6/10）
+
+**决策：A — kong-config validate()。** 理由：启动前早期失败，与 Kong 行为一致，且验证逻辑可复用。
+
+---
+
+### Section 3: 测试评审
+
+#### 测试图谱
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Hybrid Mode 测试图谱                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─── 配置验证 ───────────────────────────────────────────────┐     │
+│  │ • CP 不能禁用 admin_listen                    [start_stop] │     │
+│  │ • CP 不能禁用 cluster_listen                  [start_stop] │     │
+│  │ • CP 不能 database=off                        [start_stop] │     │
+│  │ • DP 不能 database=postgres                   [start_stop] │     │
+│  │ • CP/DP 必须有 cluster_cert/key               [start_stop] │     │
+│  │ • PKI 模式必须有 cluster_ca_cert              [start_stop] │     │
+│  │ • DP 无效 labels 拒绝启动                     [start_stop] │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── CP/DP 同步 (V1 全量) ───────────────────────────────────┐     │
+│  │ • DP 首次连接收到全量配置                       [sync]     │     │
+│  │ • CP 配置变更推送到 DP                          [sync]     │     │
+│  │ • DP 代理遵循 CP 配置                           [sync]     │     │
+│  │ • 删除配置后 DP 更新                            [sync]     │     │
+│  │ • enabled=false 的 service 不同步               [sync]     │     │
+│  │ • 禁用 service 上的 plugin 不同步               [sync]     │     │
+│  │ • 批量变更推送                                  [sync]     │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── CP/DP 同步 (V2 增量) ───────────────────────────────────┐     │
+│  │ • JSON-RPC hello 握手                          [sync_v2]   │     │
+│  │ • get_delta 增量配置                           [sync_v2]   │     │
+│  │ • notify_new_version 通知                      [sync_v2]   │     │
+│  │ • notify_validation_error 错误上报             [sync_v2]   │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── mTLS ──────────────────────────────────────────────────┐     │
+│  │ • shared 模式 (同一证书)                        [sync]     │     │
+│  │ • pki 模式 (CA 签发)                            [pki]      │     │
+│  │ • 证书详情在 /clustering/data-planes 中展示     [sync]     │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── 心跳/重连 ─────────────────────────────────────────────┐     │
+│  │ • 30s PING 心跳 (MD5 哈希负载)                  [新增]     │     │
+│  │ • 45s 超时标记离线                              [新增]     │     │
+│  │ • 5-10s 随机延迟重连                            [新增]     │     │
+│  │ • CP 退出后 DP 不报错                      [start_stop]    │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── Admin API ─────────────────────────────────────────────┐     │
+│  │ • GET /clustering/data-planes 返回 DP 状态      [sync]     │     │
+│  │ • GET /clustering/status (deprecated)           [sync]     │     │
+│  │ • DELETE/PATCH /clustering/data-planes 返回 404 [sync]     │     │
+│  │ • GET /clustering_data_planes 返回 404          [sync]     │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── Status 端点 ───────────────────────────────────────────┐     │
+│  │ • DP 无 CP 时 /status/ready 返回 503           [status]    │     │
+│  │ • DP 有 CP 时 /status/ready 返回 200           [status]    │     │
+│  │ • CP 退出后 DP 保持 200                        [status]    │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── 配置哈希 ──────────────────────────────────────────────┐     │
+│  │ • 多级哈希计算正确性                           [单元测试]   │     │
+│  │ • 与 Kong Lua 实现输出一致                     [单元测试]   │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                     │
+│  ┌─── 磁盘缓存 ──────────────────────────────────────────────┐     │
+│  │ • 配置成功后写入磁盘                            [新增]     │     │
+│  │ • CP 不可达时从磁盘加载                         [新增]     │     │
+│  │ • 文件权限 0600                                 [新增]     │     │
+│  │ • 缓存文件损坏时 warn + 删除 + 按无缓存处理    [新增]     │     │
+│  └────────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 决策 11: 测试移植范围
+
+**问题：** Kong 有 40+ 个 hybrid 测试文件，移植范围？
+
+**前提：**
+- 很多测试依赖 Kong 特有基础设施（clustering_client mock、nginx template、RPC mock 等）
+- spec.helpers 和 hybrid.lua 需要升级才能支持
+
+**决策：全量移植 40+ 个测试文件。** 理由：用户决定一步到位，CC 估计 ~6 小时。
+
+#### 决策 12: spec/hybrid.lua 升级策略
+
+**问题：** 当前 hybrid.lua 只支持 traditional 模式，需要升级。
+
+**决策：完整升级。** 支持 traditional + hybrid 部署模式 + 3 种 RPC 组合 (off/off, on/off, on/on)。这是 40+ 测试文件复用的前提。
+
+#### Kong 测试文件清单（需从 /Users/dawxy/proj/kong 移植）
+
+**单元测试 (spec/01-unit/19-hybrid/):**
+| 文件 | 覆盖范围 |
+|------|----------|
+| 02-clustering_spec.lua | 配置哈希计算和版本兼容性 |
+| 03-compat_spec.lua | 向后兼容性、多版本字段移除 |
+| 04-validate_deltas_spec.lua | delta 配置验证 |
+| 05-validate-versions_spec.lua | 版本字符串解析 |
+
+**集成测试 — Hybrid 主要 (spec/02-integration/09-hybrid_mode/):**
+| 文件 | 覆盖范围 |
+|------|----------|
+| 01-sync_spec.lua | CP/DP 数据同步核心、状态 API、版本检查 |
+| 02-start_stop_spec.lua | 启动/停止验证和配置约束 |
+| 03-pki_spec.lua | PKI 模式 mTLS |
+| 04-cp_cluster_sync_spec.lua | 多 CP 节点同步 |
+| 05-ocsp_spec.lua | OCSP 证书状态验证 |
+| 08-lazy_export_spec.lua | 配置导出延迟加载 |
+| 09-config-compat_spec.lua | 配置兼容性和 delta 同步 |
+| 09-node-id-persistence_spec.lua | DP 节点 ID 持久化 |
+| 10-forward-proxy_spec.lua | 正向代理通信 |
+| 11-status_spec.lua | hybrid 模式 status 端点 |
+| 12-errors_spec.lua | DP 配置错误上报 |
+| 13-deprecations_spec.lua | 废弃 API 警告 |
+| 14-dp_privileged_agent_spec.lua | DP 专用配置处理代理 |
+| 15-cp_inert_rpc_sync_spec.lua | CP 禁用 RPC Sync 场景 |
+
+**集成测试 — RPC (spec/02-integration/18-hybrid_rpc/):**
+| 文件 | 覆盖范围 |
+|------|----------|
+| 01-rpc_spec.lua | 基础 RPC 功能 |
+| 02-error_spec.lua | RPC 错误处理 |
+| 03-inert_spec.lua | 禁用 RPC 场景 |
+| 04-concentrator_spec.lua | RPC 聚合 |
+| 05-sync-rpc_spec.lua | 同步 RPC v2 |
+| 06-batch-rpc_spec.lua | 批量 RPC |
+| 07-notification_spec.lua | RPC 通知 |
+| 08-sync_v2_get_delta_spec.lua | delta 获取 |
+| 09-notify_new_version_spec.lua | 版本变更通知 |
+| 10-validate_deltas_spec.lua | delta 验证 |
+
+**插件 Hybrid 模式 (spec/03-plugins/):**
+| 文件 | 覆盖范围 |
+|------|----------|
+| 09-key-auth/04-hybrid_mode_spec.lua | key-auth 插件 hybrid 功能 |
+| 23-rate-limiting/07-hybrid_mode_spec.lua | rate-limiting 插件 hybrid 功能 |
+| 26-prometheus/06-hybrid-mode_metrics_spec.lua | prometheus DP 指标暴露 |
+| 29-acme/06-hybrid_mode_spec.lua | ACME 插件 hybrid 功能 |
+
+**其他:**
+| 文件 | 覆盖范围 |
+|------|----------|
+| 02-integration/02-cmd/12-hybrid_spec.lua | `kong hybrid gen_cert` 命令 |
+| 01-unit/01-db/01-schema/13-cluster_status_spec.lua | clustering_data_planes schema |
+| 02-integration/03-db/13-cluster_status_spec.lua | clustering_data_planes CRUD |
+
+---
+
+### Section 4: 性能评审
+
+#### CP 广播策略确认
+
+**设计：** 序列化 + 压缩一次得到 `Arc<Vec<u8>>`，每个 DP 连接是独立的 tokio task + 独立 bounded channel。
+
+**验证：**
+- 慢 DP 不会反压其他 DP（独立 channel）
+- 队列满时丢弃旧配置（DP 会通过心跳哈希不一致触发重推）
+- `Arc<Vec<u8>>` 零拷贝广播，无内存复制
+
+**结论：** 性能设计正确，无额外问题。
+
+---
+
+### 失败模式分析
+
+| 失败场景 | 测试覆盖 | 错误处理 | 用户可见 | 评估 |
+|----------|---------|---------|---------|------|
+| CP 序列化失败 | ⚠️ 需新增 | ✅ catch + log + 不推送 | ✅ CP 日志 | 安全 |
+| CP GZIP 压缩失败 | ⚠️ 需新增 | ✅ fallback 未压缩 | ✅ CP 日志 | 安全 |
+| DP 解压失败 | ⚠️ 需新增 | ✅ catch + log + 等重推 | ✅ DP 日志 | 安全 |
+| DP snappy 解码失败 | ⚠️ 需新增 | ✅ fallback V1 | ✅ DP 日志 | 安全 |
+| DP 配置应用失败 | ✅ 12-errors_spec | ✅ 保持旧配置 | ✅ DP 日志 | 安全 |
+| mTLS 证书过期 | ✅ prometheus 指标 | ✅ 连接被拒 | ✅ 连接失败 | 安全 |
+| DP 网络分区 | ✅ heartbeat 超时 | ✅ 重连 | ✅ DP 日志 | 安全 |
+| CP 突然崩溃 | ✅ start_stop_spec | ✅ DP 不报错 | ✅ 静默 | 安全 |
+| 磁盘缓存损坏 | ✅ Phase 1a 直接做 | ✅ warn + 删除 + 无缓存 | ✅ 日志 | 安全 |
+
+**Critical Gap: 0** — 原本唯一的 gap（磁盘缓存损坏）已纳入 Phase 1a 直接实现。
+
+---
+
+### 评审总结
+
+```
++====================================================================+
+|                    REVIEW READINESS DASHBOARD                       |
++====================================================================+
+| Review          | Runs | Last Run            | Status    | Required |
+|-----------------|------|---------------------|-----------|----------|
+| Eng Review      |  1   | 2026-03-22 14:23    | CLEAR     | YES      |
+| CEO Review      |  0   | —                   | —         | no       |
+| Design Review   |  0   | —                   | —         | no       |
++--------------------------------------------------------------------+
+| VERDICT: CLEARED — Eng Review passed (12 issues, 0 unresolved)      |
++====================================================================+
+```
+
+| 评审维度 | 结果 |
+|----------|------|
+| Step 0: 范围挑战 | 范围确认（Phase 1a 包含 V1+V2+磁盘缓存+全部测试） |
+| 架构评审 | 7 个决策全部确认 |
+| 代码质量评审 | 3 个决策全部确认 |
+| 测试评审 | 图谱完成，40+ 测试全量移植 |
+| 性能评审 | 1 个确认，无问题 |
+| 失败模式 | 0 个 Critical Gap |
+| Lake Score | 12/12 选择了完整方案 |
+
+#### 建议执行顺序
+
+```
+Step 1: 测试基础设施
+  ├── 复制 spec/fixtures/kong_clustering.* 证书文件
+  ├── 升级 spec/hybrid.lua（支持 hybrid 部署 + RPC 组合）
+  └── 升级 spec.helpers（支持同时启动 CP + DP 两个实例）
+
+Step 2: kong-core + kong-config 改造
+  ├── kong-core: 添加 ClusterRole 枚举
+  ├── kong-config: role 字段改为 ClusterRole 类型
+  └── kong-config: 添加 validate() 角色约束验证
+
+Step 3: kong-cluster crate 实现
+  ├── lib.rs: 公共类型
+  ├── tls.rs: mTLS 配置 (OpenSSL)
+  ├── protocol.rs: V1 GZIP + V2 JSON-RPC 2.0 + snappy
+  ├── cp.rs: WebSocket server + config export + hash + broadcast
+  ├── dp.rs: WebSocket client + config apply + heartbeat + reconnect
+  └── cache.rs: 磁盘缓存 + 损坏检测
+
+Step 4: 集成
+  ├── kong-server/main.rs: 角色分支启动
+  ├── kong-admin: /clustering/status 端点
+  └── kong-admin: /clustering/data-planes 端点
+
+Step 5: 测试移植
+  ├── 单元测试 (4 文件)
+  ├── 集成测试 — Hybrid (14 文件)
+  ├── 集成测试 — RPC (10 文件)
+  ├── 插件 Hybrid 测试 (4 文件)
+  └── 其他 (3 文件)
+```
+
 ## Review Status
 
 - CEO Review: SUPERSEDED by [ai-gateway-strategy.md](ai-gateway-strategy.md) (2026-03-21)
-- Eng Review: PENDING
+- Eng Review: **CLEARED** — 12 个决策全部确认 (2026-03-22)
 - Design Review: SKIPPED (no UI scope)
 
 > **注意：** 本文档已被 `ai-gateway-strategy.md` 部分替代。新的四子网关定位和双轨并行执行路径以新文档为准。本文档中 Phase 1 Hybrid 模式的详细设计仍然有效。

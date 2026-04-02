@@ -11,6 +11,7 @@ members = [
     "crates/kong-admin",
     "crates/kong-server",
     "crates/kong-ai",
+    "crates/kong-cluster",
 ]
 
 [workspace.package]
@@ -73,6 +74,12 @@ mime = "0.3"
 hickory-resolver = "0.25"
 tempfile = "3"
 
+# Clustering — 集群通信
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+flate2 = "1"
+snap = "1"
+md5 = "0.7"
+
 # AI Gateway 依赖
 anymap2 = "0.13"
 tiktoken-rs = "0.6"
@@ -88,3 +95,4 @@ kong-proxy = { path = "crates/kong-proxy" }
 kong-plugin-system = { path = "crates/kong-plugin-system" }
 kong-lua-bridge = { path = "crates/kong-lua-bridge" }
 kong-admin = { path = "crates/kong-admin" }
+kong-cluster = { path = "crates/kong-cluster" }

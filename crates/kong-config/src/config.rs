@@ -1,4 +1,5 @@
 use crate::listen::{parse_listen_addresses, ListenAddr};
+use kong_core::ClusterRole;
 use std::collections::HashMap;
 
 /// Kong configuration, fully compatible with Kong's kong.conf — Kong 配置，与 Kong 的 kong.conf 完全兼容
@@ -77,7 +78,7 @@ pub struct KongConfig {
     pub declarative_config: Option<String>,
     pub declarative_config_string: Option<String>,
     /// Cluster role: traditional, control_plane, data_plane — 集群角色: traditional, control_plane, data_plane
-    pub role: String,
+    pub role: ClusterRole,
 
     // ========== Cache configuration — 缓存配置 ==========
     /// In-memory cache size (bytes) — 内存缓存大小（字节）
@@ -274,7 +275,7 @@ impl Default for KongConfig {
             // DB-less mode — 无数据库模式
             declarative_config: None,
             declarative_config_string: None,
-            role: "traditional".to_string(),
+            role: ClusterRole::Traditional,
 
             // Cache — 缓存
             mem_cache_size: "128m".to_string(),
@@ -487,7 +488,15 @@ impl KongConfig {
             // DB-less mode — 无数据库模式
             "declarative_config" => self.declarative_config = none_if_empty(value),
             "declarative_config_string" => self.declarative_config_string = none_if_empty(value),
-            "role" => self.role = value.to_string(),
+            "role" => {
+                match value.parse::<ClusterRole>() {
+                    Ok(role) => self.role = role,
+                    Err(e) => {
+                        tracing::error!("无效的 role 值: {} — Invalid role value: {}", e, e);
+                        return;
+                    }
+                }
+            }
 
             // Cache — 缓存
             "mem_cache_size" => self.mem_cache_size = value.to_string(),
@@ -682,12 +691,12 @@ impl KongConfig {
 
     /// Check if this is a control plane — 判断是否为控制面
     pub fn is_control_plane(&self) -> bool {
-        self.role == "control_plane"
+        self.role.is_control_plane()
     }
 
     /// Check if this is a data plane — 判断是否为数据面
     pub fn is_data_plane(&self) -> bool {
-        self.role == "data_plane"
+        self.role.is_data_plane()
     }
 
     /// Parse mem_cache_size to bytes — 解析 mem_cache_size 为字节数

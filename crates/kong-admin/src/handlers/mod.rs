@@ -9,6 +9,7 @@ pub mod schemas;
 pub mod ai_providers;
 pub mod ai_models;
 pub mod ai_virtual_keys;
+pub mod clustering;
 pub use schemas::*;
 
 use std::sync::Arc;

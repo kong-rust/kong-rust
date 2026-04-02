@@ -47,6 +47,7 @@ fn create_test_app() -> axum::Router {
         configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        cp: None,
     };
 
     build_admin_router(state)
