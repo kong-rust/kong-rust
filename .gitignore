@@ -31,6 +31,8 @@ Thumbs.db
 *.key
 !crates/kong-cluster/tests/fixtures/*.pem
 !crates/kong-cluster/tests/fixtures/*.key
+!spec/fixtures/*.pem
+!spec/fixtures/*.key
 
 # ========================
 # 构建产物和运行时

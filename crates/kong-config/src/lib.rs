@@ -111,7 +111,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
     if config.is_dbless()
         && config.declarative_config.is_none()
         && config.declarative_config_string.is_none()
-        && config.role != "data_plane"
+        && !config.role.is_data_plane()
     {
         tracing::warn!("database=off 但未指定 declarative_config 或 declarative_config_string");
     }
@@ -136,13 +136,50 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         )));
     }
 
-    // Validate role — 验证 role
-    let valid_roles = ["traditional", "control_plane", "data_plane"];
-    if !valid_roles.contains(&config.role.as_str()) {
-        return Err(KongConfigError::ValidationError(format!(
-            "无效的 role: {}，可选值: {:?}",
-            config.role, valid_roles
-        )));
+    // Role-specific constraints — 角色约束验证
+    match config.role {
+        kong_core::ClusterRole::ControlPlane => {
+            // CP must use a database — CP 必须使用数据库
+            if config.database == "off" {
+                return Err(KongConfigError::ValidationError(
+                    "Error: in-memory storage can not be used when role = \"control_plane\"".into()
+                ));
+            }
+            // CP must have cluster_cert/key — CP 必须有集群证书
+            if config.cluster_cert.is_none() || config.cluster_cert_key.is_none() {
+                return Err(KongConfigError::ValidationError(
+                    "control_plane 角色必须配置 cluster_cert 和 cluster_cert_key".to_string(),
+                ));
+            }
+        }
+        kong_core::ClusterRole::DataPlane => {
+            // DP must use database=off — DP 必须使用 db-less 模式
+            if config.database != "off" {
+                return Err(KongConfigError::ValidationError(
+                    "Error: only in-memory storage can be used when role = \"data_plane\"".into()
+                ));
+            }
+            // DP must specify cluster_control_plane — DP 必须指定 CP 地址
+            if config.cluster_control_plane.is_empty() {
+                return Err(KongConfigError::ValidationError(
+                    "Error: cluster_control_plane must be specified when role = \"data_plane\"".into()
+                ));
+            }
+            // DP must have cluster_cert/key — DP 必须有集群证书
+            if config.cluster_cert.is_none() || config.cluster_cert_key.is_none() {
+                return Err(KongConfigError::ValidationError(
+                    "data_plane 角色必须配置 cluster_cert 和 cluster_cert_key".to_string(),
+                ));
+            }
+        }
+        kong_core::ClusterRole::Traditional => {}
+    }
+
+    // PKI mode requires cluster_ca_cert — PKI 模式需要 CA 证书
+    if config.cluster_mtls == "pki" && config.cluster_ca_cert.is_none() {
+        return Err(KongConfigError::ValidationError(
+            "cluster_mtls=pki 模式必须配置 cluster_ca_cert".to_string(),
+        ));
     }
 
     // Validate worker_consistency — 验证 worker_consistency

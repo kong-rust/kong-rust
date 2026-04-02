@@ -60,6 +60,73 @@ pub struct AdminState {
     /// In-memory target health status store: key = "upstream_id:target_address", value = health status string
     /// 内存中 target 健康状态存储：key = "upstream_id:target地址"，value = 健康状态字符串
     pub target_health: Arc<RwLock<HashMap<String, String>>>,
+    /// Control Plane reference (only set when role=control_plane) — 控制面引用（仅 role=control_plane 时设置）
+    pub cp: Option<Arc<kong_cluster::cp::ControlPlane>>,
+}
+
+/// Export current config from DB and push to all DPs — 从 DB 导出当前配置并推送给所有 DP
+async fn push_config_to_dps(
+    cp: &kong_cluster::cp::ControlPlane,
+    state: &AdminState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use kong_core::traits::PageParams;
+
+    // Fetch all pages of an entity type — 获取某实体类型的所有分页数据
+    macro_rules! fetch_all {
+        ($dao:expr) => {{
+            let mut all_items = Vec::new();
+            let mut offset: Option<String> = None;
+            loop {
+                let params = PageParams { size: 1000, offset: offset.clone(), ..Default::default() };
+                match $dao.page(&params).await {
+                    Ok(page) => {
+                        all_items.extend(page.data);
+                        if page.offset.is_none() {
+                            break;
+                        }
+                        offset = page.offset;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch page: {} — 获取分页失败: {}", e, e);
+                        break;
+                    }
+                }
+            }
+            all_items
+        }};
+    }
+
+    // Export all entities with full pagination — 导出所有实体（完整分页）
+    let services = fetch_all!(state.services);
+    let routes = fetch_all!(state.routes);
+    let plugins = fetch_all!(state.plugins);
+    let upstreams = fetch_all!(state.upstreams);
+    let targets = fetch_all!(state.targets);
+    let consumers = fetch_all!(state.consumers);
+    let certificates = fetch_all!(state.certificates);
+    let snis = fetch_all!(state.snis);
+    let ca_certificates = fetch_all!(state.ca_certificates);
+
+    // Build declarative config JSON — 构建声明式配置 JSON
+    let config_table = serde_json::json!({
+        "_format_version": "3.0",
+        "services": serde_json::to_value(&services)?,
+        "routes": serde_json::to_value(&routes)?,
+        "plugins": serde_json::to_value(&plugins)?,
+        "upstreams": serde_json::to_value(&upstreams)?,
+        "targets": serde_json::to_value(&targets)?,
+        "consumers": serde_json::to_value(&consumers)?,
+        "certificates": serde_json::to_value(&certificates)?,
+        "snis": serde_json::to_value(&snis)?,
+        "ca_certificates": serde_json::to_value(&ca_certificates)?,
+    });
+
+    cp.push_config(&config_table).await.map_err(|e| {
+        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+    })?;
+
+    tracing::info!("Config pushed to DPs after CUD — CUD 后已推送配置给 DP");
+    Ok(())
 }
 
 /// Cache refresh debounce loop: waits for the first signal, then collects all refresh requests within 100ms before executing — 缓存刷新防抖循环：收到第一个信号后等待 100ms，合并期间所有刷新请求后一次性执行
@@ -97,6 +164,13 @@ pub async fn run_cache_refresher(
             state.refresh_proxy_cache(entity_type).await;
         }
         tracing::debug!("防抖刷新完成: {:?}", pending);
+
+        // If CP mode, push config to all connected DPs — 如果是 CP 模式，推送配置给所有已连接的 DP
+        if let Some(ref cp) = state.cp {
+            if let Err(e) = push_config_to_dps(cp, &state).await {
+                tracing::error!("Failed to push config to DPs — 推送配置给 DP 失败: {}", e);
+            }
+        }
     }
 }
 
@@ -145,6 +219,7 @@ fn is_known_route(path: &str) -> bool {
         "/services", "/routes", "/consumers", "/upstreams",
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
         "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
+        "/clustering/data-planes", "/clustering/status",
     ];
     if static_routes.contains(&path) {
         return true;
@@ -480,6 +555,9 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(handlers::ai_virtual_keys::delete_one),
         )
         .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
+        // Clustering — 集群端点
+        .route("/clustering/data-planes", get(handlers::clustering::list_data_planes))
+        .route("/clustering/status", get(handlers::clustering::clustering_status))
         .fallback(admin_fallback_with_trailing_slash)
         // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
         .method_not_allowed_fallback(method_not_allowed_handler)

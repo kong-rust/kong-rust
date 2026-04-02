@@ -45,7 +45,7 @@ pub fn collect_prometheus_metrics(
         .get("configuration")
         .map_err(|e| KongError::LuaError(e.to_string()))?;
     configuration
-        .set("role", config.role.clone())
+        .set("role", config.role.to_string())
         .map_err(|e| KongError::LuaError(e.to_string()))?;
     configuration
         .set(

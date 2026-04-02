@@ -2551,4 +2551,33 @@ end
 ---------------------------------------------------------------------------
 pcall(require, "spec.helpers.wait")
 
+-- ========== Hybrid Mode Helpers — 混合模式辅助函数 ==========
+
+--- Start a control plane instance — 启动控制面实例
+-- @param conf Configuration overrides — 配置覆盖
+-- @return true on success — 成功返回 true
+function _M.start_control_plane(conf)
+    conf = conf or {}
+    conf.role = "control_plane"
+    conf.database = conf.database or "postgres"
+    conf.cluster_cert = conf.cluster_cert or "spec/fixtures/kong_clustering.crt"
+    conf.cluster_cert_key = conf.cluster_cert_key or "spec/fixtures/kong_clustering.key"
+    conf.cluster_listen = conf.cluster_listen or "127.0.0.1:9005"
+    return _M.start_kong(conf)
+end
+
+--- Start a data plane instance — 启动数据面实例
+-- @param conf Configuration overrides — 配置覆盖
+-- @return true on success — 成功返回 true
+function _M.start_data_plane(conf)
+    conf = conf or {}
+    conf.role = "data_plane"
+    conf.database = "off"
+    conf.cluster_cert = conf.cluster_cert or "spec/fixtures/kong_clustering.crt"
+    conf.cluster_cert_key = conf.cluster_cert_key or "spec/fixtures/kong_clustering.key"
+    conf.cluster_control_plane = conf.cluster_control_plane or "127.0.0.1:9005"
+    conf.prefix = conf.prefix or "servroot2"
+    return _M.start_kong(conf)
+end
+
 return _M

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 kong-core = { workspace = true }
 kong-config = { workspace = true }
+kong-cluster = { workspace = true }
 kong-db = { workspace = true }
 kong-ai = { workspace = true }
 kong-proxy = { workspace = true }
