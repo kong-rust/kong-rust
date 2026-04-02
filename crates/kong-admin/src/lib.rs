@@ -174,13 +174,20 @@ pub async fn run_cache_refresher(
     }
 }
 
-/// Admin headers middleware — inject X-Kong-Admin-Latency and Server headers based on config — 根据配置注入 X-Kong-Admin-Latency 和 Server 响应头
+/// Admin headers middleware — inject X-Kong-Admin-Latency, Server, and CORS headers based on config
+/// 管理头中间件 — 根据配置注入 X-Kong-Admin-Latency、Server 和 CORS 响应头
 async fn admin_headers_middleware(
     axum::extract::State(state): axum::extract::State<AdminState>,
     req: axum::extract::Request,
     next: middleware::Next,
 ) -> axum::response::Response {
     let start = std::time::Instant::now();
+    // Extract Origin header before passing request — 在传递请求前提取 Origin 头
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let mut response = next.run(req).await;
     let headers_config = &state.config.headers;
 
@@ -207,6 +214,19 @@ async fn admin_headers_middleware(
     } else {
         response.headers_mut().remove(axum::http::header::SERVER);
     }
+
+    // CORS headers — Kong Admin API always returns CORS headers (compatible with official Kong)
+    // CORS 头 — Kong Admin API 始终返回 CORS 头（兼容官方 Kong 行为）
+    let cors_origin = origin.unwrap_or_else(|| "*".to_string());
+    if let Ok(val) = axum::http::HeaderValue::from_str(&cors_origin) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, val);
+    }
+    response.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        axum::http::HeaderValue::from_static("true"),
+    );
 
     response
 }
@@ -325,12 +345,13 @@ async fn options_middleware(
         // Determine allowed methods based on endpoint type — 根据端点类型确定允许的方法
         let allow = determine_allowed_methods(&path);
 
+        // NOTE: CORS origin/credentials headers are added by admin_headers_middleware (outer layer)
+        // 注意：CORS origin/credentials 头由外层 admin_headers_middleware 统一添加
         return axum::http::Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header("Allow", allow)
             .header("Access-Control-Allow-Methods", allow)
             .header("Access-Control-Allow-Headers", "Content-Type")
-            .header("Access-Control-Allow-Origin", "*")
             .body(axum::body::Body::empty())
             .unwrap()
             .into_response();
