@@ -839,7 +839,10 @@ impl ProxyHttp for KongProxy {
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
         // Set HTTP version for upstream connection — 设置上游连接的 HTTP 版本
-        if ctx.upstream_tls {
+        if ctx.plugin_ctx.upstream_force_http1 {
+            // Plugin requested HTTP/1.1 (e.g. AI proxy avoids H2 multiplexing issues) — 插件请求 HTTP/1.1（如 AI proxy 避免 H2 多路复用问题）
+            peer.options.alpn = pingora_core::protocols::tls::ALPN::H1;
+        } else if ctx.upstream_tls {
             // TLS: prefer HTTP/2 via ALPN — TLS：通过 ALPN 优先使用 HTTP/2
             peer.options.alpn = pingora_core::protocols::tls::ALPN::H2H1;
         } else if ctx.upstream_is_grpc {
