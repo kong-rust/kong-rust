@@ -150,6 +150,12 @@ async fn test_ai_proxy_access_sets_upstream() {
         .iter()
         .any(|(k, v)| k == "Content-Type" && v == "application/json");
     assert!(has_ct, "应包含 Content-Type header");
+
+    // 验证强制 HTTP/1.1（避免 H2 连接池复用导致上游挂死）
+    assert!(
+        ctx.upstream_force_http1,
+        "ai-proxy access 应设置 upstream_force_http1 = true"
+    );
 }
 
 #[tokio::test]
