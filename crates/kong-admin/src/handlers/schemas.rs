@@ -214,6 +214,57 @@ const BUNDLED_PLUGINS: &[&str] = &[
     "admin-api-method",
 ];
 
+/// Return schema for Rust native plugins (no Lua schema.lua needed) — 返回 Rust 原生插件的 schema（无需 Lua schema.lua）
+fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
+    match name {
+        "ai-proxy" => Some(json!({
+            "fields": [
+                {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
+                {"config": {"type": "record", "required": true, "fields": [
+                    {"model": {"type": "record", "required": true, "fields": [
+                        {"provider": {"type": "string", "required": true, "one_of": ["openai", "anthropic", "gemini", "openai_compat"]}},
+                        {"name": {"type": "string"}},
+                        {"options": {"type": "record", "fields": [
+                            {"upstream_url": {"type": "string"}},
+                            {"anthropic_version": {"type": "string"}},
+                            {"azure_api_version": {"type": "string"}},
+                        ]}},
+                    ]}},
+                    {"auth": {"type": "record", "fields": [
+                        {"header_name": {"type": "string"}},
+                        {"header_value": {"type": "string"}},
+                        {"param_name": {"type": "string"}},
+                        {"param_value": {"type": "string"}},
+                        {"param_location": {"type": "string", "one_of": ["query", "body"]}},
+                        {"allow_override": {"type": "boolean", "default": false}},
+                        {"gcp_use_service_account": {"type": "boolean", "default": false}},
+                    ]}},
+                    {"logging": {"type": "record", "fields": [
+                        {"log_payloads": {"type": "boolean", "default": false}},
+                        {"log_statistics": {"type": "boolean", "default": true}},
+                    ]}},
+                    {"route_type": {"type": "string", "default": "llm/v1/chat", "one_of": ["llm/v1/chat", "llm/v1/completions"]}},
+                    {"llm_format": {"type": "string", "one_of": ["openai", "anthropic"]}},
+                    {"max_request_body_size": {"type": "integer", "default": 128}},
+                    {"model_name_header": {"type": "boolean", "default": true}},
+                    {"response_streaming": {"type": "string", "default": "allow", "one_of": ["allow", "deny", "always"]}},
+                ]}},
+            ],
+            "entity_checks": [],
+            "name": "ai-proxy",
+        })),
+        "ai-rate-limit" | "ai-cache" | "ai-prompt-guard" => Some(json!({
+            "fields": [
+                {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
+                {"config": {"type": "record", "required": true, "fields": []}},
+            ],
+            "entity_checks": [],
+            "name": name,
+        })),
+        _ => None,
+    }
+}
+
 /// Return a detailed plugin schema for known plugins, or minimal stub for others — 返回已知插件的详细 schema，或其他插件的最小占位
 fn minimal_plugin_schema(name: &str) -> serde_json::Value {
     let config_fields = get_plugin_config_schema(name);
@@ -635,8 +686,11 @@ pub async fn get_plugin_schema(
             (StatusCode::OK, Json(schema_json)).into_response()
         }
         Err(_err) => {
-            // Fall back to minimal schema for known bundled plugins — 对已知内置插件回退到最小 schema
-            if BUNDLED_PLUGINS.contains(&name.as_str()) {
+            // Fall back to Rust native plugin schema, then minimal schema for bundled plugins
+            // 优先回退到 Rust 原生插件 schema，再回退到内置插件最小 schema
+            if let Some(schema) = rust_native_plugin_schema(&name) {
+                (StatusCode::OK, Json(schema)).into_response()
+            } else if BUNDLED_PLUGINS.contains(&name.as_str()) {
                 (StatusCode::OK, Json(minimal_plugin_schema(&name))).into_response()
             } else {
                 (

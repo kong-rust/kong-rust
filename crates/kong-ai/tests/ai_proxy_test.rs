@@ -71,7 +71,7 @@ fn test_ai_proxy_config_parse() {
     });
 
     let cfg: AiProxyConfig = serde_json::from_value(config_json).unwrap();
-    assert_eq!(cfg.model, "gpt-4");
+    assert_eq!(cfg.effective_model_name(), "gpt-4");
     assert_eq!(cfg.model_source, "config");
     assert_eq!(cfg.route_type, "llm/v1/chat");
     assert_eq!(cfg.client_protocol, "openai");
@@ -92,7 +92,7 @@ fn test_ai_proxy_config_defaults() {
     let config_json = json!({});
     let cfg: AiProxyConfig = serde_json::from_value(config_json).unwrap();
 
-    assert_eq!(cfg.model, "");
+    assert_eq!(cfg.effective_model_name(), "");
     assert_eq!(cfg.model_source, "config");
     assert_eq!(cfg.route_type, "llm/v1/chat");
     assert_eq!(cfg.client_protocol, "openai");
@@ -364,7 +364,7 @@ fn test_parse_plugin_config_helper() {
     };
 
     let cfg: AiProxyConfig = kong_ai::parse_plugin_config(&pc).unwrap();
-    assert_eq!(cfg.model, "gpt-4");
+    assert_eq!(cfg.effective_model_name(), "gpt-4");
 }
 
 #[test]
