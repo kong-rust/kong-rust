@@ -532,6 +532,11 @@ impl PluginHandler for AiProxyPlugin {
 
         ctx.extensions.insert(ai_state);
 
+        // 12. Force HTTP/1.1 for AI upstream connections — 强制 AI 上游使用 HTTP/1.1
+        // Avoid H2 connection pool multiplexing issues with AI providers (rate-limit GOAWAY, stream stalls)
+        // 避免 H2 连接池多路复用在 AI 提供商处引起的问题（限流 GOAWAY、流停滞）
+        ctx.upstream_force_http1 = true;
+
         Ok(())
     }
 
@@ -555,6 +560,10 @@ impl PluginHandler for AiProxyPlugin {
         let is_stream = content_type.contains("text/event-stream")
             || content_type.contains("application/x-ndjson")
             || content_type.contains("application/stream+json");
+
+        // Remove Content-Length: body transformation changes response size — 移除 Content-Length：body 转换会改变响应体大小
+        ctx.response_headers_to_remove.push("content-length".to_string());
+        ctx.response_headers_to_remove.push("content-encoding".to_string());
 
         if is_stream {
             // 初始化流式解析状态

@@ -39,6 +39,8 @@ pub struct RequestCtx {
     pub upstream_target_port: Option<u16>,
     /// Whether request buffering was explicitly enabled by the plugin — 插件是否显式开启了请求缓冲
     pub request_buffering_enabled: bool,
+    /// Whether to force HTTP/1.1 for upstream connection (avoid H2 multiplexing issues) — 是否强制上游使用 HTTP/1.1（避免 H2 多路复用问题）
+    pub upstream_force_http1: bool,
     /// Whether a retry callback was registered by the plugin — 插件是否注册了重试回调
     pub upstream_retry_callback_registered: bool,
     /// Response header modification queue — 响应头修改队列
@@ -111,6 +113,7 @@ impl RequestCtx {
             upstream_target_host: None,
             upstream_target_port: None,
             request_buffering_enabled: false,
+            upstream_force_http1: false,
             upstream_retry_callback_registered: false,
             response_headers_to_set: Vec::new(),
             response_headers_to_remove: Vec::new(),

@@ -119,6 +119,58 @@ async fn test_ai_proxy_header_filter_detects_ndjson_streaming() {
     assert!(state.stream_mode, "application/x-ndjson 应触发流式模式");
 }
 
+/// 测试：header_filter 移除 Content-Length 和 Content-Encoding（body 转换会改变大小）
+#[tokio::test]
+async fn test_ai_proxy_header_filter_removes_content_length() {
+    let plugin = AiProxyPlugin::new();
+    let config = make_plugin_config(inline_provider_config("gpt-4"));
+
+    let mut ctx = RequestCtx::new();
+    ctx.request_body = Some(json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hello"}]
+    }).to_string());
+    plugin.access(&config, &mut ctx).await.unwrap();
+
+    // 模拟上游返回 JSON（非流式）
+    ctx.response_headers
+        .insert("content-type".to_string(), "application/json".to_string());
+
+    plugin.header_filter(&config, &mut ctx).await.unwrap();
+
+    // 验证 Content-Length 和 Content-Encoding 被标记为需移除
+    assert!(
+        ctx.response_headers_to_remove.contains(&"content-length".to_string()),
+        "header_filter 应移除 content-length（body 转换后大小变化）"
+    );
+    assert!(
+        ctx.response_headers_to_remove.contains(&"content-encoding".to_string()),
+        "header_filter 应移除 content-encoding（body 转换后编码变化）"
+    );
+}
+
+/// 测试：流式响应同样移除 Content-Length
+#[tokio::test]
+async fn test_ai_proxy_header_filter_streaming_removes_content_length() {
+    let plugin = AiProxyPlugin::new();
+    let config = make_plugin_config(inline_provider_config("gpt-4"));
+
+    let mut ctx = RequestCtx::new();
+    ctx.request_body = Some(openai_stream_body("gpt-4"));
+    plugin.access(&config, &mut ctx).await.unwrap();
+
+    ctx.response_headers
+        .insert("content-type".to_string(), "text/event-stream".to_string());
+
+    plugin.header_filter(&config, &mut ctx).await.unwrap();
+
+    // 流式模式下也应移除 Content-Length
+    assert!(
+        ctx.response_headers_to_remove.contains(&"content-length".to_string()),
+        "流式模式 header_filter 也应移除 content-length"
+    );
+}
+
 /// 测试：非流式响应不激活流式模式
 #[tokio::test]
 async fn test_ai_proxy_header_filter_non_streaming_unchanged() {
