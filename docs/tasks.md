@@ -12,14 +12,14 @@
 | 6 | Admin API | 4 | 4 | 0 |
 | 7 | TLS 和证书管理 | 1 | 1 | 0 |
 | 8 | 集成、启动、优化 | 19 | 19 | 0 |
-| 9 | Hybrid 模式 | 7 | 0 | 7 |
+| 9 | Hybrid 模式 | 7 | 7 | 0 |
 | 10 | Docker 镜像 | 6 | 6 | 0 |
 | 11 | HTTP 代理性能优化 | 7 | 7 | 0 |
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
 | 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
-| **合计** | | **71** | **64** | **7** |
+| **合计** | | **71** | **71** | **0** |
 
 ---
 
@@ -230,33 +230,33 @@
 
 ## 阶段 9：Hybrid 模式和集群通信
 
-- [-] **9.1** kong-cluster crate 基础结构和 CP/DP 角色启动 `[R9]`
-  - ClusterRole 枚举，集群配置项，main.rs 角色分支启动
-  - 文件：`crates/kong-cluster/src/`, `crates/kong-config/src/lib.rs`, `crates/kong-server/src/main.rs`
+- [x] **9.1** kong-cluster crate 基础结构和 CP/DP 角色启动 `[R9]`
+  - ClusterRole 枚举、SyncStatus、DataPlaneInfo、ConfigHashes、ClusterError，main.rs 角色分支启动
+  - 文件：`crates/kong-cluster/src/lib.rs`, `crates/kong-config/src/lib.rs`, `crates/kong-server/src/main.rs`
 
-- [ ] **9.2** CP WebSocket 服务端 + Sync V1 配置推送 `[R9]`
-  - WebSocket 服务端（cluster_listen）、配置导出 GZIP 推送、DP 客户端管理、多级配置哈希
-  - 文件：`crates/kong-cluster/src/cp/`
+- [x] **9.2** CP WebSocket 服务端 + Sync V1 配置推送 `[R9]`
+  - ControlPlane（DP 注册/注销、broadcast channel 零拷贝广播、多级配置哈希、超时 DP 清理）、ClusterListenerTask（TCP listener + TLS acceptor + WS upgrade + handle_v1_connection）
+  - 文件：`crates/kong-cluster/src/cp.rs`, `crates/kong-server/src/main.rs`
 
-- [ ] **9.3** DP WebSocket 客户端 + 配置接收应用 `[R9]`
-  - WebSocket 连接 CP、全量配置应用、三线程模型、本地配置缓存
-  - 文件：`crates/kong-cluster/src/dp/ws_client.rs`, `crates/kong-cluster/src/dp/config_apply.rs`
+- [x] **9.3** DP WebSocket 客户端 + 配置接收应用 `[R9]`
+  - DataPlane（WS URL 构建、basic_info、PING 心跳、重连延迟 5-10s 随机抖动、配置应用标记）、DpConnectorTask（磁盘缓存降级 → WS 连接 → V1 payload 解压解码 → config callback → 断线重连）
+  - 文件：`crates/kong-cluster/src/dp.rs`, `crates/kong-server/src/main.rs`
 
-- [ ] **9.4** Sync V2 增量同步（JSON-RPC 2.0） `[R9]`
-  - JSON-RPC 2.0 编解码、hello/get_delta/notify_new_version/notify_validation_error、x-snappy-framed
-  - 文件：`crates/kong-cluster/src/sync_v2/`
+- [x] **9.4** Sync V2 增量同步（JSON-RPC 2.0） `[R9]`
+  - JsonRpcRequest/Response/Notification/Error、init/get_delta/notify_new_version/notify_validation_error、Snappy 压缩解压、encode/decode、handle_v2_connection
+  - 文件：`crates/kong-cluster/src/protocol.rs`, `crates/kong-server/src/main.rs`
 
-- [ ] **9.5** TLS 双向认证 + 心跳/重连 `[R9]`
-  - cluster_cert mTLS、30s PING 心跳（MD5 哈希负载）、45s 超时、5-10s 随机延迟重连
-  - 文件：`crates/kong-cluster/src/tls.rs`, `crates/kong-cluster/src/dp/heartbeat.rs`, `crates/kong-cluster/src/dp/reconnect.rs`
+- [x] **9.5** TLS 双向认证 + 心跳/重连 `[R9]`
+  - ClusterTlsConfig（shared/pki 两种模式、证书路径校验、SNI server_name）、build_cluster_tls_acceptor（OpenSSL SslAcceptor）、build_dp_tls_connector、30s PING interval + 5-10s 随机重连
+  - 文件：`crates/kong-cluster/src/tls.rs`, `crates/kong-server/src/main.rs`
 
-- [ ] **9.6** /clustering/status Admin API 端点 `[R9, R3]`
-  - GET /clustering/status 返回已连接 DP 状态，仅 control_plane 模式可用
-  - 文件：`crates/kong-admin/src/handlers/clustering.rs`
+- [x] **9.6** /clustering/status Admin API 端点 `[R9, R3]`
+  - GET /clustering/data-planes + GET /clustering/status，仅 control_plane 模式可用
+  - 文件：`crates/kong-admin/src/handlers/clustering.rs`, `crates/kong-admin/src/lib.rs`
 
-- [ ] **9.7** 集成测试 — CP/DP 通信和配置同步 `[R9]`
-  - Sync V1/V2 推送、心跳超时、断线重连、缓存配置降级
-  - 文件：`tests/cluster_e2e.rs`
+- [x] **9.7** 集成测试 — CP/DP 通信和配置同步 `[R9]`
+  - 46 个测试：CP 单元级、DP 单元级、V1/V2 协议、Kong Lua 哈希兼容、TLS 配置、E2E WebSocket（CP↔DP V1 推送、完整连接循环、断线重连、V2 init→get_delta→notify_new_version）
+  - 文件：`crates/kong-cluster/tests/integration_test.rs`
 
 ## 阶段 10：Docker 镜像构建
 
