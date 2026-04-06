@@ -2,7 +2,8 @@
 //! 将内部 OpenAI 规范化格式与 Gemini generateContent API 互转
 
 use crate::codec::{
-    ChatRequest, ChatResponse, Choice, Message, SseEvent, Usage,
+    ChatRequest, ChatResponse, Choice, FunctionCall as OpenAiFunctionCall, Message, SseEvent,
+    ToolCall, Usage,
 };
 use crate::models::{AiModel, AiProviderConfig, AuthConfig};
 use crate::provider::{AiDriver, ProviderRequest, TokenUsage, UpstreamConfig};
@@ -36,6 +37,15 @@ struct GeminiContent {
 struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,7 +114,7 @@ impl AiDriver for GeminiDriver {
                 // system → systemInstruction
                 system_instruction = Some(GeminiContent {
                     role: None,
-                    parts: vec![GeminiPart { text: Some(text) }],
+                    parts: vec![GeminiPart { text: Some(text), function_call: None }],
                 });
             } else {
                 // Gemini role 映射：assistant → model
@@ -114,7 +124,7 @@ impl AiDriver for GeminiDriver {
                 };
                 contents.push(GeminiContent {
                     role: Some(role),
-                    parts: vec![GeminiPart { text: Some(text) }],
+                    parts: vec![GeminiPart { text: Some(text), function_call: None }],
                 });
             }
         }
@@ -169,16 +179,34 @@ impl AiDriver for GeminiDriver {
             KongError::SerializationError(format!("invalid Gemini response: {}", e))
         })?;
 
-        // 提取文本
-        let text = resp
+        // 提取文本和 function calls
+        let parts = resp
             .candidates
             .as_ref()
             .and_then(|c| c.first())
             .and_then(|c| c.content.as_ref())
-            .and_then(|c| c.parts.first())
-            .and_then(|p| p.text.as_deref())
-            .unwrap_or("")
-            .to_string();
+            .map(|c| c.parts.as_slice())
+            .unwrap_or(&[]);
+
+        let text = parts
+            .iter()
+            .filter_map(|p| p.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("");
+
+        let tool_calls: Vec<ToolCall> = parts
+            .iter()
+            .filter_map(|p| p.function_call.as_ref())
+            .enumerate()
+            .map(|(i, fc)| ToolCall {
+                id: format!("call_gemini_{}", i),
+                call_type: "function".to_string(),
+                function: OpenAiFunctionCall {
+                    name: fc.name.clone(),
+                    arguments: fc.args.to_string(),
+                },
+            })
+            .collect();
 
         // finish_reason 映射
         let finish_reason = resp
@@ -213,8 +241,8 @@ impl AiDriver for GeminiDriver {
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content: Some(serde_json::Value::String(text)),
-                    tool_calls: None,
+                    content: if text.is_empty() { None } else { Some(serde_json::Value::String(text)) },
+                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                     tool_call_id: None,
                     name: None,
                 },
@@ -239,14 +267,25 @@ impl AiDriver for GeminiDriver {
             KongError::SerializationError(format!("invalid Gemini stream chunk: {}", e))
         })?;
 
-        let text = resp
+        let parts = resp
             .candidates
             .as_ref()
             .and_then(|c| c.first())
             .and_then(|c| c.content.as_ref())
-            .and_then(|c| c.parts.first())
-            .and_then(|p| p.text.as_deref())
-            .unwrap_or("");
+            .map(|c| c.parts.as_slice())
+            .unwrap_or(&[]);
+
+        let text = parts
+            .iter()
+            .filter_map(|p| p.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("");
+
+        // 检查 function calls
+        let fc_parts: Vec<&GeminiFunctionCall> = parts
+            .iter()
+            .filter_map(|p| p.function_call.as_ref())
+            .collect();
 
         let finish_reason = resp
             .candidates
@@ -259,11 +298,53 @@ impl AiDriver for GeminiDriver {
                 other => other.to_lowercase(),
             });
 
-        // 转换为 OpenAI stream chunk 格式
+        let model = resp.model_version.unwrap_or_else(|| "gemini".to_string());
+
+        // 如果有 function calls，输出 tool_calls delta
+        if !fc_parts.is_empty() {
+            let tool_calls: Vec<serde_json::Value> = fc_parts
+                .iter()
+                .enumerate()
+                .map(|(i, fc)| {
+                    serde_json::json!({
+                        "index": i,
+                        "id": format!("call_gemini_{}", i),
+                        "type": "function",
+                        "function": {
+                            "name": fc.name,
+                            "arguments": fc.args.to_string()
+                        }
+                    })
+                })
+                .collect();
+
+            // tool_calls delta 的 finish_reason 必须为 null（OpenAI 协议要求）
+            // finish_reason 由后续 [DONE] 事件通过 process_done → close_all 处理
+            let chunk = serde_json::json!({
+                "id": "gemini-stream",
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": serde_json::Value::Null
+                }]
+            });
+
+            return Ok(Some(SseEvent {
+                event_type: "message".to_string(),
+                data: chunk.to_string(),
+                id: None,
+            }));
+        }
+
+        // 文本内容
         let chunk = serde_json::json!({
             "id": "gemini-stream",
             "object": "chat.completion.chunk",
-            "model": resp.model_version.unwrap_or_else(|| "gemini".to_string()),
+            "model": model,
             "choices": [{
                 "index": 0,
                 "delta": {
