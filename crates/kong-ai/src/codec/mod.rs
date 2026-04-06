@@ -2,6 +2,7 @@
 
 pub mod anthropic_format;
 pub mod openai_format;
+pub mod responses_format;
 pub mod sse;
 
 pub use openai_format::*;

@@ -2,7 +2,7 @@
 //! 将内部 OpenAI 规范化格式与 Anthropic Messages API 互转
 
 use crate::codec::{
-    ChatRequest, ChatResponse, Choice, Message, SseEvent, Usage,
+    ChatRequest, ChatResponse, Choice, FunctionCall, Message, SseEvent, ToolCall, Usage,
 };
 use crate::models::{AiModel, AiProviderConfig, AuthConfig};
 use crate::provider::{AiDriver, ProviderRequest, TokenUsage, UpstreamConfig};
@@ -58,6 +58,10 @@ struct AnthropicContentBlock {
     #[serde(rename = "type")]
     block_type: String,
     text: Option<String>,
+    // tool_use 类型的字段
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +167,30 @@ impl AiDriver for AnthropicDriver {
             .collect::<Vec<_>>()
             .join("");
 
+        // 提取 tool_use content blocks → OpenAI tool_calls
+        let tool_calls: Vec<ToolCall> = resp
+            .content
+            .iter()
+            .filter(|b| b.block_type == "tool_use")
+            .filter_map(|b| {
+                let id = b.id.as_ref()?;
+                let name = b.name.as_ref()?;
+                let args = b
+                    .input
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                Some(ToolCall {
+                    id: id.clone(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: args,
+                    },
+                })
+            })
+            .collect();
+
         // stop_reason 映射
         let finish_reason = resp.stop_reason.map(|r| match r.as_str() {
             "end_turn" => "stop".to_string(),
@@ -182,8 +210,8 @@ impl AiDriver for AnthropicDriver {
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content: Some(serde_json::Value::String(text)),
-                    tool_calls: None,
+                    content: if text.is_empty() { None } else { Some(serde_json::Value::String(text)) },
+                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                     tool_call_id: None,
                     name: None,
                 },
@@ -239,37 +267,136 @@ impl AiDriver for AnthropicDriver {
                     id: None,
                 }))
             }
-            "content_block_start" | "ping" => {
-                // 跳过这些事件，不需要转换为 OpenAI 格式
+            "content_block_start" => {
+                // 检查是否为 tool_use 类型的 content block
+                let block_type = data
+                    .get("content_block")
+                    .and_then(|b| b.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("text");
+
+                if block_type == "tool_use" {
+                    // tool_use block 开始，提取 id 和 name
+                    let block_index = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    let tool_id = data
+                        .get("content_block")
+                        .and_then(|b| b.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("call_unknown");
+                    let tool_name = data
+                        .get("content_block")
+                        .and_then(|b| b.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    // 输出 tool_call 的初始 delta（包含 id、type、function.name）
+                    let chunk = serde_json::json!({
+                        "id": "msg_stream",
+                        "object": "chat.completion.chunk",
+                        "model": "unknown",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": block_index,
+                                    "id": tool_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": ""
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    });
+
+                    return Ok(Some(SseEvent {
+                        event_type: "message".to_string(),
+                        data: chunk.to_string(),
+                        id: None,
+                    }));
+                }
+                // text block 开始，跳过
                 Ok(None)
             }
+            "ping" => Ok(None),
             "content_block_delta" => {
-                let text = data
+                let delta_type = data
                     .get("delta")
-                    .and_then(|d| d.get("text"))
+                    .and_then(|d| d.get("type"))
                     .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                    .unwrap_or("text_delta");
 
-                if text.is_empty() {
-                    return Ok(None);
+                match delta_type {
+                    "text_delta" => {
+                        let text = data
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+
+                        if text.is_empty() {
+                            return Ok(None);
+                        }
+
+                        let chunk = serde_json::json!({
+                            "id": "msg_stream",
+                            "object": "chat.completion.chunk",
+                            "model": "unknown",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": text },
+                                "finish_reason": null
+                            }]
+                        });
+
+                        Ok(Some(SseEvent {
+                            event_type: "message".to_string(),
+                            data: chunk.to_string(),
+                            id: None,
+                        }))
+                    }
+                    "input_json_delta" => {
+                        // tool_use 的参数增量
+                        let partial_json = data
+                            .get("delta")
+                            .and_then(|d| d.get("partial_json"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if partial_json.is_empty() {
+                            return Ok(None);
+                        }
+
+                        let block_index = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+
+                        let chunk = serde_json::json!({
+                            "id": "msg_stream",
+                            "object": "chat.completion.chunk",
+                            "model": "unknown",
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": block_index,
+                                        "function": {
+                                            "arguments": partial_json
+                                        }
+                                    }]
+                                },
+                                "finish_reason": null
+                            }]
+                        });
+
+                        Ok(Some(SseEvent {
+                            event_type: "message".to_string(),
+                            data: chunk.to_string(),
+                            id: None,
+                        }))
+                    }
+                    _ => Ok(None),
                 }
-
-                let chunk = serde_json::json!({
-                    "id": "msg_stream",
-                    "object": "chat.completion.chunk",
-                    "model": "unknown",
-                    "choices": [{
-                        "index": 0,
-                        "delta": { "content": text },
-                        "finish_reason": null
-                    }]
-                });
-
-                Ok(Some(SseEvent {
-                    event_type: "message".to_string(),
-                    data: chunk.to_string(),
-                    id: None,
-                }))
             }
             "content_block_stop" => {
                 // 跳过
@@ -284,6 +411,7 @@ impl AiDriver for AnthropicDriver {
                     .map(|r| match r {
                         "end_turn" => "stop",
                         "max_tokens" => "length",
+                        "tool_use" => "tool_calls",
                         other => other,
                     })
                     .unwrap_or("stop");

@@ -18,7 +18,8 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| **合计** | | **70** | **63** | **7** |
+| 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
+| **合计** | | **71** | **64** | **7** |
 
 ---
 
@@ -350,6 +351,17 @@
   - ISSUE-013: preload 后保留 body buffer 避免重新缓冲触发超时
   - 修复 4 个路由器单元测试缺失 scheme 字段的已有 bug
   - 文件：`crates/kong-router/src/traditional.rs`, `crates/kong-proxy/src/balancer.rs`, `crates/kong-proxy/src/lib.rs`
+
+## 阶段 15：AI Gateway — v1/responses 协议支持
+
+- [x] **15.1** ai-proxy 支持 v1/responses API `[R1, R5]`
+  - 分层架构：OpenAI pass-through 快速通道 + 跨 provider 降级/升级转换路径
+  - 修复 Anthropic/Gemini provider 流式+非流式 function calling / tool_calls 支持
+  - 新增 responses_format.rs 编解码器（请求降级、响应升级、流式事件状态机）
+  - 支持 4 个 provider：OpenAI（pass-through）、Anthropic、Gemini、OpenAI-compat（translation）
+  - Admin API schema 支持 route_type=llm/v1/responses
+  - X-Kong-AI-Route-Type 响应头（调试辅助）
+  - 文件：`crates/kong-ai/src/codec/responses_format.rs`（新建）、`crates/kong-ai/src/plugins/ai_proxy.rs`、`crates/kong-ai/src/plugins/context.rs`、`crates/kong-ai/src/provider/anthropic.rs`、`crates/kong-ai/src/provider/gemini.rs`
 
 ### 已知问题（QA 发现，全部已修复 ✅）
 

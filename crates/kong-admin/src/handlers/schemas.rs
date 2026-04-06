@@ -243,7 +243,7 @@ fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
                         {"log_payloads": {"type": "boolean", "default": false}},
                         {"log_statistics": {"type": "boolean", "default": true}},
                     ]}},
-                    {"route_type": {"type": "string", "default": "llm/v1/chat", "one_of": ["llm/v1/chat", "llm/v1/completions"]}},
+                    {"route_type": {"type": "string", "default": "llm/v1/chat", "one_of": ["llm/v1/chat", "llm/v1/completions", "llm/v1/responses"]}},
                     {"llm_format": {"type": "string", "one_of": ["openai", "anthropic"]}},
                     {"max_request_body_size": {"type": "integer", "default": 128}},
                     {"model_name_header": {"type": "boolean", "default": true}},

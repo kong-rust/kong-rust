@@ -11,6 +11,7 @@ use kong_core::error::{KongError, Result};
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 
 use crate::codec::anthropic_format::AnthropicCodec;
+use crate::codec::responses_format::{self, ResponsesEventState, ResponsesRequest};
 use crate::codec::ChatRequest;
 use crate::models::{AiModel, AiProviderConfig};
 use crate::plugins::context::{AiRequestState, ClientProtocol};
@@ -291,6 +292,42 @@ impl Default for AiProxyPlugin {
     }
 }
 
+// ============ 辅助函数 ============
+
+/// 重映射 OpenAI chat chunk 中的 tool_calls index
+/// Anthropic 的 content_block index 是全局索引（含 text block），
+/// 需要转换为 tool_calls 数组内的 0-based 本地索引
+fn remap_tool_call_index(data: &str, counter: &mut u32) -> Option<String> {
+    let mut chunk: serde_json::Value = serde_json::from_str(data).ok()?;
+    let tool_calls = chunk
+        .get_mut("choices")
+        .and_then(|c| c.as_array_mut())
+        .and_then(|a| a.first_mut())
+        .and_then(|c| c.get_mut("delta"))
+        .and_then(|d| d.get_mut("tool_calls"))
+        .and_then(|tc| tc.as_array_mut())?;
+
+    let mut modified = false;
+    for tc in tool_calls {
+        // 有 id 字段 = 新 tool_call 开始
+        if tc.get("id").and_then(|v| v.as_str()).is_some() {
+            tc["index"] = serde_json::json!(*counter);
+            *counter += 1;
+            modified = true;
+        } else if tc.get("index").is_some() {
+            // delta 续传 → 属于最近一个 tool_call
+            tc["index"] = serde_json::json!(counter.saturating_sub(1));
+            modified = true;
+        }
+    }
+
+    if modified {
+        Some(serde_json::to_string(&chunk).ok()?)
+    } else {
+        None
+    }
+}
+
 // ============ PluginHandler 实现 ============
 
 #[async_trait]
@@ -334,20 +371,57 @@ impl PluginHandler for AiProxyPlugin {
             return Ok(());
         }
 
-        // 根据 client_protocol 选择解码方式（兼容 llm_format）
+        // v1/responses 路由类型的特殊处理
+        let is_responses_route = cfg.route_type == "llm/v1/responses";
+        let mut responses_request: Option<ResponsesRequest> = None;
+        let mut stripped_tools = None;
+
+        // 根据 route_type 和 client_protocol 选择解码方式
         let effective_protocol = cfg.effective_client_protocol();
-        let mut chat_request: ChatRequest = match effective_protocol {
-            "anthropic" => {
-                AnthropicCodec::decode_request(body_str).map_err(|e| KongError::PluginError {
-                    plugin_name: "ai-proxy".to_string(),
-                    message: format!("invalid Anthropic chat request body: {}", e),
-                })?
-            }
-            _ => {
+        let mut chat_request: ChatRequest = if is_responses_route {
+            // v1/responses：解析为 ResponsesRequest，然后降级为 ChatRequest
+            let req: ResponsesRequest =
                 serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
+                    message: format!("invalid v1/responses request body: {}", e),
+                })?;
+
+            // 检查 background 参数
+            if req.background == Some(true) {
+                ctx.short_circuited = true;
+                ctx.exit_status = Some(400);
+                ctx.exit_body = Some(
+                    serde_json::to_string(&responses_format::responses_error(
+                        "invalid_request_error",
+                        "background mode is not supported",
+                    ))
+                    .unwrap_or_default(),
+                );
+                return Ok(());
+            }
+
+            let (chat_req, stripped) = responses_format::responses_to_chat(&req).map_err(|e| {
+                KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to convert responses request: {}", e),
+                }
+            })?;
+
+            stripped_tools = Some(stripped);
+            responses_request = Some(req);
+            chat_req
+        } else {
+            match effective_protocol {
+                "anthropic" => {
+                    AnthropicCodec::decode_request(body_str).map_err(|e| KongError::PluginError {
+                        plugin_name: "ai-proxy".to_string(),
+                        message: format!("invalid Anthropic chat request body: {}", e),
+                    })?
+                }
+                _ => serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
                     message: format!("invalid chat request body: {}", e),
-                })?
+                })?,
             }
         };
 
@@ -459,6 +533,80 @@ impl PluginHandler for AiProxyPlugin {
             (driver, ai_model, provider_config)
         };
 
+        // 6.5 v1/responses pass-through 检测
+        // 如果是 v1/responses 且 provider 是 OpenAI，直接 pass-through（不做格式转换）
+        let is_responses_pass_through =
+            is_responses_route && driver.provider_type() == "openai";
+
+        if is_responses_pass_through {
+            // Pass-through：直接转发原始请求体到 OpenAI /v1/responses
+            // 不走 ChatRequest 转换管线，不调用 driver.transform_request()
+            let stream_mode = responses_request
+                .as_ref()
+                .and_then(|r| r.stream)
+                .unwrap_or(false);
+
+            let upstream = driver
+                .configure_upstream(&ai_model, &provider_config, stream_mode)
+                .map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to configure upstream: {}", e),
+                })?;
+
+            // 覆盖上游路径为 /v1/responses（configure_upstream 默认返回 /v1/chat/completions）
+            ctx.upstream_target_host = Some(upstream.host);
+            ctx.upstream_target_port = Some(upstream.port);
+            ctx.upstream_scheme = Some(upstream.scheme);
+            ctx.upstream_path = Some("/v1/responses".to_string());
+            ctx.upstream_body = Some(body_str.to_string());
+
+            // 设置上游请求头
+            ctx.upstream_headers_to_set
+                .push(("Content-Type".to_string(), "application/json".to_string()));
+            for (k, v) in &upstream.headers {
+                ctx.upstream_headers_to_set.push((k.clone(), v.clone()));
+            }
+
+            debug!(
+                "ai-proxy access: v1/responses pass-through to OpenAI, model={}, stream={}",
+                ai_model.model_name, stream_mode
+            );
+
+            let ai_state = AiRequestState {
+                driver,
+                model: ai_model,
+                provider_config,
+                stream_mode,
+                client_protocol: ClientProtocol::OpenAi,
+                sse_parser: if stream_mode {
+                    Some(crate::codec::SseParser::new(crate::codec::SseFormat::Standard))
+                } else {
+                    None
+                },
+                usage: TokenUsage::default(),
+                response_buffer: None,
+                request_start: Instant::now(),
+                ttft: None,
+                route_type: cfg.route_type.clone(),
+                is_first_stream_event: true,
+                responses_mode: false,
+                responses_pass_through: true,
+                responses_event_state: None,
+                stripped_tools: None,
+                stream_tool_call_count: 0,
+            };
+            ctx.extensions.insert(ai_state);
+            ctx.upstream_force_http1 = true;
+
+            // 添加 X-Kong-AI-Route-Type 响应头
+            ctx.response_headers_to_set.push((
+                "X-Kong-AI-Route-Type".to_string(),
+                "responses-pass-through".to_string(),
+            ));
+
+            return Ok(());
+        }
+
         // 7. 确定流式模式（需在 configure_upstream 之前，Gemini 依赖此参数选择 API 端点）
         let stream_requested = chat_request.stream == Some(true);
         let stream_mode = match cfg.response_streaming.as_str() {
@@ -515,6 +663,7 @@ impl PluginHandler for AiProxyPlugin {
         );
 
         // 11. 存储跨阶段状态
+        let responses_mode = is_responses_route;
         let ai_state = AiRequestState {
             driver,
             model: ai_model,
@@ -528,9 +677,26 @@ impl PluginHandler for AiProxyPlugin {
             ttft: None,
             route_type: cfg.route_type.clone(),
             is_first_stream_event: true,
+            responses_mode,
+            responses_pass_through: false,
+            responses_event_state: if responses_mode {
+                Some(ResponsesEventState::new())
+            } else {
+                None
+            },
+            stripped_tools,
+            stream_tool_call_count: 0,
         };
 
         ctx.extensions.insert(ai_state);
+
+        // 11.5 添加 X-Kong-AI-Route-Type 响应头
+        if responses_mode {
+            ctx.response_headers_to_set.push((
+                "X-Kong-AI-Route-Type".to_string(),
+                "responses-translation".to_string(),
+            ));
+        }
 
         // 12. Force HTTP/1.1 for AI upstream connections — 强制 AI 上游使用 HTTP/1.1
         // Avoid H2 connection pool multiplexing issues with AI providers (rate-limit GOAWAY, stream stalls)
@@ -598,7 +764,179 @@ impl PluginHandler for AiProxyPlugin {
             None => return Ok(()),
         };
 
-        // ---- 流式处理分支 ----
+        // ---- v1/responses pass-through 分支：只提取 usage，不做格式转换 ----
+        if state.responses_pass_through {
+            if state.stream_mode {
+                // 流式 pass-through：通过 SSE parser 提取 usage（从 response.completed 事件）
+                // 使用带缓冲的 SseParser 处理跨 chunk 边界的 SSE 事件
+                let mut events = Vec::new();
+                if let Some(chunk) = body.as_ref() {
+                    if let Ok(chunk_str) = std::str::from_utf8(chunk) {
+                        if let Some(ref mut parser) = state.sse_parser {
+                            events.extend(parser.feed(chunk_str));
+                        }
+                    }
+                }
+                if end_of_stream {
+                    if let Some(ref mut parser) = state.sse_parser {
+                        events.extend(parser.flush());
+                    }
+                }
+                // 从 SSE 事件中提取 usage（response.completed 事件中 usage 嵌套在 response 内）
+                for event in &events {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                        // 优先查找顶层 usage，回退查找 response.usage
+                        let usage = val
+                            .get("usage")
+                            .or_else(|| val.get("response").and_then(|r| r.get("usage")));
+                        if let Some(usage) = usage {
+                            let input = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let output = usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            state.usage = TokenUsage {
+                                prompt_tokens: Some(input),
+                                completion_tokens: Some(output),
+                                total_tokens: Some(input + output),
+                            };
+                        }
+                    }
+                }
+            } else {
+                // 非流式 pass-through：收集完整响应体，解析 JSON 提取 usage
+                if let Some(chunk) = body.as_ref() {
+                    let chunk_str = String::from_utf8_lossy(chunk);
+                    match state.response_buffer.as_mut() {
+                        Some(buf) => buf.push_str(&chunk_str),
+                        None => state.response_buffer = Some(chunk_str.into_owned()),
+                    }
+                }
+                if end_of_stream {
+                    if let Some(ref buf) = state.response_buffer {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(buf) {
+                            if let Some(usage) = data.get("usage") {
+                                let input = usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let output = usage
+                                    .get("output_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                state.usage = TokenUsage {
+                                    prompt_tokens: Some(input),
+                                    completion_tokens: Some(output),
+                                    total_tokens: Some(input + output),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            // 响应体原样透传，不做任何修改
+            return Ok(());
+        }
+
+        // ---- v1/responses 翻译模式 — 流式分支 ----
+        if state.responses_mode && state.stream_mode {
+            // 解析 SSE 事件：feed chunk（如有）+ end_of_stream 时 flush
+            let mut events = Vec::new();
+            if let Some(body_bytes) = body.as_ref() {
+                // invalid UTF-8 时跳过本 chunk 的 feed，但不 return（确保后续 flush 仍执行）
+                if let Ok(chunk) = std::str::from_utf8(body_bytes) {
+                    if let Some(ref mut parser) = state.sse_parser {
+                        events.extend(parser.feed(chunk));
+                    }
+                }
+            }
+            // flush 必须在 body 检查外部，确保 body=None + end_of_stream=true 时也能触发
+            if end_of_stream {
+                if let Some(ref mut parser) = state.sse_parser {
+                    events.extend(parser.flush());
+                }
+            }
+
+            if !events.is_empty() && state.ttft.is_none() {
+                state.ttft = Some(std::time::Instant::now());
+            }
+
+            let mut output = String::new();
+
+            for event in &events {
+                // 提取 usage
+                if let Some(usage) = state.driver.extract_stream_usage(event) {
+                    if let Some(pt) = usage.prompt_tokens {
+                        state.usage.prompt_tokens = Some(pt);
+                    }
+                    if let Some(ct) = usage.completion_tokens {
+                        state.usage.completion_tokens = Some(ct);
+                    }
+                }
+
+                if event.is_done() {
+                    // [DONE] → 注入 usage 后通过状态机生成 response.completed 事件
+                    if let Some(ref mut es) = state.responses_event_state {
+                        let pt = state.usage.prompt_tokens.unwrap_or(0);
+                        let ct = state.usage.completion_tokens.unwrap_or(0);
+                        es.usage = crate::codec::responses_format::ResponsesUsage {
+                            input_tokens: pt,
+                            output_tokens: ct,
+                            total_tokens: pt + ct,
+                        };
+                        for e in es.process_done() {
+                            output.push_str(&e);
+                        }
+                    }
+                    continue;
+                }
+
+                // 通过 driver 转换事件格式 → OpenAI chat chunk
+                match state.driver.transform_stream_event(event, &state.model) {
+                    Ok(Some(mut transformed)) => {
+                        // 重映射 tool_call index（Anthropic 全局 → 本地 0-based）
+                        if let Some(remapped) = remap_tool_call_index(
+                            &transformed.data,
+                            &mut state.stream_tool_call_count,
+                        ) {
+                            transformed.data = remapped;
+                        }
+                        // 将 OpenAI chat chunk 通过状态机转换为 responses 事件
+                        if let Some(ref mut es) = state.responses_event_state {
+                            for e in es.process_chat_chunk(&transformed.data) {
+                                output.push_str(&e);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("ai-proxy body_filter (responses): SSE transform error: {}", e);
+                    }
+                }
+            }
+
+            if !output.is_empty() {
+                *body = Some(bytes::Bytes::from(output));
+            } else {
+                // 始终替换原始 body，防止上游原始数据（如 "data: [DONE]"）泄漏到客户端
+                *body = Some(bytes::Bytes::new());
+            }
+
+            if end_of_stream {
+                let pt = state.usage.prompt_tokens.unwrap_or(0);
+                let ct = state.usage.completion_tokens.unwrap_or(0);
+                if pt > 0 || ct > 0 {
+                    state.usage.total_tokens = Some(pt + ct);
+                }
+            }
+
+            return Ok(());
+        }
+
+        // ---- 流式处理分支（chat completions / Anthropic 客户端协议）----
         if state.stream_mode {
             if let Some(body_bytes) = body.as_ref() {
                 let chunk = match std::str::from_utf8(body_bytes) {
@@ -674,7 +1012,14 @@ impl PluginHandler for AiProxyPlugin {
 
                     // 通过 driver 转换事件格式（OpenAI 直通，Anthropic provider 需转换）
                     match state.driver.transform_stream_event(event, &state.model) {
-                        Ok(Some(transformed)) => {
+                        Ok(Some(mut transformed)) => {
+                            // 重映射 tool_call index（Anthropic 全局 → 本地 0-based）
+                            if let Some(remapped) = remap_tool_call_index(
+                                &transformed.data,
+                                &mut state.stream_tool_call_count,
+                            ) {
+                                transformed.data = remapped;
+                            }
                             // 如果客户端协议为 Anthropic，进一步编码为 Anthropic SSE 格式
                             if is_anthropic_client {
                                 let is_first = state.is_first_stream_event;
@@ -726,7 +1071,71 @@ impl PluginHandler for AiProxyPlugin {
             return Ok(());
         }
 
-        // ---- 非流式处理分支 ----
+        // ---- v1/responses 翻译模式 — 非流式分支 ----
+        if state.responses_mode && !state.stream_mode {
+            // 收集响应体
+            if let Some(chunk) = body.as_ref() {
+                let chunk_str = String::from_utf8_lossy(chunk);
+                match state.response_buffer.as_mut() {
+                    Some(buf) => buf.push_str(&chunk_str),
+                    None => state.response_buffer = Some(chunk_str.into_owned()),
+                }
+            }
+
+            if end_of_stream {
+                let full_body = state.response_buffer.take().unwrap_or_default();
+                let status = ctx.response_status.unwrap_or(200);
+
+                // 提取 usage
+                if let Some(usage) = state.driver.extract_usage(&full_body) {
+                    state.usage = usage;
+                }
+
+                // 转换响应
+                match state
+                    .driver
+                    .transform_response(status, &ctx.response_headers, &full_body, &state.model)
+                {
+                    Ok(chat_response) => {
+                        // ChatResponse → ResponsesResponse
+                        let stripped = state
+                            .stripped_tools
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_default();
+                        let responses_resp =
+                            responses_format::chat_to_responses(&chat_response, &stripped);
+                        let json = serde_json::to_string(&responses_resp).unwrap_or_default();
+                        *body = Some(Bytes::from(json));
+
+                        ctx.response_headers_to_set.push((
+                            "Content-Type".to_string(),
+                            "application/json".to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        warn!("ai-proxy body_filter (responses): transform error: {}", e);
+                        // 返回 responses 格式的错误
+                        let err_resp = responses_format::responses_error(
+                            "server_error",
+                            &format!("upstream provider error: {}", e),
+                        );
+                        let json = serde_json::to_string(&err_resp).unwrap_or_default();
+                        *body = Some(Bytes::from(json));
+                        ctx.response_headers_to_set.push((
+                            "Content-Type".to_string(),
+                            "application/json".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                *body = None;
+            }
+
+            return Ok(());
+        }
+
+        // ---- 非流式处理分支（chat completions）----
         // 非流式：收集响应体
         if let Some(chunk) = body.as_ref() {
             let chunk_str = String::from_utf8_lossy(chunk);
