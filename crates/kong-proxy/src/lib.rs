@@ -10,6 +10,7 @@
 pub mod access_log;
 pub mod balancer;
 pub mod dns;
+pub mod grpc;
 pub mod health;
 pub mod phases;
 pub mod spillable_buffer;
@@ -52,6 +53,8 @@ pub struct KongCtx {
     pub upstream_tls: bool,
     /// Whether upstream is gRPC (needs h2c for plaintext) — 上游是否为 gRPC（明文时需要 h2c）
     pub upstream_is_grpc: bool,
+    /// Whether the incoming request is gRPC (content-type: application/grpc) — 入站请求是否为 gRPC
+    pub is_grpc_request: bool,
     /// Upstream SNI — 上游 SNI
     pub upstream_sni: String,
     /// Plugin context — 插件上下文
@@ -507,6 +510,30 @@ impl KongProxy {
         }
     }
 
+    /// Send framework-level error — auto-detect gRPC vs HTTP format — 发送框架级错误 — 自动检测 gRPC 或 HTTP 格式
+    async fn send_error_or_grpc(
+        &self,
+        session: &mut Session,
+        status_code: u16,
+        message: &str,
+        request_id: &str,
+        is_grpc: bool,
+    ) -> pingora_core::Result<bool> {
+        if is_grpc {
+            grpc::send_grpc_error(
+                session,
+                status_code,
+                message,
+                Some(request_id),
+                self.has_header_feature("x-kong-request-id"),
+            )
+            .await
+        } else {
+            self.send_error_response(session, status_code, message, Some(request_id))
+                .await
+        }
+    }
+
     /// 发送框架级错误响应（JSON 格式，受配置控制）
     async fn send_error_response(
         &self,
@@ -619,6 +646,7 @@ impl ProxyHttp for KongProxy {
             upstream_addr: None,
             upstream_tls: false,
             upstream_is_grpc: false,
+            is_grpc_request: false,
             upstream_sni: String::new(),
             plugin_ctx: RequestCtx::new(),
             resolved_plugins: Arc::new(Vec::new()),
@@ -647,6 +675,9 @@ impl ProxyHttp for KongProxy {
             .unwrap_or(8000);
         let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx, default_port);
 
+        // 1.5 Detect gRPC request (content-type: application/grpc) — 检测 gRPC 请求
+        ctx.is_grpc_request = grpc::is_grpc_request(session);
+
         // 2. Route matching — 路由匹配
         let route_match = {
             let router = self
@@ -660,7 +691,7 @@ impl ProxyHttp for KongProxy {
             Some(rm) => rm,
             None => {
                 return self
-                    .send_error_response(session, 404, "no Route matched with those values", Some(&ctx.request_id))
+                    .send_error_or_grpc(session, 404, "no Route matched with those values", &ctx.request_id, ctx.is_grpc_request)
                     .await;
             }
         };
@@ -723,7 +754,7 @@ impl ProxyHttp for KongProxy {
         {
             tracing::error!("请求体预读取失败: {}", err);
             return self
-                .send_error_response(session, 400, "Bad request body", Some(&ctx.request_id))
+                .send_error_or_grpc(session, 400, "Bad request body", &ctx.request_id, ctx.is_grpc_request)
                 .await;
         }
 
@@ -731,7 +762,7 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
             return self
-                .send_error_response(session, 500, "An unexpected error occurred", Some(&ctx.request_id))
+                .send_error_or_grpc(session, 500, "An unexpected error occurred", &ctx.request_id, ctx.is_grpc_request)
                 .await;
         }
 
@@ -749,7 +780,7 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
             return self
-                .send_error_response(session, 500, "An unexpected error occurred", Some(&ctx.request_id))
+                .send_error_or_grpc(session, 500, "An unexpected error occurred", &ctx.request_id, ctx.is_grpc_request)
                 .await;
         }
 
@@ -768,7 +799,7 @@ impl ProxyHttp for KongProxy {
             None => {
                 ctx.resolved_plugins = resolved_plugins;
                 return self
-                    .send_error_response(session, 503, "no Service found for the requested route", Some(&ctx.request_id))
+                    .send_error_or_grpc(session, 503, "no Service found for the requested route", &ctx.request_id, ctx.is_grpc_request)
                     .await;
             }
         };
@@ -776,7 +807,7 @@ impl ProxyHttp for KongProxy {
         if !service.enabled {
             ctx.resolved_plugins = resolved_plugins;
             return self
-                .send_error_response(session, 503, "Service unavailable", Some(&ctx.request_id))
+                .send_error_or_grpc(session, 503, "Service unavailable", &ctx.request_id, ctx.is_grpc_request)
                 .await;
         }
 
@@ -1042,7 +1073,10 @@ impl ProxyHttp for KongProxy {
         {
             upstream_request.remove_header("keep-alive");
             upstream_request.remove_header("proxy-authenticate");
-            upstream_request.remove_header("trailer");
+            // gRPC uses HTTP/2 trailers for grpc-status/grpc-message; do not strip — gRPC 使用 HTTP/2 trailer 传输 grpc-status/grpc-message，不能剥离
+            if !ctx.is_grpc_request {
+                upstream_request.remove_header("trailer");
+            }
         }
 
         // 5. If a plugin replaced the upstream body, fix Content-Length for the replayed payload. — 若插件替换了上游请求体，修正回放 payload 的 Content-Length。
@@ -1305,12 +1339,15 @@ impl ProxyHttp for KongProxy {
             return Ok(());
         }
 
-        // Default buffering=true (Kong's default) — 默认 buffering=true（Kong 默认行为）
-        let buffering = ctx
-            .route_match
-            .as_ref()
-            .map(|rm| rm.request_buffering)
-            .unwrap_or(true);
+        // Default buffering=true (Kong's default), but gRPC always streams — 默认 buffering=true（Kong 默认），但 gRPC 始终流式
+        let buffering = if ctx.is_grpc_request {
+            false // gRPC streaming: never buffer — gRPC 流式：永不缓冲
+        } else {
+            ctx.route_match
+                .as_ref()
+                .map(|rm| rm.request_buffering)
+                .unwrap_or(true)
+        };
 
         if !buffering {
             // Pass through (Pingora default streaming behavior) — 直接透传（Pingora 默认流式行为）
@@ -1363,7 +1400,10 @@ impl ProxyHttp for KongProxy {
         // Remove hop-by-hop headers from upstream response — 移除上游响应中的逐跳头
         upstream_response.headers.remove("keep-alive");
         upstream_response.headers.remove("proxy-authenticate");
-        upstream_response.headers.remove("trailer");
+        // gRPC uses HTTP/2 trailers for grpc-status/grpc-message; do not strip — gRPC 使用 HTTP/2 trailer，不能剥离
+        if !ctx.is_grpc_request {
+            upstream_response.headers.remove("trailer");
+        }
 
         // Populate response snapshot into RequestCtx — 填充响应快照到 RequestCtx
         ctx.plugin_ctx.response_status = Some(upstream_response.status.as_u16());
@@ -1476,13 +1516,17 @@ impl ProxyHttp for KongProxy {
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Option<std::time::Duration>> {
         // 1. Response buffering — 响应体缓冲
-        // Plugin-requested buffering must force full upstream response collection. — 插件显式请求的 buffering 必须强制启用完整上游响应缓冲。
-        let buffering = ctx
-            .route_match
-            .as_ref()
-            .map(|rm| rm.response_buffering)
-            .unwrap_or(true)
-            || ctx.plugin_ctx.request_buffering_enabled;
+        // gRPC always streams; plugin-requested buffering must force full upstream response collection.
+        // gRPC 始终流式；插件显式请求的 buffering 必须强制启用完整上游响应缓冲。
+        let buffering = if ctx.is_grpc_request {
+            false // gRPC streaming: never buffer responses — gRPC 流式：永不缓冲响应
+        } else {
+            ctx.route_match
+                .as_ref()
+                .map(|rm| rm.response_buffering)
+                .unwrap_or(true)
+                || ctx.plugin_ctx.request_buffering_enabled
+        };
 
         if buffering {
             // Collect chunks into spillable buffer — 收集 chunk 到可溢出缓冲区

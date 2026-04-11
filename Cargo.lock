@@ -1818,6 +1818,7 @@ dependencies = [
  "kong-lua-bridge",
  "kong-plugin-system",
  "kong-router",
+ "percent-encoding",
  "pingora",
  "pingora-core",
  "pingora-http",

@@ -67,3 +67,4 @@ kong-manager/bundle-analyzer/
 # AI 工具
 # ========================
 .gstack/
+.omc/
