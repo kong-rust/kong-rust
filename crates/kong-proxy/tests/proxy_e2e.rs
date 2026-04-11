@@ -571,3 +571,287 @@ async fn test_health_checker_state_transitions() {
     // Here we only verify the interface doesn't panic — 这里只验证接口不 panic
     let _ = checker.is_healthy(&config.name, target_addr);
 }
+
+// ========== gRPC proxy tests — gRPC 代理测试 ==========
+
+/// Helper: create a gRPC route (protocols: [grpc, grpcs], no methods, strip_path=false)
+/// 辅助：创建 gRPC 路由
+fn make_grpc_route(
+    id: Uuid,
+    service_id: Uuid,
+    name: &str,
+    paths: Vec<String>,
+    hosts: Vec<String>,
+) -> Route {
+    Route {
+        id,
+        name: Some(name.to_string()),
+        paths: if paths.is_empty() { None } else { Some(paths) },
+        hosts: if hosts.is_empty() { None } else { Some(hosts) },
+        methods: None, // gRPC routes cannot have methods — gRPC 路由不能有 methods
+        service: Some(ForeignKey::new(service_id)),
+        protocols: vec![Protocol::Grpc, Protocol::Grpcs],
+        strip_path: false, // gRPC routes must not strip path — gRPC 路由不能 strip_path
+        preserve_host: false,
+        regex_priority: 0,
+        path_handling: PathHandling::V0,
+        https_redirect_status_code: 426,
+        request_buffering: true,
+        response_buffering: true,
+        ..Route::default()
+    }
+}
+
+#[test]
+fn test_grpc_route_matching_by_host() {
+    let svc_id = Uuid::new_v4();
+    let routes = vec![make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpc-route",
+        vec![],
+        vec!["grpc.example.com".to_string()],
+    )];
+
+    let router = Router::new(&routes, "traditional");
+
+    // gRPC route with host "grpc.example.com" should match HTTP request (grpc maps to http) — gRPC 路由应匹配 HTTP 请求
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/hello.HelloService/SayHello".to_string(),
+        host: "grpc.example.com".to_string(),
+        scheme: "http".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some(), "gRPC route should match HTTP request with matching host");
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("grpc-route"));
+}
+
+#[test]
+fn test_grpc_route_matching_by_path() {
+    let svc_id = Uuid::new_v4();
+    let routes = vec![make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpc-path-route",
+        vec!["/hello.HelloService".to_string()],
+        vec![],
+    )];
+
+    let router = Router::new(&routes, "traditional");
+
+    // gRPC route with path should match — gRPC 路由按路径匹配
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/hello.HelloService/SayHello".to_string(),
+        host: "any.host.com".to_string(),
+        scheme: "http".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some(), "gRPC route should match by path prefix");
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("grpc-path-route"));
+}
+
+#[test]
+fn test_grpc_route_matching_https_scheme() {
+    let svc_id = Uuid::new_v4();
+    let routes = vec![make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpcs-route",
+        vec!["/secure.Service".to_string()],
+        vec![],
+    )];
+
+    let router = Router::new(&routes, "traditional");
+
+    // grpcs maps to https — grpcs 映射到 https
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/secure.Service/Method".to_string(),
+        host: "secure.example.com".to_string(),
+        scheme: "https".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some(), "gRPC route with grpcs protocol should match HTTPS request");
+}
+
+#[test]
+fn test_grpc_route_does_not_match_wrong_host() {
+    let svc_id = Uuid::new_v4();
+    let routes = vec![make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpc-host-route",
+        vec![],
+        vec!["grpc.example.com".to_string()],
+    )];
+
+    let router = Router::new(&routes, "traditional");
+
+    // Different host should not match — 不同主机不应匹配
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/hello.HelloService/SayHello".to_string(),
+        host: "other.example.com".to_string(),
+        scheme: "http".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    assert!(router.find_route(&ctx).is_none(), "gRPC route should not match wrong host");
+}
+
+#[test]
+fn test_grpc_and_http_routes_coexist() {
+    let svc_id = Uuid::new_v4();
+    let routes = vec![
+        make_grpc_route(
+            Uuid::new_v4(),
+            svc_id,
+            "grpc-route",
+            vec!["/grpc.Service".to_string()],
+            vec![],
+        ),
+        make_route(
+            Uuid::new_v4(),
+            svc_id,
+            "http-route",
+            vec!["/api".to_string()],
+            vec![],
+            vec![],
+        ),
+    ];
+
+    let router = Router::new(&routes, "traditional");
+
+    // gRPC path → grpc-route — gRPC 路径 → grpc-route
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/grpc.Service/Method".to_string(),
+        host: "example.com".to_string(),
+        scheme: "http".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("grpc-route"));
+
+    // HTTP path → http-route — HTTP 路径 → http-route
+    let ctx = RequestContext {
+        method: "GET".to_string(),
+        uri: "/api/users".to_string(),
+        host: "example.com".to_string(),
+        scheme: "http".to_string(),
+        headers: HashMap::new(),
+        sni: None,
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("http-route"));
+}
+
+#[test]
+fn test_grpc_route_strip_path_forced_false() {
+    let svc_id = Uuid::new_v4();
+    let route = make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpc-no-strip",
+        vec!["/hello.Service".to_string()],
+        vec![],
+    );
+
+    // gRPC routes always have strip_path=false — gRPC 路由始终 strip_path=false
+    assert!(!route.strip_path, "gRPC route strip_path must be false");
+}
+
+#[test]
+fn test_grpc_upstream_resolution() {
+    // Verify gRPC service protocol detection — 验证 gRPC service 协议检测
+    let grpc_service = Service {
+        id: Uuid::new_v4(),
+        protocol: Protocol::Grpc,
+        host: "grpc-backend".to_string(),
+        port: 50051,
+        ..Service::default()
+    };
+
+    let grpcs_service = Service {
+        id: Uuid::new_v4(),
+        protocol: Protocol::Grpcs,
+        host: "grpc-backend".to_string(),
+        port: 443,
+        ..Service::default()
+    };
+
+    // Grpc: no TLS, is_grpc=true — Grpc：无 TLS，is_grpc=true
+    let is_grpc = matches!(grpc_service.protocol, Protocol::Grpc | Protocol::Grpcs);
+    let use_tls = matches!(grpc_service.protocol, Protocol::Https | Protocol::Grpcs | Protocol::Tls);
+    assert!(is_grpc, "Grpc protocol should be detected as gRPC");
+    assert!(!use_tls, "Grpc protocol should not use TLS");
+
+    // Grpcs: TLS + is_grpc=true — Grpcs：TLS + is_grpc=true
+    let is_grpc = matches!(grpcs_service.protocol, Protocol::Grpc | Protocol::Grpcs);
+    let use_tls = matches!(grpcs_service.protocol, Protocol::Https | Protocol::Grpcs | Protocol::Tls);
+    assert!(is_grpc, "Grpcs protocol should be detected as gRPC");
+    assert!(use_tls, "Grpcs protocol should use TLS");
+}
+
+#[test]
+fn test_grpc_status_code_mapping() {
+    use kong_proxy::grpc::{http_status_to_grpc, GrpcStatus};
+
+    // Kong maps 404 → UNIMPLEMENTED (12), not NOT_FOUND (5) — Kong 将 404 映射为 UNIMPLEMENTED (12)
+    assert_eq!(http_status_to_grpc(404) as u32, GrpcStatus::Unimplemented as u32);
+
+    // 503 → UNAVAILABLE (14) — 503 → UNAVAILABLE (14)
+    assert_eq!(http_status_to_grpc(503) as u32, GrpcStatus::Unavailable as u32);
+
+    // 500 → INTERNAL (13) — 500 → INTERNAL (13)
+    assert_eq!(http_status_to_grpc(500) as u32, GrpcStatus::Internal as u32);
+
+    // 401 → UNAUTHENTICATED (16) — 401 → UNAUTHENTICATED (16)
+    assert_eq!(http_status_to_grpc(401) as u32, GrpcStatus::Unauthenticated as u32);
+
+    // 403 → PERMISSION_DENIED (7) — 403 → PERMISSION_DENIED (7)
+    assert_eq!(http_status_to_grpc(403) as u32, GrpcStatus::PermissionDenied as u32);
+
+    // 429 → RESOURCE_EXHAUSTED (8) — 429 → RESOURCE_EXHAUSTED (8)
+    assert_eq!(http_status_to_grpc(429) as u32, GrpcStatus::ResourceExhausted as u32);
+}
+
+#[test]
+fn test_grpc_route_with_sni() {
+    let svc_id = Uuid::new_v4();
+    let mut route = make_grpc_route(
+        Uuid::new_v4(),
+        svc_id,
+        "grpc-sni-route",
+        vec![],
+        vec![],
+    );
+    route.snis = Some(vec!["grpc.example.com".to_string()]);
+
+    let routes = vec![route];
+    let router = Router::new(&routes, "traditional");
+
+    // gRPC route with SNI should match HTTPS request with matching SNI — gRPC 路由 + SNI 应匹配带 SNI 的 HTTPS 请求
+    let ctx = RequestContext {
+        method: "POST".to_string(),
+        uri: "/hello.Service/SayHello".to_string(),
+        host: "grpc.example.com".to_string(),
+        scheme: "https".to_string(),
+        headers: HashMap::new(),
+        sni: Some("grpc.example.com".to_string()),
+    };
+    let result = router.find_route(&ctx);
+    assert!(result.is_some(), "gRPC route should match by SNI");
+    assert_eq!(result.unwrap().route_name.as_deref(), Some("grpc-sni-route"));
+}

@@ -23,7 +23,7 @@ crates/
 ├── kong-plugin-system/ — 插件注册/执行框架
 ├── kong-lua-bridge/    — Lua 兼容层 + PDK + ngx.*
 ├── kong-admin/         — Admin API（axum）
-├── kong-cluster/       — CP/DP 集群通信（阶段 9，待实现）
+├── kong-cluster/       — CP/DP 集群通信（阶段 9，已完成）
 └── kong-server/        — 主入口二进制
 ```
 
@@ -93,14 +93,14 @@ make DOCKER_TAG=fengyi95/kong-rust:latest docker-push
 |------|------|
 | `docs/requirements.md` | 9 个需求（R1-R9）：代理引擎、路由、Admin API、数据库、Lua 插件、配置、健康检查、TLS、Hybrid 模式 |
 | `docs/design.md` | 9 个组件设计：kong-core 到 kong-cluster 的详细接口和架构 |
-| `docs/tasks.md` | 14 个阶段（1-14）的任务清单，含进度概览表和已知问题 |
+| `docs/tasks.md` | 20 个阶段（1-20）的任务清单，含进度概览表和已知问题 |
 | `docs/implementation-logs/` | 38 个已完成任务的实现日志（修改文件、代码统计、artifact 信息） |
 
 ### 进度概览
 
-- **已完成**：60 个任务（阶段 1-8e, 10-14），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理、QA 测试与 Bug 修复
-- **待实现**：8 个任务（阶段 9 Hybrid 模式 + 8.12a busted 兼容层）
-- **已知问题**：15 个（QA 发现，详见 `docs/tasks.md` 阶段 14 和 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`）
+- **已完成**：72 个任务（阶段 1-15, 17.1），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理、QA 测试与 Bug 修复、Hybrid 模式、AI Gateway v1/responses、gRPC 代理
+- **待实现**：12 个任务（阶段 16-20）— Admin API 补全（KeySet/Key/Cache/Debug/Timers）、Stream TLS Termination、RBAC、Lua 沙箱加固、Proxy Cache、OpenTelemetry、性能基准测试、Graceful Shutdown
+- **已知问题**：16 个（QA 发现，已全部修复 ✅，详见 `docs/tasks.md` 阶段 14）
 
 ## 强制要求：变更时同步更新文档
 

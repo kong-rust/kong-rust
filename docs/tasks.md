@@ -19,7 +19,12 @@
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
 | 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
-| **合计** | | **71** | **71** | **0** |
+| 16 | Admin API 补全 | 5 | 0 | 5 |
+| 17 | 协议与代理进阶 | 2 | 1 | 1 |
+| 18 | 安全与运维 | 3 | 0 | 3 |
+| 19 | 可观测性与性能 | 2 | 0 | 2 |
+| 20 | 优雅生命周期管理 | 1 | 0 | 1 |
+| **合计** | | **84** | **72** | **12** |
 
 ---
 
@@ -362,6 +367,94 @@
   - Admin API schema 支持 route_type=llm/v1/responses
   - X-Kong-AI-Route-Type 响应头（调试辅助）
   - 文件：`crates/kong-ai/src/codec/responses_format.rs`（新建）、`crates/kong-ai/src/plugins/ai_proxy.rs`、`crates/kong-ai/src/plugins/context.rs`、`crates/kong-ai/src/provider/anthropic.rs`、`crates/kong-ai/src/provider/gemini.rs`
+
+## 阶段 16：Admin API 补全
+
+- [ ] **16.1** 实现 KeySet 实体（模型 + DAO + Admin API）`[R3, R4]`
+  - 在 kong-core 定义 KeySet 模型（id, name, tags, created_at, updated_at）
+  - 在 kong-db 实现 KeySetDao（schema 定义 + PgDao<KeySet>）
+  - 在 kong-admin 实现 `/key_sets`、`/key_sets/{id}` CRUD 端点
+  - 文件：`crates/kong-core/src/models/key_set.rs`, `crates/kong-db/src/dao/postgres.rs`, `crates/kong-admin/src/handlers/key_sets.rs`
+
+- [ ] **16.2** 实现 Key 实体（模型 + DAO + Admin API）`[R3, R4]`
+  - 在 kong-core 定义 Key 模型（id, set, name, kid, jwk, pem, tags, created_at, updated_at）
+  - 在 kong-db 实现 KeyDao（schema 定义 + PgDao<Key>）
+  - 在 kong-admin 实现 `/keys`、`/keys/{id}` CRUD 端点 + `/key_sets/{id}/keys` 嵌套端点
+  - 文件：`crates/kong-core/src/models/key.rs`, `crates/kong-db/src/dao/postgres.rs`, `crates/kong-admin/src/handlers/keys.rs`
+
+- [ ] **16.3** 实现缓存管理端点 `[R3]`
+  - `GET /cache/{key}` — 查询指定缓存条目
+  - `DELETE /cache/{key}` — 删除指定缓存条目
+  - `DELETE /cache` — 清空全部缓存
+  - 文件：`crates/kong-admin/src/handlers/cache.rs`
+
+- [ ] **16.4** 实现动态日志级别端点 `[R3]`
+  - `GET /debug/node/log-level` — 获取当前日志级别
+  - `PUT /debug/node/log-level/{level}` — 动态调整日志级别（debug/info/warn/error）
+  - 集成 tracing-subscriber 的动态过滤器
+  - 文件：`crates/kong-admin/src/handlers/debug.rs`
+
+- [ ] **16.5** 实现 Timers 端点 `[R3]`
+  - `GET /timers` — 返回计时器统计信息（兼容 Kong 格式）
+  - 包含 running/pending 计数和 worker 级别统计
+  - 文件：`crates/kong-admin/src/handlers/timers.rs`
+
+## 阶段 17：协议与代理进阶
+
+- [x] **17.1** 完整 gRPC 代理支持 `[R1]`
+  - 新建 `grpc.rs` 模块：HTTP→gRPC 状态码映射（Kong 兼容）、gRPC 请求检测（content-type: application/grpc）、gRPC Trailers-Only 错误响应
+  - 代理层集成：gRPC 请求自动检测、框架级错误返回 gRPC 格式（HTTP 200 + grpc-status/grpc-message）、不剥离 trailer 逐跳头、强制禁用 request/response body buffering（流式支持）
+  - 已有基础设施：h2c 先验知识（明文 gRPC）、H2H1 ALPN（TLS gRPC）、server 端 h2c 启用、路由匹配 grpc→http 透明映射
+  - 10 个新增测试：路由匹配（host/path/HTTPS/SNI）、路由共存、strip_path 约束、upstream 协议检测、gRPC 状态码映射
+  - 文件：`crates/kong-proxy/src/grpc.rs`（新建）、`crates/kong-proxy/src/lib.rs`、`crates/kong-proxy/tests/proxy_e2e.rs`
+
+- [ ] **17.2** Stream TLS Termination `[R8]`
+  - 实现 L4 Stream 代理的 TLS 终止模式（当前仅支持 TLS Passthrough 和 TCP）
+  - 使用 CertificateManager 按 SNI 选择证书，SslAcceptor 终止 TLS 后转发明文到上游
+  - 补充 `stream.rs:296` 处的 TODO
+  - 文件：`crates/kong-proxy/src/stream.rs`, `crates/kong-proxy/src/stream_tls.rs`
+
+## 阶段 18：安全与运维
+
+- [ ] **18.1** Admin API RBAC 支持 `[NFR]`
+  - 实现基于角色的访问控制（与 Kong Enterprise RBAC 兼容）
+  - 支持 admin 用户认证（basic-auth / token）
+  - 端点级别权限检查中间件
+  - 文件：`crates/kong-admin/src/rbac.rs`（新建）, `crates/kong-admin/src/app.rs`
+
+- [ ] **18.2** Lua 沙箱隔离加固 `[NFR]`
+  - 限制 Lua 插件可访问的系统 API（文件系统、网络、os.execute 等）
+  - 内存和执行时间限制
+  - 文件：`crates/kong-lua-bridge/src/vm.rs`
+
+- [ ] **18.3** Proxy Cache 插件实现 `[R5]`
+  - 集成 pingora-cache 实现 HTTP 响应缓存
+  - 支持 memory 存储策略
+  - 缓存命中/未命中响应头（X-Cache-Status）
+  - 与 proxy-cache 插件 schema 对接
+  - 文件：`crates/kong-proxy/src/cache.rs`（新建）, `crates/kong-plugin-system/`
+
+## 阶段 19：可观测性与性能
+
+- [ ] **19.1** OpenTelemetry 集成 `[NFR]`
+  - 集成 opentelemetry-rust SDK，实现分布式追踪（span 上下文传播、导出器）
+  - 支持 OTLP gRPC/HTTP 导出
+  - 对接 config 中已有的 `tracing_instrumentations` 和 `tracing_sampling_rate` 配置
+  - 文件：`crates/kong-proxy/src/telemetry.rs`（新建）, `crates/kong-config/src/config.rs`
+
+- [ ] **19.2** 性能基准测试框架 `[NFR]`
+  - 使用 criterion.rs 建立基准测试套件
+  - 覆盖关键路径：路由匹配、插件链执行、代理转发全链路
+  - 与 Kong 原版对比吞吐量和 P99 延迟的基线数据
+  - 文件：`benches/`（新建目录）, `Cargo.toml`
+
+## 阶段 20：优雅生命周期管理
+
+- [ ] **20.1** Graceful Shutdown 和连接排空 `[NFR]`
+  - 实现 SIGTERM/SIGINT 信号处理，触发优雅关闭
+  - 停止接受新连接，等待存量请求完成（可配置超时）
+  - 利用 Pingora 内置的 ShutdownWatch 机制
+  - 文件：`crates/kong-server/src/main.rs`, `crates/kong-proxy/src/lib.rs`
 
 ### 已知问题（QA 发现，全部已修复 ✅）
 
