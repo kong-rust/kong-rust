@@ -24,8 +24,16 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use kong_core::models::*;
 use kong_core::traits::Dao;
+use kong_db::KongCache;
 use kong_router::stream::StreamRouter;
 use tower_http::services::ServeDir;
+
+/// Runtime log level updater — invoked by `/debug/node/log-level` to reload `tracing_subscriber`'s EnvFilter.
+/// 运行时日志级别更新器 — 由 `/debug/node/log-level` 端点调用，重载 `tracing_subscriber` 的 EnvFilter。
+///
+/// Returns `Ok(())` on success, or a human-readable error message on failure.
+/// 成功返回 `Ok(())`，失败返回人类可读的错误信息。
+pub type LogLevelUpdater = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// Admin API application state — Admin API 应用状态
 #[derive(Clone)]
@@ -62,6 +70,15 @@ pub struct AdminState {
     pub target_health: Arc<RwLock<HashMap<String, String>>>,
     /// Control Plane reference (only set when role=control_plane) — 控制面引用（仅 role=control_plane 时设置）
     pub cp: Option<Arc<kong_cluster::cp::ControlPlane>>,
+    /// Shared Kong cache instance — exposed via `/cache/{key}` endpoints (task 16.3)
+    /// 共享 Kong 缓存实例 — 通过 `/cache/{key}` 端点暴露（任务 16.3）
+    pub cache: Arc<KongCache>,
+    /// Runtime log level updater — `None` if logging was initialised without reload support
+    /// 运行时日志级别更新器 — 若日志初始化时未启用 reload 则为 `None`
+    pub log_updater: Option<LogLevelUpdater>,
+    /// Current Kong-style log level string, kept in sync with `log_updater` writes
+    /// 当前 Kong 风格日志级别字符串，与 `log_updater` 写入保持同步
+    pub current_log_level: Arc<RwLock<String>>,
 }
 
 /// Export current config from DB and push to all DPs — 从 DB 导出当前配置并推送给所有 DP
@@ -240,6 +257,7 @@ fn is_known_route(path: &str) -> bool {
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
         "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
         "/clustering/data-planes", "/clustering/status",
+        "/cache", "/debug/node/log-level", "/timers",
     ];
     if static_routes.contains(&path) {
         return true;
@@ -251,7 +269,9 @@ fn is_known_route(path: &str) -> bool {
         // /entity/{id}
         [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
             | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags"
-            | "ai-providers" | "ai-models" | "ai-virtual-keys") => true,
+            | "ai-providers" | "ai-models" | "ai-virtual-keys" | "cache") => true,
+        // /debug/node/log-level/{level}
+        ["debug", "node", "log-level", _] => true,
         // /schemas/{entity}
         ["schemas", _] => true,
         // /schemas/{entity}/validate or /schemas/plugins/validate
@@ -579,6 +599,20 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Clustering — 集群端点
         .route("/clustering/data-planes", get(handlers::clustering::list_data_planes))
         .route("/clustering/status", get(handlers::clustering::clustering_status))
+        // Cache management — 缓存管理（任务 16.3）
+        .route("/cache", axum::routing::delete(handlers::cache::purge_cache))
+        .route(
+            "/cache/{key}",
+            get(handlers::cache::get_cache_entry).delete(handlers::cache::delete_cache_entry),
+        )
+        // Debug — runtime log level control — 运行时日志级别控制（任务 16.4）
+        .route("/debug/node/log-level", get(handlers::debug::get_log_level))
+        .route(
+            "/debug/node/log-level/{level}",
+            put(handlers::debug::set_log_level),
+        )
+        // Timers — Kong-compatible timer stats — 计时器统计（任务 16.5）
+        .route("/timers", get(handlers::timers::get_timers))
         .fallback(admin_fallback_with_trailing_slash)
         // Return JSON body for 405 Method Not Allowed — 405 方法不允许时返回 JSON 响应体
         .method_not_allowed_fallback(method_not_allowed_handler)

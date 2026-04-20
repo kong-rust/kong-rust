@@ -96,6 +96,11 @@ pub struct KongConfig {
     /// Database update propagation delay (seconds) — 数据库更新传播延迟（秒）
     pub db_update_propagation: u64,
 
+    // ========== Graceful shutdown — 优雅关闭 ==========
+    /// Worker shutdown timeout (seconds) — SIGTERM/SIGINT 收到后，给存量连接完成的宽限期；Kong 同名参数 `nginx_main_worker_shutdown_timeout`
+    /// Worker 关闭超时（秒） — 收到 SIGTERM/SIGINT 后等待存量请求完成的时间，超时则强制关闭
+    pub nginx_main_worker_shutdown_timeout: u64,
+
     // ========== DNS configuration — DNS 配置 ==========
     pub dns_resolver: Vec<String>,
     pub dns_hostsfile: String,
@@ -285,6 +290,9 @@ impl Default for KongConfig {
             db_cache_warmup_entities: vec!["services".to_string()],
             db_update_frequency: 5,
             db_update_propagation: 0,
+
+            // Graceful shutdown (Kong default: 10s) — 优雅关闭（Kong 默认 10 秒）
+            nginx_main_worker_shutdown_timeout: 10,
 
             // DNS
             dns_resolver: vec![],
@@ -506,6 +514,11 @@ impl KongConfig {
             "db_cache_warmup_entities" => self.db_cache_warmup_entities = parse_array(value),
             "db_update_frequency" => self.db_update_frequency = value.parse().unwrap_or(5),
             "db_update_propagation" => self.db_update_propagation = value.parse().unwrap_or(0),
+            "nginx_main_worker_shutdown_timeout" => {
+                // Strip trailing "s" if present (Kong accepts e.g. `10s`) — 兼容 Kong 可能带的 "s" 后缀
+                let trimmed = value.trim_end_matches(|c: char| c.is_alphabetic());
+                self.nginx_main_worker_shutdown_timeout = trimmed.parse().unwrap_or(10);
+            }
 
             // DNS
             "dns_resolver" => self.dns_resolver = parse_array(value),
@@ -884,6 +897,23 @@ mod tests {
         assert_eq!(config.pg_port, 5433);
         assert!(config.pg_ssl);
         assert!(config.is_dbless());
+    }
+
+    #[test]
+    fn test_worker_shutdown_timeout_parsing() {
+        let mut config = KongConfig::default();
+        assert_eq!(config.nginx_main_worker_shutdown_timeout, 10);
+
+        config.set("nginx_main_worker_shutdown_timeout", "30");
+        assert_eq!(config.nginx_main_worker_shutdown_timeout, 30);
+
+        // Accepts Kong's trailing unit — 兼容 Kong 风格带 "s" 后缀
+        config.set("nginx_main_worker_shutdown_timeout", "45s");
+        assert_eq!(config.nginx_main_worker_shutdown_timeout, 45);
+
+        // Invalid → fallback to default 10 — 非法值回落默认值 10
+        config.set("nginx_main_worker_shutdown_timeout", "bogus");
+        assert_eq!(config.nginx_main_worker_shutdown_timeout, 10);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 | 5 | 插件系统 | 4 | 4 | 0 |
 | 6 | Admin API | 4 | 4 | 0 |
 | 7 | TLS 和证书管理 | 1 | 1 | 0 |
-| 8 | 集成、启动、优化 | 19 | 19 | 0 |
+| 8 | 集成、启动、优化 | 20 | 20 | 0 |
 | 9 | Hybrid 模式 | 7 | 7 | 0 |
 | 10 | Docker 镜像 | 6 | 6 | 0 |
 | 11 | HTTP 代理性能优化 | 7 | 7 | 0 |
@@ -19,12 +19,20 @@
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
 | 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
-| 16 | Admin API 补全 | 5 | 0 | 5 |
+| 16 | Admin API 补全 | 5 | 3 | 2 |
 | 17 | 协议与代理进阶 | 2 | 1 | 1 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
-| 20 | 优雅生命周期管理 | 1 | 0 | 1 |
-| **合计** | | **84** | **72** | **12** |
+| 20 | 优雅生命周期管理 | 1 | 1 | 0 |
+| **合计** | | **85** | **77** | **8** |
+
+> **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
+> - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
+> - **4.3**：保留 [x]（HTTP/TCP 健康检查已完成），移除"gRPC 探测"虚报声明 —— 原声明无对应代码。
+> - **6.3**：保留 [x]（7 个特殊端点已完成），移除 `/cache` 和 `/debug/node/log-level` 虚报 —— 这两项实际在阶段 16.3/16.4 为待办状态。
+> - **8.15**：保留 [x]（TCP + TLS Passthrough 已完成），移除 "TLS Termination" 虚报 —— 实际存在 `// TODO`，正式交付归阶段 17.2。
+> - **17.1**：测试数量 10 → 9（实际 `fn test_grpc_*` 函数 9 个）。
+> - 文件组织说明（不影响完成度）：kong-admin 的 handlers 实际多数塞在 `handlers/mod.rs` 单文件（5459 行），非声明的多文件；kong-lua-bridge 的 PDK 命名空间集中在 `pdk/kong.rs`。
 
 ---
 
@@ -93,8 +101,9 @@
   - 文件：`crates/kong-proxy/src/balancer.rs`
 
 - [x] **4.3** 实现健康检查器 `[R7]`
-  - 主动检查（HTTP/TCP/gRPC 探测）+ 被动检查（请求错误计数）
+  - 主动检查（HTTP/TCP 探测）+ 被动检查（请求错误计数）
   - 文件：`crates/kong-proxy/src/health.rs`
+  - ⚠️ 2026-04-19 审计修正：gRPC 健康探测尚未实现（health.rs 无 gRPC 代码路径），已移除原声明
 
 ## 阶段 5：插件系统
 
@@ -125,8 +134,9 @@
   - 文件：`crates/kong-admin/src/handlers/*.rs`
 
 - [x] **6.3** 实现特殊 Admin API 端点 `[R3]`
-  - /、/status、/config、/endpoints、/plugins/enabled、/schemas/*、/tags、/cache、/debug/node/log-level
-  - 文件：`crates/kong-admin/src/handlers/info.rs`, `schemas.rs`, `tags.rs`, `cache.rs`, `debug.rs`
+  - /、/status、/config、/endpoints、/plugins/enabled、/schemas/*、/tags
+  - 文件：`crates/kong-admin/src/handlers/mod.rs`（集中实现）、`crates/kong-admin/src/handlers/schemas.rs`
+  - ⚠️ 2026-04-19 审计修正：`/cache` 和 `/debug/node/log-level` 未实现，已拆分至阶段 16.3 / 16.4 作为新任务
 
 - [x] **6.4** 修复 Kong Manager SPA 刷新 404 `[R3]`
   - SPA fallback 到 index.html，保留静态资源服务
@@ -210,8 +220,9 @@
   - 文件：`crates/kong-proxy/src/stream_tls.rs`
 
 - [x] **8.15** Stream 代理核心 `[R1]`
-  - KongStreamProxy 实现 ServerApp trait，TCP/TLS Passthrough/TLS Termination 三种模式
+  - KongStreamProxy 实现 ServerApp trait，支持 TCP 和 TLS Passthrough 两种模式
   - 文件：`crates/kong-proxy/src/stream.rs`
+  - ⚠️ 2026-04-19 审计修正：TLS Termination 尚未实现（`stream.rs:296` 处有 `// TODO`），正式交付归阶段 17.2
 
 - [x] **8.16** Stream Service 注册 + 路由热更新 `[R1]`
   - stream_listen 端口绑定，AdminState 同步更新 StreamRouter
@@ -382,22 +393,27 @@
   - 在 kong-admin 实现 `/keys`、`/keys/{id}` CRUD 端点 + `/key_sets/{id}/keys` 嵌套端点
   - 文件：`crates/kong-core/src/models/key.rs`, `crates/kong-db/src/dao/postgres.rs`, `crates/kong-admin/src/handlers/keys.rs`
 
-- [ ] **16.3** 实现缓存管理端点 `[R3]`
-  - `GET /cache/{key}` — 查询指定缓存条目
-  - `DELETE /cache/{key}` — 删除指定缓存条目
+- [x] **16.3** 实现缓存管理端点 `[R3]`
+  - `GET /cache/{key}` — 查询指定缓存条目（命中返回 JSON / 负缓存 / 未命中返回 404）
+  - `DELETE /cache/{key}` — 删除指定缓存条目（幂等，始终 204）
   - `DELETE /cache` — 清空全部缓存
-  - 文件：`crates/kong-admin/src/handlers/cache.rs`
+  - AdminState 新增共享 `Arc<KongCache>`，由 server main 统一实例化（容量来自 `mem_cache_size`）
+  - 4 个集成测试：miss→404、hit→JSON、单条 DELETE、全量 DELETE
+  - 文件：`crates/kong-admin/src/handlers/cache.rs`（新建）、`crates/kong-admin/src/lib.rs`、`crates/kong-server/src/main.rs`、`crates/kong-admin/tests/admin_api_compat.rs`
 
-- [ ] **16.4** 实现动态日志级别端点 `[R3]`
-  - `GET /debug/node/log-level` — 获取当前日志级别
-  - `PUT /debug/node/log-level/{level}` — 动态调整日志级别（debug/info/warn/error）
-  - 集成 tracing-subscriber 的动态过滤器
-  - 文件：`crates/kong-admin/src/handlers/debug.rs`
+- [x] **16.4** 实现动态日志级别端点 `[R3]`
+  - `GET /debug/node/log-level` — 获取当前日志级别（Kong 风格消息 `log level: info`）
+  - `PUT /debug/node/log-level/{level}` — 运行时切换，支持 debug/info/notice/warn/error/crit/alert/emerg
+  - `init_logging` 用 `tracing_subscriber::reload::Layer` 包裹 EnvFilter，闭包暴露为 `LogLevelUpdater`（类型擦除，admin crate 不依赖 tracing-subscriber）
+  - 未知级别 → 400，未注入 updater → 503
+  - 3 个集成测试：GET 返回当前级别、PUT 未知级别 400、PUT 无 updater 503
+  - 文件：`crates/kong-admin/src/handlers/debug.rs`（新建）、`crates/kong-admin/src/lib.rs`、`crates/kong-server/src/main.rs`、`crates/kong-admin/tests/admin_api_compat.rs`
 
-- [ ] **16.5** 实现 Timers 端点 `[R3]`
-  - `GET /timers` — 返回计时器统计信息（兼容 Kong 格式）
-  - 包含 running/pending 计数和 worker 级别统计
-  - 文件：`crates/kong-admin/src/handlers/timers.rs`
+- [x] **16.5** 实现 Timers 端点 `[R3]`
+  - `GET /timers` — 返回 Kong 兼容的计时器统计结构：`{ worker: {id, count}, stats: { sys: {total, runs, running, pending, waiting}, timers: {}, flamegraph: {running, pending, elapsed_time} } }`
+  - Pingora + tokio 无 `resty-timer-ng` 等价物，故返回零值占位（后续可对接 `tokio::runtime::Handle::metrics()`）
+  - 1 个集成测试：验证 Kong 形态 schema 完整性（worker/stats/sys 所有字段）
+  - 文件：`crates/kong-admin/src/handlers/timers.rs`（新建）、`crates/kong-admin/src/lib.rs`、`crates/kong-admin/tests/admin_api_compat.rs`
 
 ## 阶段 17：协议与代理进阶
 
@@ -405,7 +421,7 @@
   - 新建 `grpc.rs` 模块：HTTP→gRPC 状态码映射（Kong 兼容）、gRPC 请求检测（content-type: application/grpc）、gRPC Trailers-Only 错误响应
   - 代理层集成：gRPC 请求自动检测、框架级错误返回 gRPC 格式（HTTP 200 + grpc-status/grpc-message）、不剥离 trailer 逐跳头、强制禁用 request/response body buffering（流式支持）
   - 已有基础设施：h2c 先验知识（明文 gRPC）、H2H1 ALPN（TLS gRPC）、server 端 h2c 启用、路由匹配 grpc→http 透明映射
-  - 10 个新增测试：路由匹配（host/path/HTTPS/SNI）、路由共存、strip_path 约束、upstream 协议检测、gRPC 状态码映射
+  - 9 个新增测试：路由匹配（host/path/HTTPS/SNI）、路由共存、strip_path 约束、upstream 协议检测、gRPC 状态码映射
   - 文件：`crates/kong-proxy/src/grpc.rs`（新建）、`crates/kong-proxy/src/lib.rs`、`crates/kong-proxy/tests/proxy_e2e.rs`
 
 - [ ] **17.2** Stream TLS Termination `[R8]`
@@ -450,12 +466,14 @@
 
 ## 阶段 20：优雅生命周期管理
 
-- [ ] **20.1** Graceful Shutdown 和连接排空 `[NFR]`
-  - 实现 SIGTERM/SIGINT 信号处理，触发优雅关闭
-  - 停止接受新连接，等待存量请求完成（可配置超时）
-  - 利用 Pingora 内置的 ShutdownWatch 机制
-  - 文件：`crates/kong-server/src/main.rs`, `crates/kong-proxy/src/lib.rs`
+- [x] **20.1** Graceful Shutdown 和连接排空 `[NFR]`
+  - Pingora `Server::run_forever()` 内置 SIGINT/SIGTERM 处理，通过 `ShutdownWatch` 广播；Admin / CP / DP 等后台服务已响应 `shutdown.changed()`
+  - 新增配置 `nginx_main_worker_shutdown_timeout`（Kong 同名参数，默认 10s，兼容 `10s` 带单位写法）
+  - 映射到 Pingora `ServerConf.graceful_shutdown_timeout_seconds`（存量请求完成期）+ `grace_period_seconds=0`（立即停止接受新连接）
+  - 用 `Server::new_with_opt_and_conf(None, conf)` 替换 `Server::new(None)`
+  - 1 个单元测试：默认值 / 数字 / 带单位 / 非法值回落
+  - 文件：`crates/kong-config/src/config.rs`（新增字段 + 解析 + 测试）、`crates/kong-server/src/main.rs`
 
 ### 已知问题（QA 发现，全部已修复 ✅）
 
-以下 16 个问题由 QA 测试（2026-03-20）发现，已全部修复。完整报告见 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md`。
+以下 16 个问题由 QA 测试（2026-03-20）发现，已全部修复。完整原始报告未入库（原路径 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md` 不存在于工作树），关键发现摘要见阶段 14.3 / 14.4 的任务描述。

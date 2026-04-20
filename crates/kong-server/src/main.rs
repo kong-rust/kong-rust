@@ -89,21 +89,34 @@ fn kong_log_level_to_filter(level: &str) -> &'static str {
     }
 }
 
-/// Initialize the logging system based on config, supports file + stderr dual output — 根据配置初始化日志系统，支持文件 + stderr 双写
-fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
-    let level = kong_log_level_to_filter(&config.log_level);
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+/// Initialize the logging system based on config, supports file + stderr dual output.
+/// 根据配置初始化日志系统，支持文件 + stderr 双写。
+///
+/// Wraps the `EnvFilter` in a `reload::Layer` so the `/debug/node/log-level/{level}` endpoint
+/// can change the filter at runtime. Returns an updater closure and a handle to the current
+/// Kong-style level string.
+/// 用 `reload::Layer` 包裹 `EnvFilter`，使 `/debug/node/log-level/{level}` 端点能在运行时修改过滤级别；
+/// 返回更新闭包和当前 Kong 风格级别字符串的共享句柄。
+fn init_logging(
+    config: &kong_config::KongConfig,
+) -> anyhow::Result<(kong_admin::LogLevelUpdater, Arc<std::sync::RwLock<String>>)> {
+    use tracing_subscriber::reload;
+
+    let kong_level = config.log_level.clone();
+    let filter_spec = kong_log_level_to_filter(&kong_level);
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_spec));
+
+    let (reload_filter, reload_handle) = reload::Layer::new(env_filter);
 
     let error_log_path = &config.proxy_error_log;
 
     if error_log_path == "off" {
-        // stderr output only — 仅 stderr 输出
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(reload_filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .init();
     } else {
-        // File + stderr dual output — 文件 + stderr 双写
         let log_path = Path::new(error_log_path);
         let log_dir = log_path.parent().unwrap_or(Path::new("."));
         let log_file = log_path.file_name().ok_or_else(|| {
@@ -114,25 +127,30 @@ fn init_logging(config: &kong_config::KongConfig) -> anyhow::Result<()> {
             )
         })?;
 
-        // Auto-create log directory — 自动创建日志目录
         std::fs::create_dir_all(log_dir)?;
-
         let file_appender = tracing_appender::rolling::never(log_dir, log_file);
-
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(file_appender);
-
         let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(reload_filter)
             .with(file_layer)
             .with(stderr_layer)
             .init();
     }
 
-    Ok(())
+    let current = Arc::new(std::sync::RwLock::new(kong_level));
+    let updater: kong_admin::LogLevelUpdater = Arc::new(move |level: &str| {
+        let spec = kong_log_level_to_filter(level);
+        let new_filter = EnvFilter::try_new(spec).map_err(|e| e.to_string())?;
+        reload_handle
+            .modify(|f| *f = new_filter)
+            .map_err(|e| e.to_string())
+    });
+
+    Ok((updater, current))
 }
 
 /// Pingora is incompatible with #[tokio::main] (it creates its own runtime internally), — Pingora 不兼容 #[tokio::main]（它内部创建自己的 runtime），
@@ -170,7 +188,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize logging based on config (config parse failures output via default panic before this) — 根据配置初始化日志（config 解析失败会在此之前通过默认 panic 输出）
-    init_logging(&config)?;
+    let (log_updater, current_log_level) = init_logging(&config)?;
 
     let config = Arc::new(config);
 
@@ -199,11 +217,11 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(handle_db_command(&config, action))?;
         }
         Commands::Start => {
-            start_gateway(config, false)?;
+            start_gateway(config, false, log_updater, current_log_level)?;
         }
         Commands::DockerStart => {
             // docker-start: auto-run migrations before starting — docker-start：启动前自动执行 migration
-            start_gateway(config, true)?;
+            start_gateway(config, true, log_updater, current_log_level)?;
         }
         // Already handled above — 已在上方处理
         Commands::Version | Commands::Health | Commands::MockUpstream { .. } => unreachable!(),
@@ -400,7 +418,12 @@ fn format_listen_addrs(addrs: &[kong_config::ListenAddr]) -> String {
 
 /// Start the gateway: Pingora manages the entire application lifecycle — 启动网关：Pingora 管理整个应用生命周期
 /// auto_migrate: if true, auto-run bootstrap + up before starting (for docker-start) — auto_migrate: 为 true 时启动前自动执行 bootstrap + up（用于 docker-start）
-fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> anyhow::Result<()> {
+fn start_gateway(
+    config: Arc<kong_config::KongConfig>,
+    auto_migrate: bool,
+    log_updater: kong_admin::LogLevelUpdater,
+    current_log_level: Arc<std::sync::RwLock<String>>,
+) -> anyhow::Result<()> {
     // Resolve cluster role — 解析集群角色
     let cluster_role = config.role;
     tracing::info!("Cluster role: {} — 集群角色: {}", cluster_role, cluster_role);
@@ -413,16 +436,32 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
     // Note: rt must survive until run_forever(), otherwise the sqlx connection pool background tasks — 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
     // will terminate when runtime is dropped, requiring connection rebuilds and causing slow startup responses. — 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
-    let (mut kong_proxy, mut admin_state, refresh_rx) =
-        rt.block_on(init_proxy_and_admin(&config, auto_migrate))?;
+    let (mut kong_proxy, mut admin_state, refresh_rx) = rt.block_on(init_proxy_and_admin(
+        &config,
+        auto_migrate,
+        log_updater,
+        current_log_level,
+    ))?;
 
     // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
     let access_log_writer = rt
         .block_on(async { kong_proxy::access_log::AccessLogWriter::new(&config.proxy_access_log) });
     kong_proxy.access_log_writer = access_log_writer.clone();
 
-    // Phase 2: Create Pingora Server — 阶段 2：创建 Pingora Server
-    let mut server = pingora::server::Server::new(None)?;
+    // Phase 2: Create Pingora Server with graceful-shutdown config — 阶段 2：创建带优雅关闭配置的 Pingora Server
+    //
+    // Pingora handles SIGINT/SIGTERM internally inside `run_forever()` and broadcasts a shutdown — Pingora 在 `run_forever()` 内部处理 SIGINT/SIGTERM，
+    // signal to every service via `ShutdownWatch`. All Admin / CP / DP background services in — 并通过 `ShutdownWatch` 广播给所有 service。Admin / CP / DP 等后台服务
+    // this crate already react to that watch. We only need to tell Pingora how long to wait — 已经响应 shutdown.changed()，这里只需告知 Pingora 宽限期：
+    // for in-flight requests to drain before hard-killing them. — 存量请求多久内必须完成，超过则强制终止。
+    //
+    // Mapping: — 映射关系：
+    //   nginx_main_worker_shutdown_timeout → graceful_shutdown_timeout_seconds — 宽限完成期
+    //   grace_period_seconds = 0                                              — 立即开始引流，不再接受新连接
+    let mut server_conf = pingora_core::server::configuration::ServerConf::default();
+    server_conf.grace_period_seconds = Some(0);
+    server_conf.graceful_shutdown_timeout_seconds = Some(config.nginx_main_worker_shutdown_timeout);
+    let mut server = pingora::server::Server::new_with_opt_and_conf(None, server_conf);
 
     // Phase 3: Create Proxy Service, bind all proxy_listen addresses — 阶段 3：创建 Proxy Service，绑定所有 proxy_listen 地址
     let mut proxy_service =
@@ -635,6 +674,8 @@ fn start_gateway(config: Arc<kong_config::KongConfig>, auto_migrate: bool) -> an
 async fn init_proxy_and_admin(
     config: &Arc<kong_config::KongConfig>,
     auto_migrate: bool,
+    log_updater: kong_admin::LogLevelUpdater,
+    current_log_level: Arc<std::sync::RwLock<String>>,
 ) -> anyhow::Result<(
     kong_proxy::KongProxy,
     kong_admin::AdminState,
@@ -651,6 +692,10 @@ async fn init_proxy_and_admin(
         None => uuid::Uuid::new_v4(),
     };
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Shared Kong cache — exposed via /cache Admin endpoints, sized from config
+    // 共享 Kong 缓存 — 通过 /cache Admin 端点暴露，容量来自配置
+    let kong_cache = Arc::new(kong_db::KongCache::from_kong_config(config));
 
     // Create shared async DNS resolver — 创建共享异步 DNS 解析器
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(config));
@@ -697,6 +742,9 @@ async fn init_proxy_and_admin(
             dbless_store: Some(Arc::clone(&store)),
             target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             cp: None, // Set in start_gateway if role=control_plane — start_gateway 中按需设置（仅 CP 模式）
+            cache: Arc::clone(&kong_cache),
+            log_updater: Some(Arc::clone(&log_updater)),
+            current_log_level: Arc::clone(&current_log_level),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))
@@ -815,6 +863,9 @@ async fn init_proxy_and_admin(
             dbless_store: None,
             target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             cp: None, // Set in start_gateway if role=control_plane — start_gateway 中按需设置（仅 CP 模式）
+            cache: Arc::clone(&kong_cache),
+            log_updater: Some(Arc::clone(&log_updater)),
+            current_log_level: Arc::clone(&current_log_level),
         };
 
         Ok((kong_proxy, admin_state, refresh_rx))

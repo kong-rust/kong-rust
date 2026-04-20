@@ -40,7 +40,7 @@ fn create_test_app() -> axum::Router {
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store)),
         node_id: Uuid::new_v4(),
-        config,
+        config: Arc::clone(&config),
         proxy,
         refresh_tx,
         stream_router: None,
@@ -48,6 +48,9 @@ fn create_test_app() -> axum::Router {
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
+        cache: Arc::new(kong_db::KongCache::from_kong_config(&config)),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
 
     build_admin_router(state)

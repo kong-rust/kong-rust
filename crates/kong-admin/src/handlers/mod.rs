@@ -10,6 +10,9 @@ pub mod ai_providers;
 pub mod ai_models;
 pub mod ai_virtual_keys;
 pub mod clustering;
+pub mod cache;
+pub mod debug;
+pub mod timers;
 pub use schemas::*;
 
 use std::sync::Arc;
