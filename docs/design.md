@@ -1026,6 +1026,54 @@ match config.role {
 }
 ```
 
+### 组件 10：kong-ai — AI Gateway
+
+**职责：** 作为 AI 原生网关引擎的根基，负责 LLM provider 适配、跨协议翻译、成本追踪、Virtual Key 管理等 AI 专属能力。通过 plugin-system 注册 ai-proxy / ai-prompt-* / ai-response-transformer 等插件，让 Kong-Rust 能直接代理 OpenAI / Anthropic / Gemini / OpenAI-compat 等上游。
+
+**定位：** 独立 crate，位于 kong-plugin-system 之上，与 kong-lua-bridge 平级。AI 能力**不经过 Lua 桥接**，全部用 Rust 原生实现以保留流式性能和 token 级控制。
+
+**Workspace 结构（当前阶段已交付）：**
+
+```
+crates/kong-ai/
+├── src/
+│   ├── lib.rs                      # 插件注册入口
+│   ├── codec/                      # 协议编解码
+│   │   ├── chat_completions.rs     # OpenAI Chat Completions
+│   │   └── responses_format.rs     # OpenAI Responses API（v1/responses，阶段 15.1）
+│   ├── provider/                   # Provider 适配
+│   │   ├── openai.rs               # pass-through 快速通道
+│   │   ├── anthropic.rs            # Messages API + streaming tool_calls
+│   │   ├── gemini.rs               # generateContent + streaming function_call
+│   │   └── openai_compat.rs        # DeepSeek / Mistral / Together 等兼容层
+│   ├── plugins/
+│   │   ├── ai_proxy.rs             # 主代理插件（route_type: llm/chat, llm/responses）
+│   │   └── context.rs              # AI 请求上下文（token 统计、provider 元数据）
+│   └── schemas/                    # Kong 风格插件 schema
+```
+
+**核心概念：**
+
+- **双引擎架构（参见 `docs/designs/ai-gateway-strategy.md`）**：Kong-Rust AI 网关下辖 LLM Gateway / Agent Gateway / MCP Gateway / API Gateway 四子网关，kong-ai crate 当前承载 LLM Gateway 能力。
+- **分层路径**：
+  - **Pass-through 快速通道**：OpenAI 原生协议 + OpenAI 上游 → 零翻译代理
+  - **跨 provider 翻译路径**：请求降级（Responses → Chat Completions）、响应升级、流式事件状态机
+- **多形态支持**：Chat Completions、v1/responses、Anthropic Messages、Gemini generateContent、OpenAI-compat
+- **可观测性**：`X-Kong-AI-Route-Type` 响应头（调试）、provider/model/token 字段注入 Prometheus serialize
+
+**接口约定：**
+
+- 遵循 `PluginHandler` trait（来自 kong-core），与 Lua 插件平行注册
+- 依赖 `kong-plugin-system` 的四级配置合并（Global / Service / Route / Consumer）
+- Admin API schema 在 `kong-admin/src/handlers/ai_*.rs` 暴露（ai_providers / ai_models / ai_virtual_keys）
+
+**演进规划（见 ai-gateway-strategy.md Phase 2-5）：**
+
+- Token 限流器（跨 LLM/MCP/Agent 复用的通用基础设施）
+- Virtual API Key + 成本追踪
+- 语义缓存 + Prompt Guard
+- 未来新增 crate：`kong-mcp`（MCP Gateway）、`kong-agent`（Agent Gateway）
+
 ## 错误处理
 
 ### 错误场景

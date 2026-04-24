@@ -48,7 +48,7 @@ fn create_test_app() -> axum::Router {
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config,
+        config: Arc::clone(&config),
         proxy,
         refresh_tx,
         stream_router: None,
@@ -56,6 +56,9 @@ fn create_test_app() -> axum::Router {
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
+        cache: Arc::new(kong_db::KongCache::from_kong_config(&config)),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
 
     build_admin_router(state)
@@ -96,7 +99,7 @@ fn create_test_status_app() -> axum::Router {
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config,
+        config: Arc::clone(&config),
         proxy,
         refresh_tx,
         stream_router: None,
@@ -104,6 +107,9 @@ fn create_test_status_app() -> axum::Router {
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
+        cache: Arc::new(kong_db::KongCache::from_kong_config(&config)),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
 
     build_status_router(state)
@@ -165,7 +171,7 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config,
+        config: Arc::clone(&config),
         proxy,
         refresh_tx,
         stream_router: None,
@@ -173,6 +179,9 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
+        cache: Arc::new(kong_db::KongCache::from_kong_config(&config)),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
 
     build_status_router(state)
@@ -309,7 +318,7 @@ fn create_test_app_with_data() -> axum::Router {
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
         node_id: Uuid::new_v4(),
-        config,
+        config: Arc::clone(&config),
         proxy,
         refresh_tx,
         stream_router: None,
@@ -317,6 +326,9 @@ fn create_test_app_with_data() -> axum::Router {
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
+        cache: Arc::new(kong_db::KongCache::from_kong_config(&config)),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
 
     build_admin_router(state)
@@ -893,4 +905,242 @@ async fn test_not_found_error_format() {
     assert!(json.get("message").is_some());
     assert_eq!(json.get("name").unwrap().as_str().unwrap(), "not found");
     assert_eq!(json.get("code").unwrap().as_u64().unwrap(), 3);
+}
+
+// ========== /cache endpoints (task 16.3) — /cache 端点（任务 16.3） ==========
+
+/// Build an Admin router plus a handle to the shared KongCache, so tests can seed entries.
+/// 构建 Admin 路由及共享 KongCache 句柄，便于测试预置缓存条目。
+fn create_test_app_with_cache() -> (axum::Router, Arc<kong_db::KongCache>) {
+    let store = Arc::new(DblessStore::new());
+    let config = Arc::new(kong_config::KongConfig::default());
+
+    let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+        dns_resolver,
+        Arc::clone(&config),
+    );
+
+    let cache = Arc::new(kong_db::KongCache::from_kong_config(&config));
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config,
+        proxy,
+        refresh_tx,
+        stream_router: None,
+        configuration_hash: Arc::new(std::sync::RwLock::new("0".repeat(32))),
+        dbless_store: None,
+        target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        cp: None,
+        cache: Arc::clone(&cache),
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
+    };
+
+    (build_admin_router(state), cache)
+}
+
+#[tokio::test]
+async fn test_cache_get_miss_returns_404() {
+    let (app, _cache) = create_test_app_with_cache();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/cache/unknown-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_cache_get_hit_returns_value() {
+    let (app, cache) = create_test_app_with_cache();
+    cache.set("services:abc", json!({"id": "abc", "name": "svc"}));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/cache/services:abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["name"], "svc");
+}
+
+#[tokio::test]
+async fn test_cache_delete_entry() {
+    let (app, cache) = create_test_app_with_cache();
+    cache.set("services:xyz", json!({"id": "xyz"}));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(http::Method::DELETE)
+                .uri("/cache/services:xyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(cache.get("services:xyz").is_none());
+}
+
+#[tokio::test]
+async fn test_cache_purge_all() {
+    let (app, cache) = create_test_app_with_cache();
+    cache.set("services:a", json!({"id": "a"}));
+    cache.set("routes:b", json!({"id": "b"}));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::DELETE)
+                .uri("/cache")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(cache.get("services:a").is_none());
+    assert!(cache.get("routes:b").is_none());
+}
+
+// ========== /debug/node/log-level endpoints (task 16.4) — 运行时日志级别端点（任务 16.4） ==========
+
+#[tokio::test]
+async fn test_log_level_get_returns_current() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/debug/node/log-level")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let msg = json["message"].as_str().unwrap();
+    assert!(msg.contains("log level:"), "unexpected body: {}", msg);
+}
+
+#[tokio::test]
+async fn test_log_level_put_rejects_unknown_level() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::PUT)
+                .uri("/debug/node/log-level/verbose")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ========== /timers endpoint (task 16.5) — /timers 端点（任务 16.5） ==========
+
+#[tokio::test]
+async fn test_timers_endpoint_returns_kong_shape() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/timers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    // Kong-compatible shape: worker.id / worker.count + stats.{sys,timers,flamegraph}
+    // Kong 兼容结构：worker.id / worker.count + stats.{sys,timers,flamegraph}
+    assert!(json["worker"]["id"].is_i64() || json["worker"]["id"].is_u64());
+    assert!(json["worker"]["count"].is_i64() || json["worker"]["count"].is_u64());
+    assert!(json["stats"]["sys"].is_object());
+    assert!(json["stats"]["timers"].is_object());
+    assert!(json["stats"]["flamegraph"].is_object());
+
+    for key in ["total", "runs", "running", "pending", "waiting"] {
+        assert!(
+            json["stats"]["sys"][key].is_number(),
+            "stats.sys.{} missing or not number",
+            key
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_log_level_put_without_updater_returns_503() {
+    // create_test_app uses log_updater: None, so PUT should report "not supported".
+    // create_test_app 的 log_updater 为 None，因此 PUT 应返回"不支持"。
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::PUT)
+                .uri("/debug/node/log-level/debug")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
