@@ -48,6 +48,8 @@ pub struct AdminState {
     pub snis: Arc<dyn Dao<Sni>>,
     pub ca_certificates: Arc<dyn Dao<CaCertificate>>,
     pub vaults: Arc<dyn Dao<Vault>>,
+    pub key_sets: Arc<dyn Dao<KeySet>>,
+    pub keys: Arc<dyn Dao<Key>>,
     pub ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>>,
     pub ai_models: Arc<dyn Dao<kong_ai::models::AiModel>>,
     pub ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>>,
@@ -255,6 +257,7 @@ fn is_known_route(path: &str) -> bool {
         "/", "/status", "/config", "/endpoints", "/plugins/enabled", "/plugins",
         "/services", "/routes", "/consumers", "/upstreams",
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
+        "/key-sets", "/keys",
         "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
         "/clustering/data-planes", "/clustering/status",
         "/cache", "/debug/node/log-level", "/timers",
@@ -269,6 +272,7 @@ fn is_known_route(path: &str) -> bool {
         // /entity/{id}
         [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
             | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags"
+            | "key-sets" | "keys"
             | "ai-providers" | "ai-models" | "ai-virtual-keys" | "cache") => true,
         // /debug/node/log-level/{level}
         ["debug", "node", "log-level", _] => true,
@@ -297,6 +301,8 @@ fn is_known_route(path: &str) -> bool {
         ["upstreams", _, "health"] => true,
         // /upstreams/{id}/targets/{id}
         ["upstreams", _, "targets", _] => true,
+        // /key-sets/{id}/keys (nested listing and creation)
+        ["key-sets", _, "keys"] => true,
         // /ai-providers/{id}/ai-models
         ["ai-providers", _, "ai-models"] => true,
         // /ai-virtual-keys/{id}/rotate
@@ -566,6 +572,29 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .patch(update_vault)
                 .put(upsert_vault)
                 .delete(delete_vault),
+        )
+        // KeySets — Kong admin_api_name = "key-sets" — KeySet 集合（Kong admin_api_name = "key-sets"）
+        .route("/key-sets", get(list_key_sets).post(create_key_set))
+        .route(
+            "/key-sets/{id_or_name}",
+            get(get_key_set)
+                .patch(update_key_set)
+                .put(upsert_key_set)
+                .delete(delete_key_set),
+        )
+        // Keys nested under KeySet — 嵌套在 KeySet 下的 Keys
+        .route(
+            "/key-sets/{id_or_name}/keys",
+            get(handlers::list_nested_keys).post(handlers::create_nested_key),
+        )
+        // Keys
+        .route("/keys", get(list_keys).post(create_key))
+        .route(
+            "/keys/{id_or_name}",
+            get(get_key)
+                .patch(update_key)
+                .put(upsert_key)
+                .delete(delete_key),
         )
         // AI Providers
         .route("/ai-providers", get(handlers::ai_providers::list).post(handlers::ai_providers::create))

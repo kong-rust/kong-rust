@@ -1312,6 +1312,31 @@ pub fn ca_certificate_schema() -> EntitySchema {
         .column("ws_id", "ws_id", ColumnType::Uuid, true)
 }
 
+/// Create Schema for KeySet entity — 创建 KeySet 实体的 Schema
+pub fn key_set_schema() -> EntitySchema {
+    EntitySchema::new("key_sets")
+        .pk()
+        .timestamps()
+        .text_opt("name")
+        .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}
+
+/// Create Schema for Key entity — 创建 Key 实体的 Schema
+pub fn key_schema() -> EntitySchema {
+    EntitySchema::new("keys")
+        .pk()
+        .timestamps()
+        .foreign_key("set")
+        .text_opt("name")
+        .text("kid")
+        .text_opt("jwk")
+        .jsonb("pem")
+        .text_opt("cache_key")
+        .tags()
+        .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}
+
 /// Create Schema for Vault entity — 创建 Vault 实体的 Schema
 pub fn vault_schema() -> EntitySchema {
     EntitySchema::new("sm_vaults")

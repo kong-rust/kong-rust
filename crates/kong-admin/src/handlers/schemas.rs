@@ -182,6 +182,36 @@ pub async fn get_entity_schema(
             ],
             "entity_checks": [],
         }),
+        "key_sets" => json!({
+            "fields": [
+                {"id": {"type": "string", "uuid": true, "auto": true}},
+                {"name": {"type": "string", "unique": true}},
+                {"tags": {"type": "set", "elements": {"type": "string"}}},
+                {"created_at": {"type": "integer", "timestamp": true, "auto": true}},
+                {"updated_at": {"type": "integer", "timestamp": true, "auto": true}},
+            ],
+            "entity_checks": [],
+        }),
+        "keys" => json!({
+            "fields": [
+                {"id": {"type": "string", "uuid": true, "auto": true}},
+                {"set": {"type": "foreign", "reference": "key_sets"}},
+                {"name": {"type": "string", "unique": true}},
+                {"kid": {"type": "string", "required": true}},
+                {"jwk": {"type": "string", "referenceable": true, "encrypted": true}},
+                {"pem": {"type": "record", "fields": [
+                    {"private_key": {"type": "string"}},
+                    {"public_key": {"type": "string"}},
+                ]}},
+                {"tags": {"type": "set", "elements": {"type": "string"}}},
+                {"created_at": {"type": "integer", "timestamp": true, "auto": true}},
+                {"updated_at": {"type": "integer", "timestamp": true, "auto": true}},
+            ],
+            "entity_checks": [
+                {"mutually_exclusive": ["jwk", "pem"]},
+                {"at_least_one_of": ["jwk", "pem"]},
+            ],
+        }),
         _ => {
             return (
                 StatusCode::NOT_FOUND,

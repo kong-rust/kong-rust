@@ -979,6 +979,11 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/ca_certificates/{ca_certificates}",
         "/vaults",
         "/vaults/{vaults}",
+        "/key-sets",
+        "/key-sets/{key_sets}",
+        "/key-sets/{key_sets}/keys",
+        "/keys",
+        "/keys/{keys}",
         "/schemas/{entity}",
         "/schemas/plugins/{name}",
         "/schemas/vaults/{name}",
@@ -1035,6 +1040,7 @@ pub async fn validate_entity_schema(
     let known_entities = [
         "services", "routes", "consumers", "plugins", "upstreams",
         "targets", "certificates", "snis", "ca_certificates", "vaults",
+        "key_sets", "keys",
     ];
 
     if !known_entities.contains(&entity_name.as_str()) {
@@ -3526,6 +3532,234 @@ entity_handlers!(
     upsert_vault,
     delete_vault
 );
+
+// ---- KeySet — 使用通用 entity_handlers! 宏（无额外校验） ----
+entity_handlers!(
+    KeySet,
+    key_sets,
+    "",
+    list_key_sets,
+    get_key_set,
+    create_key_set,
+    update_key_set,
+    upsert_key_set,
+    delete_key_set
+);
+
+// ---- Key custom handlers — Key 自定义处理器（字段校验 + cache_key 自动生成） ----
+
+/// Auto-populate `cache_key` based on `kid` and `set`. Kong stores cache_key as `<kid>:<set_id>`
+/// when `set` is present, or just `<kid>` otherwise.
+/// 依据 `kid` 与 `set` 自动生成 `cache_key`。Kong 约定有 `set` 时为 `<kid>:<set_id>`，否则 `<kid>`。
+fn populate_key_cache_key(body: &mut Value) {
+    let kid = body
+        .get("kid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let set_id = body
+        .get("set")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if let (Some(obj), Some(kid)) = (body.as_object_mut(), kid) {
+        let cache_key = match set_id {
+            Some(sid) => format!("{}:{}", kid, sid),
+            None => kid,
+        };
+        obj.insert("cache_key".to_string(), Value::String(cache_key));
+    }
+}
+
+/// Validate Key payload — kid required, and at least one of jwk/pem must be present.
+/// 校验 Key 负载 — kid 必填，jwk/pem 至少要有一个。
+fn validate_key_fields(body: &Value, patch: bool) -> Option<(StatusCode, Json<Value>)> {
+    let kid = body.get("kid").and_then(|v| v.as_str()).unwrap_or("");
+    if !patch && kid.is_empty() {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": "schema violation (kid: required field missing)",
+                "name": "schema violation",
+                "code": 2,
+                "fields": {"kid": "required field missing"},
+            })),
+        ));
+    }
+    // For create/upsert, require at least one of jwk/pem — 创建/upsert 时，jwk 与 pem 至少要有一个
+    if !patch {
+        let has_jwk = body
+            .get("jwk")
+            .map(|v| !v.is_null() && !v.as_str().map(str::is_empty).unwrap_or(false))
+            .unwrap_or(false);
+        let has_pem = body
+            .get("pem")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if !has_jwk && !has_pem {
+            return Some((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "schema violation (at least one of these fields must be non-empty: 'jwk', 'pem')",
+                    "name": "schema violation",
+                    "code": 2,
+                })),
+            ));
+        }
+    }
+    None
+}
+
+pub async fn list_keys(
+    State(state): State<AdminState>,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    do_list::<Key>(&state.keys, &params).await
+}
+
+pub async fn get_key(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_get::<Key>(&state.keys, &id_or_name).await
+}
+
+pub async fn create_key(
+    State(state): State<AdminState>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Some(err) = validate_key_fields(&body, false) {
+        return err;
+    }
+    populate_key_cache_key(&mut body);
+    do_create::<Key>(&state.keys, body).await
+}
+
+pub async fn update_key(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Some(err) = validate_key_fields(&body, true) {
+        return err;
+    }
+    // Recompute cache_key only when kid / set are being updated — 只有 kid / set 更新时才重算 cache_key
+    if body.get("kid").is_some() || body.get("set").is_some() {
+        // Fetch existing to fill missing field before recomputing — 补齐缺失字段后再计算
+        let pk = PrimaryKey::from_str_or_uuid(&id_or_name);
+        if let Ok(Some(existing)) = state.keys.select(&pk).await {
+            if body.get("kid").is_none() {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("kid".to_string(), Value::String(existing.kid.clone()));
+                }
+            }
+            if body.get("set").is_none() {
+                if let (Some(obj), Some(set)) = (body.as_object_mut(), existing.set.as_ref()) {
+                    obj.insert(
+                        "set".to_string(),
+                        json!({"id": set.id.to_string()}),
+                    );
+                }
+            }
+            populate_key_cache_key(&mut body);
+        }
+    }
+    do_update::<Key>(&state.keys, &id_or_name, &body).await
+}
+
+pub async fn upsert_key(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    if let Some(err) = validate_key_fields(&body, false) {
+        return err;
+    }
+    populate_key_cache_key(&mut body);
+    do_upsert::<Key>(&state.keys, &id_or_name, body).await
+}
+
+pub async fn delete_key(
+    State(state): State<AdminState>,
+    Path(id_or_name): Path<String>,
+) -> impl IntoResponse {
+    do_delete::<Key>(&state.keys, &id_or_name).await
+}
+
+/// GET /key-sets/:id_or_name/keys — list keys nested under a key_set.
+/// GET /key-sets/:id_or_name/keys — 列出 key_set 下的 keys。
+pub async fn list_nested_keys(
+    State(state): State<AdminState>,
+    Path(key_set_id_or_name): Path<String>,
+    Query(params): Query<ListParams>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    if let Err(err) = params.validate_tags() {
+        return err;
+    }
+    let set_pk = PrimaryKey::from_str_or_uuid(&key_set_id_or_name);
+    let key_set = match state.key_sets.select(&set_pk).await {
+        Ok(Some(ks)) => ks,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "key_set not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+    match state
+        .keys
+        .select_by_foreign_key("set", &key_set.id, &params.to_page_params())
+        .await
+    {
+        Ok(page) => {
+            let path = req.uri().path().trim_end_matches('/');
+            (StatusCode::OK, Json(build_nested_page_response(&page, path)))
+        }
+        Err(e) => (
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(json!({"message": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /key-sets/:id_or_name/keys — create a key under a key_set.
+/// POST /key-sets/:id_or_name/keys — 在 key_set 下创建 key。
+pub async fn create_nested_key(
+    State(state): State<AdminState>,
+    Path(key_set_id_or_name): Path<String>,
+    FlexibleBody(mut body): FlexibleBody,
+) -> impl IntoResponse {
+    let set_pk = PrimaryKey::from_str_or_uuid(&key_set_id_or_name);
+    let key_set = match state.key_sets.select(&set_pk).await {
+        Ok(Some(ks)) => ks,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "key_set not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(json!({"message": e.to_string()})),
+            );
+        }
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("set".to_string(), json!({"id": key_set.id.to_string()}));
+    }
+    if let Some(err) = validate_key_fields(&body, false) {
+        return err;
+    }
+    populate_key_cache_key(&mut body);
+    do_create::<Key>(&state.keys, body).await
+}
 
 // ============ Nested endpoints — 嵌套端点 ============
 

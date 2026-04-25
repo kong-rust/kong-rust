@@ -28,6 +28,10 @@ const CORE_MIGRATIONS: &[Migration] = &[
         name: "002_ai_gateway",
         sql: include_str!("../migrations/core/002_ai_gateway.sql"),
     },
+    Migration {
+        name: "003_keys",
+        sql: include_str!("../migrations/core/003_keys.sql"),
+    },
 ];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
@@ -50,6 +54,8 @@ const KNOWN_TABLES: &[&str] = &[
     "ai_virtual_keys",
     "ai_models",
     "ai_providers",
+    "keys",
+    "key_sets",
     "schema_meta",
     "workspaces",
 ];
