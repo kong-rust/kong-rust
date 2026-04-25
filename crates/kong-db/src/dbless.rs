@@ -87,6 +87,8 @@ impl DblessStore {
             ("snis", "name"),
             ("ca_certificates", ""),
             ("vaults", "prefix"),
+            ("key_sets", "name"),
+            ("keys", "name"),
         ];
 
         for (table_name, endpoint_key) in entity_types {
@@ -516,6 +518,7 @@ fn build_fk_index(
         "targets" => vec!["upstream"],
         "plugins" => vec!["route", "service", "consumer"],
         "snis" => vec!["certificate"],
+        "keys" => vec!["set"],
         _ => vec![],
     };
 

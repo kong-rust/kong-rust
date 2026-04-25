@@ -36,6 +36,8 @@ fn create_test_app() -> axum::Router {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store)),

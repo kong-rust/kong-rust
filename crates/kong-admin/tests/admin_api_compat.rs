@@ -44,6 +44,8 @@ fn create_test_app() -> axum::Router {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
@@ -95,6 +97,8 @@ fn create_test_status_app() -> axum::Router {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
@@ -167,6 +171,8 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
@@ -314,6 +320,8 @@ fn create_test_app_with_data() -> axum::Router {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
@@ -940,6 +948,8 @@ fn create_test_app_with_cache() -> (axum::Router, Arc<kong_db::KongCache>) {
         snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
         ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
@@ -1143,4 +1153,259 @@ async fn test_log_level_put_without_updater_returns_503() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ========== /key-sets and /keys (task 16.1 / 16.2) — KeySet/Key 端点 ==========
+
+/// Build a router preloaded with one key_set + one key for read-path tests.
+/// 构建预置 1 个 key_set + 1 个 key 的路由，用于读路径测试。
+/// (DblessStore is read-only at runtime — writes route through /config — DblessStore 运行时只读，写入需经由 /config)
+fn create_test_app_with_keys() -> (axum::Router, String, String) {
+    let store = Arc::new(DblessStore::new());
+    let set_id = "11111111-1111-1111-1111-111111111111";
+    let key_id = "22222222-2222-2222-2222-222222222222";
+    let data = json!({
+        "_format_version": "3.0",
+        "key_sets": [
+            {
+                "id": set_id,
+                "name": "primary",
+                "created_at": 1609459200,
+                "updated_at": 1609459200,
+            }
+        ],
+        "keys": [
+            {
+                "id": key_id,
+                "name": "primary-rsa",
+                "set": { "id": set_id },
+                "kid": "kid-1",
+                "jwk": "{\"kid\":\"kid-1\"}",
+                "cache_key": format!("kid-1:{}", set_id),
+                "created_at": 1609459200,
+                "updated_at": 1609459200,
+            }
+        ]
+    });
+    store.load_from_json(&data).unwrap();
+
+    let config = Arc::new(kong_config::KongConfig::default());
+    let (refresh_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
+    let proxy = kong_proxy::KongProxy::new(
+        &[],
+        "traditional",
+        kong_plugin_system::PluginRegistry::new(),
+        kong_proxy::tls::CertificateManager::new(),
+        vec![],
+        dns_resolver,
+        Arc::clone(&config),
+    );
+    let cache = Arc::new(kong_db::KongCache::from_kong_config(&config));
+
+    let state = AdminState {
+        services: Arc::new(DblessDao::<Service>::new(store.clone())),
+        routes: Arc::new(DblessDao::<Route>::new(store.clone())),
+        consumers: Arc::new(DblessDao::<Consumer>::new(store.clone())),
+        plugins: Arc::new(DblessDao::<Plugin>::new(store.clone())),
+        upstreams: Arc::new(DblessDao::<Upstream>::new(store.clone())),
+        targets: Arc::new(DblessDao::<Target>::new(store.clone())),
+        certificates: Arc::new(DblessDao::<Certificate>::new(store.clone())),
+        snis: Arc::new(DblessDao::<Sni>::new(store.clone())),
+        ca_certificates: Arc::new(DblessDao::<CaCertificate>::new(store.clone())),
+        vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
+        key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
+        keys: Arc::new(DblessDao::<Key>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        node_id: Uuid::new_v4(),
+        config,
+        proxy,
+        refresh_tx,
+        stream_router: None,
+        configuration_hash: Arc::new(std::sync::RwLock::new("0".repeat(32))),
+        dbless_store: Some(store),
+        target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        cp: None,
+        cache,
+        log_updater: None,
+        current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
+    };
+    (build_admin_router(state), set_id.to_string(), key_id.to_string())
+}
+
+#[tokio::test]
+async fn test_key_sets_list_and_get() {
+    let (app, set_id, _) = create_test_app_with_keys();
+
+    // List — 列表
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/key-sets").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list["data"].as_array().unwrap().len(), 1);
+    assert_eq!(list["data"][0]["name"], "primary");
+
+    // Get by id — 按 id 获取
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/key-sets/{}", set_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let got: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(got["id"], set_id);
+
+    // Get by name — 按 name 获取（endpoint_key）
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/key-sets/primary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_keys_list_and_get() {
+    let (app, _, key_id) = create_test_app_with_keys();
+
+    // List — 列表
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/keys").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list["data"].as_array().unwrap().len(), 1);
+    assert_eq!(list["data"][0]["kid"], "kid-1");
+
+    // Get by id — 按 id 获取
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/keys/{}", key_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let got: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(got["kid"], "kid-1");
+}
+
+#[tokio::test]
+async fn test_keys_nested_under_key_set() {
+    let (app, set_id, _) = create_test_app_with_keys();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/key-sets/{}/keys", set_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list["data"].as_array().unwrap().len(), 1);
+    assert_eq!(list["data"][0]["set"]["id"], set_id);
+}
+
+#[tokio::test]
+async fn test_keys_nested_unknown_key_set_returns_404() {
+    let (app, _, _) = create_test_app_with_keys();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/key-sets/00000000-0000-0000-0000-000000000000/keys")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_keys_create_requires_kid() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/keys")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"jwk": "{\"kid\":\"abc\"}"})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(err["message"]
+        .as_str()
+        .unwrap()
+        .contains("kid: required field missing"));
+}
+
+#[tokio::test]
+async fn test_keys_create_requires_jwk_or_pem() {
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/keys")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({"kid": "kid-1"})).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_keys_schemas_endpoint() {
+    let app = create_test_app();
+
+    for entity in ["key_sets", "keys"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/schemas/{}", entity))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "schema {} should exist", entity);
+    }
 }

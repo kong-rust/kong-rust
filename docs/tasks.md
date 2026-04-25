@@ -19,12 +19,12 @@
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
 | 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
-| 16 | Admin API 补全 | 5 | 3 | 2 |
-| 17 | 协议与代理进阶 | 2 | 1 | 1 |
+| 16 | Admin API 补全 | 5 | 5 | 0 |
+| 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **85** | **77** | **8** |
+| **合计** | | **85** | **80** | **5** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -381,17 +381,22 @@
 
 ## 阶段 16：Admin API 补全
 
-- [ ] **16.1** 实现 KeySet 实体（模型 + DAO + Admin API）`[R3, R4]`
-  - 在 kong-core 定义 KeySet 模型（id, name, tags, created_at, updated_at）
-  - 在 kong-db 实现 KeySetDao（schema 定义 + PgDao<KeySet>）
-  - 在 kong-admin 实现 `/key_sets`、`/key_sets/{id}` CRUD 端点
-  - 文件：`crates/kong-core/src/models/key_set.rs`, `crates/kong-db/src/dao/postgres.rs`, `crates/kong-admin/src/handlers/key_sets.rs`
+- [x] **16.1** 实现 KeySet 实体（模型 + DAO + Admin API）`[R3, R4]`
+  - kong-core 定义 KeySet 模型（id, name, tags, created_at, updated_at, ws_id）
+  - kong-db `key_set_schema()` + `PgDao<KeySet>` + dbless 注册（endpoint_key=name）
+  - kong-admin `/key-sets`、`/key-sets/{id_or_name}` CRUD 端点（Kong admin_api_name = "key-sets"）
+  - DB 迁移 `003_keys.sql` 创建 `key_sets` 表
+  - 文件：`crates/kong-core/src/models/key_set.rs`、`crates/kong-db/src/dao/postgres.rs`、`crates/kong-admin/src/handlers/mod.rs`、`crates/kong-db/migrations/core/003_keys.sql`
 
-- [ ] **16.2** 实现 Key 实体（模型 + DAO + Admin API）`[R3, R4]`
-  - 在 kong-core 定义 Key 模型（id, set, name, kid, jwk, pem, tags, created_at, updated_at）
-  - 在 kong-db 实现 KeyDao（schema 定义 + PgDao<Key>）
-  - 在 kong-admin 实现 `/keys`、`/keys/{id}` CRUD 端点 + `/key_sets/{id}/keys` 嵌套端点
-  - 文件：`crates/kong-core/src/models/key.rs`, `crates/kong-db/src/dao/postgres.rs`, `crates/kong-admin/src/handlers/keys.rs`
+- [x] **16.2** 实现 Key 实体（模型 + DAO + Admin API）`[R3, R4]`
+  - kong-core 定义 Key 模型（id, set→ForeignKey, name, kid, jwk, pem→JSONB, cache_key, tags, ws_id）
+  - kong-db `key_schema()` + `PgDao<Key>` + dbless `keys → set` FK 索引
+  - kong-admin `/keys`、`/keys/{id_or_name}` 自定义 CRUD（kid 必填校验、jwk/pem 至少一个、cache_key 自动生成 `<kid>:<set_id>`）
+  - 嵌套端点 `/key-sets/{id_or_name}/keys`（GET 列表 + POST 创建）
+  - DB 迁移：`keys` 表含 `UNIQUE (kid, set_id)` 约束
+  - Schema 端点：`/schemas/key_sets`、`/schemas/keys`
+  - 6 个集成测试：list/get/嵌套查询/未知父 404/必填校验/schema 端点
+  - 文件：`crates/kong-core/src/models/key.rs`、`crates/kong-db/src/dao/postgres.rs`、`crates/kong-admin/src/handlers/mod.rs`、`crates/kong-admin/src/handlers/schemas.rs`、`crates/kong-admin/tests/admin_api_compat.rs`
 
 - [x] **16.3** 实现缓存管理端点 `[R3]`
   - `GET /cache/{key}` — 查询指定缓存条目（命中返回 JSON / 负缓存 / 未命中返回 404）
@@ -424,11 +429,12 @@
   - 9 个新增测试：路由匹配（host/path/HTTPS/SNI）、路由共存、strip_path 约束、upstream 协议检测、gRPC 状态码映射
   - 文件：`crates/kong-proxy/src/grpc.rs`（新建）、`crates/kong-proxy/src/lib.rs`、`crates/kong-proxy/tests/proxy_e2e.rs`
 
-- [ ] **17.2** Stream TLS Termination `[R8]`
-  - 实现 L4 Stream 代理的 TLS 终止模式（当前仅支持 TLS Passthrough 和 TCP）
-  - 使用 CertificateManager 按 SNI 选择证书，SslAcceptor 终止 TLS 后转发明文到上游
-  - 补充 `stream.rs:296` 处的 TODO
-  - 文件：`crates/kong-proxy/src/stream.rs`, `crates/kong-proxy/src/stream_tls.rs`
+- [x] **17.2** Stream TLS Termination `[R8]`
+  - 实现 L4 Stream 代理的 TLS 终止模式（与现有 TLS Passthrough 和 TCP 并列）
+  - `proxy_tls_terminate`：CertificateManager 按 SNI 选证书 → 构建 OpenSSL `SslAcceptor`（每连接） → `tokio_openssl::SslStream` 完成握手 → 转发明文到上游
+  - 提取 `build_tls_acceptor` 辅助函数（含 `check_private_key` 校验）便于单元测试
+  - 4 个测试：自签证书构建、PEM 解析失败、证书/私钥不匹配、端到端 TLS 握手 + 双向数据转发
+  - 文件：`crates/kong-proxy/src/stream.rs`、`crates/kong-proxy/Cargo.toml`（新增 openssl + tokio-openssl 依赖）
 
 ## 阶段 18：安全与运维
 

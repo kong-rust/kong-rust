@@ -292,13 +292,10 @@ impl KongStreamProxy {
                 .iter()
                 .any(|p| matches!(p, Protocol::Tls))
         {
-            // TLS Termination: simplified as TCP passthrough for now — TLS Termination 暂作为 TCP 透传
-            // TODO: 实现完整 TLS termination（SslAcceptor + CertificateManager）
-            tracing::warn!(
-                "TLS Termination 模式暂作为 TCP 透传处理 (route={})",
-                route_match.route_id
-            );
-            self.proxy_passthrough(downstream, &upstream_addr).await
+            // TLS Termination: terminate TLS via SNI cert, forward plaintext upstream
+            // TLS 终止：根据 SNI 选择证书终止 TLS，明文转发到上游
+            self.proxy_tls_terminate(downstream, &upstream_addr, upstream_tls, ctx.sni.as_deref())
+                .await
         } else {
             self.proxy_tcp(downstream, &upstream_addr, upstream_tls)
                 .await
@@ -339,6 +336,68 @@ impl KongStreamProxy {
         let mut upstream = self.connect_upstream(upstream_addr, false).await?;
         bidirectional_copy(&mut downstream, &mut upstream).await?;
         Ok(())
+    }
+
+    /// TLS Termination proxy: select cert by SNI, terminate TLS, forward plaintext upstream.
+    /// TLS 终止代理：根据 SNI 选择证书终止 TLS，向上游转发明文。
+    async fn proxy_tls_terminate(
+        &self,
+        downstream: Stream,
+        upstream_addr: &str,
+        upstream_tls: bool,
+        sni: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use openssl::ssl::Ssl;
+
+        // 1. Select certificate via SNI — 根据 SNI 选择证书
+        let cert_pair = self
+            .cert_manager
+            .find_certificate(sni)
+            .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!(
+                    "TLS termination 找不到匹配证书 (sni={:?})",
+                    sni
+                ))
+            })?;
+
+        // 2. Build a per-connection SslAcceptor — 为该连接构建 SslAcceptor
+        let acceptor = build_tls_acceptor(&cert_pair.cert, &cert_pair.key)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::from(e) })?;
+
+        // 3. Wrap downstream Stream with tokio_openssl::SslStream and complete handshake
+        // 3. 用 tokio_openssl::SslStream 包裹 downstream 完成握手
+        let ssl = Ssl::new(acceptor.context())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!("Ssl::new 失败: {}", e))
+            })?;
+        let mut tls_stream = tokio_openssl::SslStream::new(ssl, downstream)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!("SslStream::new 失败: {}", e))
+            })?;
+        std::pin::Pin::new(&mut tls_stream)
+            .accept()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                Box::from(format!("TLS handshake 失败: {}", e))
+            })?;
+
+        // 4. Connect upstream and forward plaintext — 连接上游并转发明文
+        let mut upstream = self.connect_upstream(upstream_addr, upstream_tls).await?;
+        match tokio::io::copy_bidirectional(&mut tls_stream, &mut upstream).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                ) {
+                    Ok(())
+                } else {
+                    Err(Box::new(e))
+                }
+            }
+        }
     }
 
     /// Connect to upstream — 连接上游
@@ -410,6 +469,34 @@ fn extract_addrs(
     (source_ip, source_port, dest_ip, dest_port)
 }
 
+/// Build an SslAcceptor from PEM-encoded certificate and key.
+/// 用 PEM 格式证书与私钥构建 SslAcceptor。
+fn build_tls_acceptor(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<openssl::ssl::SslAcceptor, String> {
+    use openssl::pkey::PKey;
+    use openssl::ssl::{SslAcceptor, SslMethod};
+    use openssl::x509::X509;
+
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls_server())
+        .map_err(|e| format!("SslAcceptor 构建失败: {}", e))?;
+    let x509 = X509::from_pem(cert_pem.as_bytes())
+        .map_err(|e| format!("证书 PEM 解析失败: {}", e))?;
+    let pkey = PKey::private_key_from_pem(key_pem.as_bytes())
+        .map_err(|e| format!("私钥 PEM 解析失败: {}", e))?;
+    builder
+        .set_certificate(&x509)
+        .map_err(|e| format!("set_certificate 失败: {}", e))?;
+    builder
+        .set_private_key(&pkey)
+        .map_err(|e| format!("set_private_key 失败: {}", e))?;
+    builder
+        .check_private_key()
+        .map_err(|e| format!("证书与私钥不匹配: {}", e))?;
+    Ok(builder.build())
+}
+
 /// Bidirectional data copy (downstream ↔ upstream) — 双向数据拷贝（downstream ↔ upstream）
 async fn bidirectional_copy(
     a: &mut Stream,
@@ -436,5 +523,137 @@ async fn bidirectional_copy(
                 Err(Box::new(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::x509::extension::SubjectAlternativeName;
+    use openssl::x509::{X509Name, X509};
+
+    fn make_self_signed_cert(cn: &str) -> (String, String) {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+
+        let mut name_builder = X509Name::builder().unwrap();
+        name_builder.append_entry_by_text("CN", cn).unwrap();
+        let name = name_builder.build();
+
+        let mut x509_builder = X509::builder().unwrap();
+        x509_builder.set_version(2).unwrap();
+        x509_builder.set_subject_name(&name).unwrap();
+        x509_builder.set_issuer_name(&name).unwrap();
+        x509_builder.set_pubkey(&pkey).unwrap();
+        x509_builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        x509_builder
+            .set_not_after(&Asn1Time::days_from_now(365).unwrap())
+            .unwrap();
+
+        let san = SubjectAlternativeName::new()
+            .dns(cn)
+            .build(&x509_builder.x509v3_context(None, None))
+            .unwrap();
+        x509_builder.append_extension(san).unwrap();
+        x509_builder.sign(&pkey, MessageDigest::sha256()).unwrap();
+
+        let cert = x509_builder.build();
+        let cert_pem = String::from_utf8(cert.to_pem().unwrap()).unwrap();
+        let key_pem = String::from_utf8(pkey.private_key_to_pem_pkcs8().unwrap()).unwrap();
+        (cert_pem, key_pem)
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_with_self_signed() {
+        let (cert, key) = make_self_signed_cert("kong.test");
+        let acceptor = build_tls_acceptor(&cert, &key).expect("acceptor 应能成功构建");
+        // Smoke test — 烟雾测试：能从 acceptor 取到 SslContext
+        let _ctx = acceptor.context();
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_invalid_pem_fails() {
+        match build_tls_acceptor("not a pem", "not a pem") {
+            Ok(_) => panic!("PEM 校验应失败"),
+            Err(err) => assert!(err.contains("PEM 解析失败"), "意外错误: {}", err),
+        }
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_mismatched_key_fails() {
+        let (cert, _) = make_self_signed_cert("kong.test");
+        let (_, other_key) = make_self_signed_cert("other.test");
+        match build_tls_acceptor(&cert, &other_key) {
+            Ok(_) => panic!("证书/私钥不匹配应失败"),
+            Err(err) => assert!(
+                err.contains("证书与私钥不匹配") || err.contains("set_private_key 失败"),
+                "应在 PEM 校验阶段失败: {}",
+                err
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tls_termination_end_to_end() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        // 1. Boot a plaintext upstream that echoes after greeting — 启动明文上游：先写问候再回显
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = upstream_listener.accept().await.unwrap();
+            sock.write_all(b"hello-from-upstream\n").await.unwrap();
+            let mut buf = [0u8; 64];
+            if let Ok(n) = sock.read(&mut buf).await {
+                let _ = sock.write_all(&buf[..n]).await;
+            }
+        });
+
+        // 2. Build TLS acceptor from a self-signed cert — 用自签证书构建 TLS acceptor
+        let (cert_pem, key_pem) = make_self_signed_cert("kong.test");
+        let acceptor = Arc::new(build_tls_acceptor(&cert_pem, &key_pem).unwrap());
+
+        // 3. Boot a TLS listener that performs termination then forwards to upstream
+        // 3. 启动 TLS 监听器，完成握手后转发到上游
+        let tls_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls_addr = tls_listener.local_addr().unwrap();
+        let acceptor_clone = Arc::clone(&acceptor);
+        tokio::spawn(async move {
+            let (down, _) = tls_listener.accept().await.unwrap();
+            let ssl = openssl::ssl::Ssl::new(acceptor_clone.context()).unwrap();
+            let mut tls = tokio_openssl::SslStream::new(ssl, down).unwrap();
+            std::pin::Pin::new(&mut tls).accept().await.unwrap();
+            let mut up = TcpStream::connect(upstream_addr).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut tls, &mut up).await;
+        });
+
+        // 4. Connect as a TLS client and verify forwarded data — 作为 TLS 客户端连接并验证数据转发
+        let mut connector_builder =
+            openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls()).unwrap();
+        connector_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+        let connector = connector_builder.build();
+        let ssl = connector.configure().unwrap().into_ssl("kong.test").unwrap();
+        let tcp = TcpStream::connect(tls_addr).await.unwrap();
+        let mut tls = tokio_openssl::SslStream::new(ssl, tcp).unwrap();
+        std::pin::Pin::new(&mut tls).connect().await.unwrap();
+
+        // Read upstream greeting through TLS — 通过 TLS 读取上游问候
+        let mut buf = vec![0u8; 32];
+        let n = tls.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello-from-upstream\n");
+
+        // Roundtrip echo — 写入并读回
+        tls.write_all(b"ping").await.unwrap();
+        let mut echo = [0u8; 4];
+        tls.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"ping");
     }
 }

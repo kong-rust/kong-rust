@@ -17,8 +17,9 @@ pub mod migrations;
 pub use cache::{CacheConfig, KongCache};
 pub use dao::postgres::{
     self, ai_model_schema, ai_provider_schema, ai_virtual_key_schema, ca_certificate_schema,
-    certificate_schema, consumer_schema, plugin_schema, route_schema, service_schema, sni_schema,
-    target_schema, upstream_schema, vault_schema, ColumnType, EntitySchema, PgDao,
+    certificate_schema, consumer_schema, key_schema, key_set_schema, plugin_schema, route_schema,
+    service_schema, sni_schema, target_schema, upstream_schema, vault_schema, ColumnType,
+    EntitySchema, PgDao,
 };
 pub use database::Database;
 pub use dbless::{DblessDao, DblessStore};

@@ -28,3 +28,5 @@ chrono = { workspace = true }
 hickory-resolver = { workspace = true }
 tempfile = { workspace = true }
 percent-encoding = "2"
+openssl = "0.10"
+tokio-openssl = "0.6"

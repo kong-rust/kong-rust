@@ -1818,6 +1818,7 @@ dependencies = [
  "kong-lua-bridge",
  "kong-plugin-system",
  "kong-router",
+ "openssl",
  "percent-encoding",
  "pingora",
  "pingora-core",
@@ -1829,6 +1830,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-openssl",
  "tracing",
  "uuid",
 ]
