@@ -10,6 +10,7 @@ use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 use crate::plugins::context::AiRequestState;
 use crate::ratelimit::RateLimiter;
 use crate::ratelimit::memory::MemoryRateLimiter;
+use crate::token::{global_registry, TokenCounter, TokenizerRegistry};
 
 // ============ 插件配置 ============
 
@@ -139,12 +140,11 @@ impl PluginHandler for AiRateLimitPlugin {
 
         // 3. 检查 TPM（预扣估算值，原子 check-and-increment）
         if let Some(tpm_limit) = cfg.tpm_limit {
-            // 预扣：用请求体长度 / 4 估算 prompt tokens
-            let estimated = ctx
-                .request_body
-                .as_ref()
-                .map(|b| ((b.len() as u64) + 3) / 4)
-                .unwrap_or(0);
+            // 预扣：优先用 TokenizerRegistry 精确计算(双轨/HF/远端 API);
+            // registry 未注册或 body 缺失时降级到字符估算保持向后兼容
+            // Pre-debit: prefer TokenizerRegistry for accurate count;
+            // fall back to byte/4 estimation when registry is absent or body missing
+            let estimated = compute_estimated_prompt_tokens(ctx).await;
 
             let tpm_key = format!("{}:tpm", rate_key);
             let (allowed, current) = self.limiter.check_and_increment(&tpm_key, tpm_limit, estimated);
@@ -194,4 +194,50 @@ impl PluginHandler for AiRateLimitPlugin {
         }
         Ok(())
     }
+}
+
+// ============ 辅助函数 / Helpers ============
+
+/// 计算 prompt token 预扣值
+/// Compute the prompt-token pre-debit value.
+///
+/// 优先级 / Priority:
+/// 1. 上游已写入的 `AiRequestState.estimated_prompt_tokens`(ai-proxy 在更晚的 priority 执行,
+///    本插件 priority=771 早于 ai-proxy 770,通常拿不到 — 仅当 priority 顺序被外部调换时生效)
+///    Honor pre-existing AiRequestState (only present if priority order has been swapped externally)
+/// 2. 全局 TokenizerRegistry → count_prompt_from_body(自己解析 body,启发式推断 provider)
+///    Global TokenizerRegistry path
+/// 3. 字符估算(byte_len / 4)— 与历史行为兼容
+///    Char estimation fallback — preserves historical behavior
+async fn compute_estimated_prompt_tokens(ctx: &kong_core::traits::RequestCtx) -> u64 {
+    // 1. 上游可能已经把精确值写入 AiRequestState
+    if let Some(state) = ctx.extensions.get::<AiRequestState>() {
+        if state.estimated_prompt_tokens > 0 {
+            return state.estimated_prompt_tokens;
+        }
+    }
+
+    let body = match ctx.request_body.as_deref() {
+        Some(b) if !b.is_empty() => b,
+        _ => return 0,
+    };
+
+    // 2. registry 路径
+    if let Some(registry) = global_registry() {
+        // 从 body 中嗅出 model 名以决定 provider strategy(失败则空字符串)
+        let model_name = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("model")
+                    .and_then(|m| m.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+        let provider_type = TokenizerRegistry::infer_provider_type(&model_name);
+        return registry
+            .count_prompt_from_body(provider_type, &model_name, body)
+            .await;
+    }
+
+    // 3. 历史 byte/4 估算兜底
+    TokenCounter::count_estimate(body)
 }

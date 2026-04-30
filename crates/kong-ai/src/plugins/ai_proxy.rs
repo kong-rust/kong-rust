@@ -546,6 +546,22 @@ impl PluginHandler for AiProxyPlugin {
                 .and_then(|r| r.stream)
                 .unwrap_or(false);
 
+            // 通过 TokenizerRegistry 计算 prompt token 估值(供下游消费)
+            // body 是 v1/responses 格式,registry 内部尝试解析为 ChatRequest 失败时
+            // 自动 fallback 到 byte-length 估算(等同当前行为)
+            let estimated_prompt_tokens = match crate::token::global_registry() {
+                Some(registry) => {
+                    registry
+                        .count_prompt_from_body(
+                            &provider_config.provider_type,
+                            &ai_model.model_name,
+                            body_str,
+                        )
+                        .await
+                }
+                None => crate::token::TokenCounter::count_estimate(body_str),
+            };
+
             let upstream = driver
                 .configure_upstream(&ai_model, &provider_config, stream_mode)
                 .map_err(|e| KongError::PluginError {
@@ -594,6 +610,7 @@ impl PluginHandler for AiProxyPlugin {
                 responses_event_state: None,
                 stripped_tools: None,
                 stream_tool_call_count: 0,
+                estimated_prompt_tokens,
             };
             ctx.extensions.insert(ai_state);
             ctx.upstream_force_http1 = true;
@@ -662,6 +679,21 @@ impl PluginHandler for AiProxyPlugin {
             ai_model.model_name, provider_config.provider_type, stream_mode
         );
 
+        // 通过 TokenizerRegistry 精确计算 prompt token 估值
+        // (chat_request 已规范化,直接传 ChatRequest 引用,registry 内含 deadline + estimate 兜底)
+        let estimated_prompt_tokens = match crate::token::global_registry() {
+            Some(registry) => {
+                registry
+                    .count_prompt(
+                        &provider_config.provider_type,
+                        &chat_request.model,
+                        &chat_request,
+                    )
+                    .await
+            }
+            None => crate::token::estimate_from_request(&chat_request),
+        };
+
         // 11. 存储跨阶段状态
         let responses_mode = is_responses_route;
         let ai_state = AiRequestState {
@@ -686,6 +718,7 @@ impl PluginHandler for AiProxyPlugin {
             },
             stripped_tools,
             stream_tool_call_count: 0,
+            estimated_prompt_tokens,
         };
 
         ctx.extensions.insert(ai_state);
