@@ -18,8 +18,10 @@ use regex::Regex;
 use crate::codec::ChatRequest;
 
 use super::counter::TokenCounter;
+use super::hf_loader::{default_cache_dir, HfDownloader, HfLoader};
 use super::tokenizer::{
-    estimate_from_request, NoopTokenizer, OpenAiTokenizer, PromptTokenizer, TiktokenTokenizer,
+    estimate_from_request, HfTokenizer, NoopTokenizer, OpenAiTokenizer, PromptTokenizer,
+    TiktokenTokenizer,
 };
 
 /// Tokenizer 配置 — 由 kong.conf [ai.tokenizer] 段加载
@@ -31,6 +33,12 @@ pub struct TokenizerConfig {
     /// 远端 count API 单次 HTTP timeout
     /// remote count API per-call HTTP timeout
     pub remote_count_timeout: Duration,
+    /// HuggingFace tokenizer.json 缓存目录
+    /// HuggingFace tokenizer.json cache directory
+    pub hf_cache_dir: Option<std::path::PathBuf>,
+    /// 离线模式:仅读 HF 缓存,不发起下载
+    /// offline mode: read HF cache only, no downloads
+    pub offline: bool,
     /// 模型名 → strategy 显式映射(优先级最高)
     /// model name → strategy explicit mapping (highest precedence)
     pub mappings: Vec<TokenizerMapping>,
@@ -48,6 +56,8 @@ impl Default for TokenizerConfig {
             // 用户调整后的默认值 — adjusted defaults per requirements
             per_request_deadline: Duration::from_millis(300),
             remote_count_timeout: Duration::from_secs(1),
+            hf_cache_dir: None,
+            offline: false,
             mappings: Vec::new(),
             cache_capacity: 1024,
             cache_ttl: Duration::from_secs(60),
@@ -92,11 +102,25 @@ pub struct TokenizerRegistry {
     /// 按 strategy 缓存 tokenizer 实例
     /// Tokenizer instance cache keyed by strategy
     tokenizers: DashMap<TokenizerStrategy, Arc<dyn PromptTokenizer>>,
+    /// HuggingFace 本地 tokenizer 加载器(磁盘缓存 + 单飞下载)
+    /// HuggingFace local tokenizer loader (disk cache + single-flight download)
+    hf_loader: Arc<HfLoader>,
 }
 
 impl TokenizerRegistry {
-    /// 用配置构造 registry,提前编译 mapping 正则
+    /// 用配置构造 registry,提前编译 mapping 正则 + 自动构造 HfLoader
     pub fn new(config: TokenizerConfig) -> Self {
+        let cache_dir = config
+            .hf_cache_dir
+            .clone()
+            .unwrap_or_else(default_cache_dir);
+        let hf_loader = Arc::new(HfLoader::new(cache_dir, config.offline));
+        Self::with_hf_loader(config, hf_loader)
+    }
+
+    /// 注入式构造 — 测试或自定义 HfLoader 用
+    /// Inject a custom HfLoader (e.g. with a mock downloader for tests)
+    pub fn with_hf_loader(config: TokenizerConfig, hf_loader: Arc<HfLoader>) -> Self {
         let compiled_mappings = config
             .mappings
             .iter()
@@ -111,7 +135,25 @@ impl TokenizerRegistry {
             config,
             compiled_mappings,
             tokenizers: DashMap::new(),
+            hf_loader,
         }
+    }
+
+    /// 注入式构造 — 直接传入 HfDownloader 实现(自动包装 HfLoader)
+    pub fn with_hf_downloader(
+        config: TokenizerConfig,
+        downloader: Arc<dyn HfDownloader>,
+    ) -> Self {
+        let cache_dir = config
+            .hf_cache_dir
+            .clone()
+            .unwrap_or_else(default_cache_dir);
+        let hf_loader = Arc::new(HfLoader::with_downloader(
+            cache_dir,
+            config.offline,
+            downloader,
+        ));
+        Self::with_hf_loader(config, hf_loader)
     }
 
     /// 主入口:基于已解析的 ChatRequest 计算 prompt token
@@ -246,10 +288,34 @@ impl TokenizerRegistry {
             // Tiktoken 直路 — 用于 vLLM / Ollama 等 OpenAI 兼容接口托管的开源模型(无远端 API)
             // Direct tiktoken — for open-source models served via OpenAI-compatible endpoints
             TokenizerStrategy::Tiktoken => Arc::new(TiktokenTokenizer),
-            // Step 3 实装 HuggingFace,Step 4 实装 Anthropic/Gemini 远端
-            // Stubs until step 3 (HF) and step 4 (remote count) land
-            TokenizerStrategy::HuggingFace
-            | TokenizerStrategy::Anthropic
+            // HuggingFace 走真实 HfTokenizer — 注入共享 HfLoader + repo_resolver closure
+            // HuggingFace path uses real HfTokenizer with shared HfLoader and repo_resolver
+            TokenizerStrategy::HuggingFace => {
+                let mappings: Vec<(Regex, TokenizerStrategy, Option<String>)> = self
+                    .compiled_mappings
+                    .iter()
+                    .map(|(r, s, h)| (r.clone(), *s, h.clone()))
+                    .collect();
+                let resolver = Arc::new(move |model: &str| -> Option<String> {
+                    for (re, _, repo) in mappings.iter() {
+                        if re.is_match(model) {
+                            if let Some(repo) = repo {
+                                return Some(repo.clone());
+                            }
+                            break;
+                        }
+                    }
+                    if model.contains('/') {
+                        Some(model.to_string())
+                    } else {
+                        None
+                    }
+                });
+                Arc::new(HfTokenizer::new(self.hf_loader.clone(), resolver))
+            }
+            // Step 4 实装 Anthropic/Gemini 远端
+            // Stubs until step 4 (remote count) lands
+            TokenizerStrategy::Anthropic
             | TokenizerStrategy::Gemini
             | TokenizerStrategy::Estimate => Arc::new(NoopTokenizer),
         };

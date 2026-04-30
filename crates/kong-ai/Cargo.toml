@@ -21,8 +21,12 @@ anymap2 = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+# Step 3: HuggingFace tokenizer.json 本地加载(开源模型 LLaMA/Qwen/Mistral 等)
+tokenizers = { workspace = true }
+# Step 3: HF tokenizer.json 远端下载(reqwest 提到主 deps)
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true }
-reqwest = { workspace = true }
+tempfile = { workspace = true }

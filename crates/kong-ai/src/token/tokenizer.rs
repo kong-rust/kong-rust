@@ -9,9 +9,13 @@
 //! - Tiktoken: 直接 tiktoken-rs(开源模型走 OpenAI 兼容接口时用)
 //! - Estimate: 占位,永远返回 None
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::codec::ChatRequest;
+
+use super::hf_loader::HfLoader;
 
 /// Async tokenizer — 异步 tokenizer
 /// `count_prompt` 返回 None 表示该实现未能精确计算,由 registry 兜底走字符估算
@@ -259,4 +263,61 @@ pub(crate) fn count_with_tiktoken(model: &str, request: &ChatRequest) -> Option<
     let bpe = tiktoken_rs::get_bpe_from_model(model).ok()?;
     let text = extract_prompt_text(request);
     Some(bpe.encode_with_special_tokens(&text).len() as u64)
+}
+
+// ============ HuggingFace 本地 tokenizer ============
+
+/// HuggingFace tokenizer.json 本地编码 tokenizer
+/// HuggingFace local tokenizer.json encoding tokenizer
+///
+/// - 通过 [`HfLoader`] 拿到已加载的 `tokenizers::Tokenizer`(共享 Arc,无重复加载)
+///   Looks up cached `tokenizers::Tokenizer` via shared HfLoader
+/// - 找不到 → spawn 后台下载,本次返回 None,registry 自动 fallback 到字符估算
+///   Cache miss → spawns background download and returns None this round
+/// - 模型名 → repo_id 解析顺序:① 配置 mapping ② model 名直接当 repo_id(若含 `/`)
+///   Model name → repo_id resolution: config mapping → model itself if it looks like a repo
+pub struct HfTokenizer {
+    loader: Arc<HfLoader>,
+    /// 模型名 → repo_id 解析器(由 registry 注入,反映配置 mapping)
+    /// Model name → repo_id resolver, supplied by registry to reflect config mappings
+    repo_resolver: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
+impl HfTokenizer {
+    pub fn new(
+        loader: Arc<HfLoader>,
+        repo_resolver: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    ) -> Self {
+        Self {
+            loader,
+            repo_resolver,
+        }
+    }
+}
+
+#[async_trait]
+impl PromptTokenizer for HfTokenizer {
+    async fn count_prompt(&self, model: &str, request: &ChatRequest) -> Option<u64> {
+        let repo_id = (self.repo_resolver)(model)?;
+        // 同步快路径:命中即编码;未命中则后台下载,本次返回 None 让 registry estimate 兜底
+        // Hot path returns immediately; misses spawn a background download
+        let tok = self.loader.try_get(&repo_id)?;
+        // TODO(multimodal): 当前只编码文本内容(extract_prompt_text 在 array content 中只取
+        //   type=text 的 part,自动忽略 image_url / input_audio / input_file 等多模态字段)。
+        //   后续多模态精确计数需要:
+        //   ① 各模型 vision tower 的 patch token 计算(LLaVA/Qwen-VL/InternVL 公式不同)
+        //   ② image preprocessing pipeline(原图尺寸 → resize → patch grid → token 数)
+        //   ③ audio/file 模态的对应预处理与 token 估算
+        //   暂时只算文本部分 — 不降级到字符估算(因为文本部分已经精确了)。
+        // TODO(multimodal): currently encodes text-only content; image_url / input_audio /
+        //   input_file are dropped by extract_prompt_text. Full multimodal accounting needs
+        //   per-model vision/audio token formulas — deferred.
+        let text = extract_prompt_text(request);
+        let encoding = tok.encode(text, false).ok()?;
+        Some(encoding.len() as u64)
+    }
+
+    fn name(&self) -> &str {
+        "hf-local"
+    }
 }
