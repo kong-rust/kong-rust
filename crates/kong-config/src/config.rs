@@ -206,6 +206,34 @@ pub struct KongConfig {
     /// Stores dynamic configuration with nginx_* prefix — 存储 nginx_* 前缀的动态配置
     pub nginx_directives: HashMap<String, String>,
 
+    // ========== AI Tokenizer (prompt-token 精确计数) — AI Tokenizer (precise prompt-token counting) ==========
+    /// 全局 tokenizer 启用开关(默认 true)— global tokenizer enable flag
+    pub ai_tokenizer_enabled: bool,
+    /// per-request 整体 deadline(毫秒,默认 300)— per-request deadline in ms
+    pub ai_tokenizer_per_request_deadline_ms: u64,
+    /// 远端 count API 单次 timeout(毫秒,默认 1000)— per-call remote API HTTP timeout in ms
+    pub ai_tokenizer_remote_count_timeout_ms: u64,
+    /// 远端 count 结果 LRU 容量(默认 1024)
+    pub ai_tokenizer_cache_capacity: u64,
+    /// 远端 count 结果 LRU TTL(秒,默认 60)
+    pub ai_tokenizer_cache_ttl_seconds: u64,
+    /// HF 离线模式(true 时仅读磁盘缓存,不发起下载;默认 false)
+    pub ai_tokenizer_offline: bool,
+    /// HF tokenizer.json 缓存目录(默认 None → default_cache_dir())
+    pub ai_tokenizer_cache_dir: Option<String>,
+    /// OpenAI Responses input_tokens 端点 base URL(默认 None → 官方 https://api.openai.com)
+    pub ai_tokenizer_openai_endpoint: Option<String>,
+    /// OpenAI API key(为空时双轨退化为 HF + tiktoken,远端不启用)
+    pub ai_tokenizer_openai_api_key: Option<String>,
+    /// Anthropic count_tokens 端点 base URL(默认 None → https://api.anthropic.com)
+    pub ai_tokenizer_anthropic_endpoint: Option<String>,
+    /// Anthropic API key(为空时 Anthropic 永远走字符估算)
+    pub ai_tokenizer_anthropic_api_key: Option<String>,
+    /// Gemini countTokens 端点 base URL(默认 None → https://generativelanguage.googleapis.com)
+    pub ai_tokenizer_gemini_endpoint: Option<String>,
+    /// Gemini API key(为空时 Gemini 永远走字符估算)
+    pub ai_tokenizer_gemini_api_key: Option<String>,
+
     // ========== Raw configuration data (for custom access) — 原始配置数据（用于自定义访问） ==========
     pub raw: HashMap<String, String>,
 }
@@ -406,6 +434,21 @@ impl Default for KongConfig {
 
             // Nginx dynamic directives — Nginx 动态指令
             nginx_directives: HashMap::new(),
+
+            // AI Tokenizer — defaults match TokenizerConfig::default() in kong-ai
+            ai_tokenizer_enabled: true,
+            ai_tokenizer_per_request_deadline_ms: 300,
+            ai_tokenizer_remote_count_timeout_ms: 1000,
+            ai_tokenizer_cache_capacity: 1024,
+            ai_tokenizer_cache_ttl_seconds: 60,
+            ai_tokenizer_offline: false,
+            ai_tokenizer_cache_dir: None,
+            ai_tokenizer_openai_endpoint: None,
+            ai_tokenizer_openai_api_key: None,
+            ai_tokenizer_anthropic_endpoint: None,
+            ai_tokenizer_anthropic_api_key: None,
+            ai_tokenizer_gemini_endpoint: None,
+            ai_tokenizer_gemini_api_key: None,
 
             // Raw data — 原始数据
             raw: HashMap::new(),
@@ -650,6 +693,41 @@ impl KongConfig {
             }
             "proxy_hide_server_header" => self.proxy_hide_server_header = parse_bool(value),
             "proxy_response_headers" => self.proxy_response_headers = parse_header_list(value),
+
+            // AI Tokenizer — AI tokenizer 配置
+            "ai_tokenizer_enabled" => self.ai_tokenizer_enabled = parse_bool(value),
+            "ai_tokenizer_per_request_deadline_ms" => {
+                self.ai_tokenizer_per_request_deadline_ms = value.parse().unwrap_or(300)
+            }
+            "ai_tokenizer_remote_count_timeout_ms" => {
+                self.ai_tokenizer_remote_count_timeout_ms = value.parse().unwrap_or(1000)
+            }
+            "ai_tokenizer_cache_capacity" => {
+                self.ai_tokenizer_cache_capacity = value.parse().unwrap_or(1024)
+            }
+            "ai_tokenizer_cache_ttl_seconds" => {
+                self.ai_tokenizer_cache_ttl_seconds = value.parse().unwrap_or(60)
+            }
+            "ai_tokenizer_offline" => self.ai_tokenizer_offline = parse_bool(value),
+            "ai_tokenizer_cache_dir" => self.ai_tokenizer_cache_dir = none_if_empty(value),
+            "ai_tokenizer_openai_endpoint" => {
+                self.ai_tokenizer_openai_endpoint = none_if_empty(value)
+            }
+            "ai_tokenizer_openai_api_key" => {
+                self.ai_tokenizer_openai_api_key = none_if_empty(value)
+            }
+            "ai_tokenizer_anthropic_endpoint" => {
+                self.ai_tokenizer_anthropic_endpoint = none_if_empty(value)
+            }
+            "ai_tokenizer_anthropic_api_key" => {
+                self.ai_tokenizer_anthropic_api_key = none_if_empty(value)
+            }
+            "ai_tokenizer_gemini_endpoint" => {
+                self.ai_tokenizer_gemini_endpoint = none_if_empty(value)
+            }
+            "ai_tokenizer_gemini_api_key" => {
+                self.ai_tokenizer_gemini_api_key = none_if_empty(value)
+            }
 
             // nginx_* dynamic directives — nginx_* 动态指令
             _ if key.starts_with("nginx_") => {

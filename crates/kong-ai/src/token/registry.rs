@@ -68,6 +68,28 @@ pub struct TokenizerConfig {
     pub gemini_api_key: Option<String>,
 }
 
+impl TokenizerConfig {
+    /// 从 KongConfig 派生 TokenizerConfig — 由 kong-server 启动时调用
+    /// Build TokenizerConfig from KongConfig (called once at kong-server startup)
+    pub fn from_kong_config(cfg: &kong_config::KongConfig) -> Self {
+        Self {
+            per_request_deadline: Duration::from_millis(cfg.ai_tokenizer_per_request_deadline_ms),
+            remote_count_timeout: Duration::from_millis(cfg.ai_tokenizer_remote_count_timeout_ms),
+            hf_cache_dir: cfg.ai_tokenizer_cache_dir.as_ref().map(std::path::PathBuf::from),
+            offline: cfg.ai_tokenizer_offline,
+            mappings: Vec::new(),
+            cache_capacity: cfg.ai_tokenizer_cache_capacity,
+            cache_ttl: Duration::from_secs(cfg.ai_tokenizer_cache_ttl_seconds),
+            openai_endpoint: cfg.ai_tokenizer_openai_endpoint.clone(),
+            openai_api_key: cfg.ai_tokenizer_openai_api_key.clone(),
+            anthropic_endpoint: cfg.ai_tokenizer_anthropic_endpoint.clone(),
+            anthropic_api_key: cfg.ai_tokenizer_anthropic_api_key.clone(),
+            gemini_endpoint: cfg.ai_tokenizer_gemini_endpoint.clone(),
+            gemini_api_key: cfg.ai_tokenizer_gemini_api_key.clone(),
+        }
+    }
+}
+
 impl Default for TokenizerConfig {
     fn default() -> Self {
         Self {

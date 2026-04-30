@@ -864,3 +864,66 @@ curl -X POST http://localhost:8001/ai-providers \
     "auth_config": {}
   }'
 ```
+
+## 10. Precise Prompt-Token Counting (Tokenizer Registry)
+
+### 10.1 Overview
+
+To give `ai-rate-limit` a precise TPM pre-debit and the balancer a working `by_token_size` route, Kong-Rust ships a unified token counter:
+
+```
+For every model:
+  has_non_text == true   → remote count API → HF fallback → tiktoken fallback → char estimate
+  has_non_text == false  → HF local encoding → tiktoken fallback → char estimate
+```
+
+`has_non_text` is decided by `has_non_text_content(request)` — true when the request includes any of: `image_url`, `tools`, `function_call`, `response_format`, `input_audio`, etc.
+
+### 10.2 Per-provider routing
+
+| Provider | Text path | Non-text path |
+|----------|-----------|---------------|
+| OpenAI (`gpt-4o*` / `gpt-4*` / `gpt-3.5*`) | HF `Xenova/gpt-4o` etc. → tiktoken | `POST /v1/responses/input_tokens` → HF → tiktoken |
+| OpenAI o1/o3/o4 | tiktoken-rs (no Xenova port yet) | `POST /v1/responses/input_tokens` → tiktoken |
+| Anthropic Claude | `POST /v1/messages/count_tokens` | same |
+| Google Gemini | `POST /v1beta/models/{model}:countTokens` | same |
+| HuggingFace open-source (LLaMA/Qwen/Mistral) | HF local tokenizer.json | same (multimodal counts text only for now) |
+| OpenAI-compat (vLLM/Ollama) | tiktoken-rs | tiktoken-rs |
+
+### 10.3 Shared LRU
+
+All three remote clients share a moka LRU. Key = `(provider, model, has_non_text, sha256(prompt))`, default capacity 1024, TTL 60s. Local paths (tiktoken / HF) are not cached.
+
+### 10.4 HF first-touch (non-blocking)
+
+When a brand-new repo (e.g. `Qwen/Qwen2.5-7B`) is hit:
+1. `try_get` returns None synchronously.
+2. A `tokio::spawn` task downloads `tokenizer.json` (single-flight CAS, concurrent calls merge into one).
+3. This request degrades to char estimation (does not block).
+4. Subsequent requests hit Loaded synchronously (1-10ms encode).
+
+### 10.5 Config (kong.conf)
+
+```ini
+ai_tokenizer_enabled = true
+ai_tokenizer_per_request_deadline_ms = 300
+ai_tokenizer_remote_count_timeout_ms = 1000
+ai_tokenizer_cache_capacity = 1024
+ai_tokenizer_cache_ttl_seconds = 60
+ai_tokenizer_offline = false
+
+# Per-provider API keys (omit to disable that remote path)
+ai_tokenizer_openai_api_key = sk-...
+ai_tokenizer_anthropic_api_key = sk-ant-...
+ai_tokenizer_gemini_api_key = AIzaSy...
+```
+
+### 10.6 Known limitations
+
+- HF multimodal token accounting deferred — only text is counted; `image_url`/`input_audio` tokens require per-model vision-tower patch formulas.
+- OpenAI count endpoint requires a real OpenAI API key (Azure has its own variant).
+- Offline mode reads the HF disk cache only; misses degrade once.
+
+### 10.7 by_token_size routing
+
+Set `AiModel.max_input_tokens` per model and the balancer's `select_for(prompt_tokens)` filters candidates that don't fit. When the entire priority tier is filtered out, it falls back to the next tier — short prompts route to small models for cost, long prompts auto-escalate.

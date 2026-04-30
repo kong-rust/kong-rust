@@ -470,6 +470,45 @@
   - 与 Kong 原版对比吞吐量和 P99 延迟的基线数据
   - 文件：`benches/`（新建目录）, `Cargo.toml`
 
+## 阶段 19A:AI Tokenizer — 精确 prompt-token 计数
+
+- [x] **19A.1** PromptTokenizer 抽象 + TokenizerRegistry + 接入 ai-rate-limit / ai-proxy `[R8/AI]`
+  - `crates/kong-ai/src/token/tokenizer.rs`:`PromptTokenizer` async trait + `OpenAiTokenizer`(组合体)+ `TiktokenTokenizer` + `NoopTokenizer` + `HfTokenizer` + `extract_prompt_text` + `has_non_text_content` 多模态/工具调用判定 + `estimate_from_request` 字符估算
+  - `crates/kong-ai/src/token/registry.rs`:`TokenizerRegistry`(策略路由 + per-strategy tokenizer 缓存 + per-request deadline 包外层兜底)+ `TokenizerConfig`(deadline=300ms / remote=1s / cache=1024 entries / TTL=60s 默认)+ 全局 `OnceLock` 单例 + `infer_provider_type` 启发式
+  - 接入 `ai_rate_limit.rs::compute_estimated_prompt_tokens` 三级降级链(state > registry > byte/4)
+  - 接入 `ai_proxy.rs` 写入 `AiRequestState.estimated_prompt_tokens`
+  - 文件:`crates/kong-ai/src/token/{tokenizer.rs,registry.rs,mod.rs}`、`crates/kong-ai/src/plugins/{ai_proxy.rs,ai_rate_limit.rs,context.rs}`
+  - 30 个单测(tests/tokenizer_registry_test.rs):has_non_text 全场景、双轨分流、infer 启发式、deadline 降级、mapping 覆盖、global singleton
+
+- [x] **19A.2** balancer by_token_size — 候选过滤 + max_input_tokens fallback `[R8]`
+  - `AiModel.max_input_tokens: Option<i32>` 字段 + `ModelGroupBalancer::select_for(prompt_tokens)` 接 token 阈值过滤
+  - `select()` 转发为 `select_for(None)`,行为兼容
+  - 同 priority 全过滤 → fallback 下一档;cap=0/<0 视作无限制
+  - 文件:`crates/kong-ai/src/{models.rs,provider/balancer.rs}`
+  - 8 个单测(tests/balancer_test.rs 新增):None 禁用过滤、unbounded、同 tier 过滤、priority fallback、全 oversize Err、边界 ==cap、cap+1 过滤、cap<=0 无限制
+
+- [x] **19A.3** HuggingFace 本地 tokenizer.json 加载 + 单飞 + 离线 + 首次降级 `[R8]`
+  - `crates/kong-ai/src/token/hf_loader.rs`:`HfLoader` 状态机(Empty/Pending/Loaded/Failed)+ `HfDownloader` trait + `HttpHfDownloader`(reqwest)+ 单飞 CAS + 原子 rename + offline 模式 + Failed 永久缓存
+  - `HfTokenizer impl PromptTokenizer`:repo_resolver 注入式;cache miss 立即返回 None,后台 spawn 单飞下载;**多模态先只编码文本**(extract_prompt_text 自然忽略 image_url),加 TODO(multimodal) 注释说明后续工作
+  - 依赖:`tokenizers = "0.23"` 添加到 workspace
+  - 文件:`crates/kong-ai/src/token/{hf_loader.rs,tokenizer.rs}`、`Cargo.toml`、`crates/kong-ai/Cargo.toml`
+  - 11 个单测(tests/hf_loader_test.rs):磁盘命中、首次降级、单飞合并、离线两种、永久失败、registry 集成、mapping 显式 repo
+
+- [x] **19A.4** 远端 count(OpenAI / Anthropic / Gemini)+ 共享 LRU + has_non_text 维度 `[R8]`
+  - `crates/kong-ai/src/token/remote_count.rs`:`RemoteCountClient` trait + `RemoteCountKey`(sha256 prompt)+ moka LRU(capacity/TTL 来自配置)+ 三个 client(OpenAI、Anthropic、Gemini)+ `build_openai_responses_body`(Chat Completions → Responses input 转换,tool_calls/tool_call_id/name/functions/function_call 全字段透传)
+  - 端点:OpenAI `POST /v1/responses/input_tokens`(Bearer 认证,响应字段优先 `input_tokens` > `usage.input_tokens` > `usage.prompt_tokens`)、Anthropic `POST /v1/messages/count_tokens`(`x-api-key` + `anthropic-version: 2023-06-01`,system role 提到顶层)、Gemini `POST /v1beta/models/{model}:countTokens?key=`(角色 assistant→model)
+  - **OpenAI 组合 tokenizer**:`OpenAiTokenizer::with_hf_and_remote(hf, remote)`,优先级 = Remote(非文本)→ HF(Xenova/gpt-4o 系列内置 mapping)→ tiktoken-rs 兜底
+  - `TokenizerConfig` 加 6 个字段(三家 endpoint+key);`registry::new()` 自动构造 reqwest::Client + 共享 LRU + 三个 client
+  - 文件:`crates/kong-ai/src/token/{remote_count.rs,tokenizer.rs,registry.rs,mod.rs}`、`crates/kong-ai/Cargo.toml`(reqwest/moka 提到主 deps)
+  - 18 个单测(tests/remote_count_test.rs):mock 路由(纯文本不调远端 / image / tools / 远端失败兜底 / deadline 超时)、Anthropic 三场景、Gemini 失败、真实 HTTP body 解析(OpenAI Bearer + image_url 数组、Anthropic system 提取 + headers、Gemini contents+systemInstruction+URL key)、LRU 命中、LRU key 区分 has_non_text、5xx 降级、OpenAI o1 无 Xenova → tiktoken、OpenAI HF Xenova mapping 端到端命中
+
+- [x] **19A.5** 配置 schema 落地 + 启动注入 `[R8]`
+  - `crates/kong-config/src/config.rs::KongConfig` 加 13 个 ai_tokenizer_* 字段(enabled / deadline / timeout / capacity / ttl / offline / cache_dir / 三家 endpoint+key),全部支持 kong.conf 解析(Kong-style 平铺命名)
+  - `crates/kong-ai/src/token/registry.rs::TokenizerConfig::from_kong_config(&KongConfig)` 转换器
+  - `crates/kong-server/src/main.rs::build_plugin_registry`:启动时根据配置构造并注入全局 registry,启用日志可见
+  - 文件:`crates/kong-config/src/config.rs`(字段 + 默认值 + set 解析)、`crates/kong-ai/src/token/registry.rs`(from_kong_config)、`crates/kong-server/src/main.rs`
+  - workspace 全量回归测试:**0 fail**
+
 ## 阶段 20：优雅生命周期管理
 
 - [x] **20.1** Graceful Shutdown 和连接排空 `[NFR]`
