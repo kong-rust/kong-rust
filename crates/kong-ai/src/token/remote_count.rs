@@ -42,11 +42,48 @@ pub struct RemoteCountKey {
 }
 
 impl RemoteCountKey {
-    /// 用 prompt 文本现场哈希构造 key — sha256(extract_prompt_text(request))
-    /// Build a key by hashing the prompt text on the spot
-    pub fn new(provider: &'static str, model: &str, has_non_text: bool, prompt: &str) -> Self {
+    /// 用 prompt 文本 + tools / tool_choice / 旧版 functions 现场哈希构造 key
+    /// 防止"同 prompt + 不同 tools 定义"撞缓存(两者实际 token 数不同)
+    /// Build a cache key by hashing prompt text plus tools/tool_choice/legacy functions/function_call.
+    /// Without tool fields in the digest, requests with the same prompt but different tool definitions
+    /// would collide and surface stale token counts.
+    pub fn new(
+        provider: &'static str,
+        model: &str,
+        has_non_text: bool,
+        request: &ChatRequest,
+    ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(prompt.as_bytes());
+        // Domain separator 防止字段间内容拼接产生同样字节流(理论上罕见,加分隔符更稳)
+        // Domain separators between fields (defensive against pathological collisions)
+        hasher.update(b"PROMPT|");
+        hasher.update(extract_prompt_text(request).as_bytes());
+
+        if let Some(tools) = &request.tools {
+            hasher.update(b"|TOOLS|");
+            if let Ok(bytes) = serde_json::to_vec(tools) {
+                hasher.update(&bytes);
+            }
+        }
+        if let Some(tc) = &request.tool_choice {
+            hasher.update(b"|TOOL_CHOICE|");
+            if let Ok(bytes) = serde_json::to_vec(tc) {
+                hasher.update(&bytes);
+            }
+        }
+        // 旧版 OpenAI:functions / function_call 在 ChatRequest.extra 里(serde flatten)
+        // Legacy OpenAI functions / function_call live in ChatRequest.extra (serde flatten)
+        for legacy_key in ["functions", "function_call", "response_format"] {
+            if let Some(v) = request.extra.get(legacy_key) {
+                hasher.update(b"|");
+                hasher.update(legacy_key.as_bytes());
+                hasher.update(b"|");
+                if let Ok(bytes) = serde_json::to_vec(v) {
+                    hasher.update(&bytes);
+                }
+            }
+        }
+
         let digest = hasher.finalize();
         let mut sha = [0u8; 32];
         sha.copy_from_slice(&digest);
@@ -148,9 +185,9 @@ impl RemoteCommon {
         provider: &'static str,
         model: &str,
         has_non_text: bool,
-        prompt: &str,
+        request: &ChatRequest,
     ) -> (RemoteCountKey, Option<u64>) {
-        let key = RemoteCountKey::new(provider, model, has_non_text, prompt);
+        let key = RemoteCountKey::new(provider, model, has_non_text, request);
         let cached = self.cache.get(&key);
         (key, cached)
     }
@@ -190,10 +227,9 @@ impl RemoteCountClient for OpenAiCountClient {
         // 缺 api_key → 不发请求(避免 401);双轨外层会自动兜底 tiktoken
         let api_key = self.common.api_key.as_deref()?;
 
-        let prompt_text = extract_prompt_text(request);
         let (key, cached) = self
             .common
-            .cache_get("openai", model, has_non_text, &prompt_text);
+            .cache_get("openai", model, has_non_text, request);
         if let Some(n) = cached {
             return Some(n);
         }
@@ -356,10 +392,9 @@ impl RemoteCountClient for AnthropicCountClient {
     ) -> Option<u64> {
         let api_key = self.common.api_key.as_deref()?;
 
-        let prompt_text = extract_prompt_text(request);
-        let (key, cached) =
-            self.common
-                .cache_get("anthropic", model, has_non_text, &prompt_text);
+        let (key, cached) = self
+            .common
+            .cache_get("anthropic", model, has_non_text, request);
         if let Some(n) = cached {
             return Some(n);
         }
@@ -484,10 +519,9 @@ impl RemoteCountClient for GeminiCountClient {
     ) -> Option<u64> {
         let api_key = self.common.api_key.as_deref()?;
 
-        let prompt_text = extract_prompt_text(request);
         let (key, cached) = self
             .common
-            .cache_get("gemini", model, has_non_text, &prompt_text);
+            .cache_get("gemini", model, has_non_text, request);
         if let Some(n) = cached {
             return Some(n);
         }

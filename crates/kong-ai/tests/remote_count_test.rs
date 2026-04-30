@@ -477,6 +477,102 @@ async fn openai_lru_caches_repeated_requests() {
     let _ = shutdown.send(());
 }
 
+/// 同 prompt 文本但 tools 定义不同 → LRU 必须区分(否则两个不同 tool schema 撞缓存)
+/// Same prompt text but different tool definitions must not share an LRU entry,
+/// otherwise distinct tool schemas would collide and yield stale token counts.
+#[tokio::test]
+async fn openai_lru_key_distinguishes_tools_definition() {
+    let state = OpenAiServerState {
+        return_tokens: 99,
+        ..Default::default()
+    };
+    let app = Router::new()
+        .route("/v1/responses/input_tokens", post(openai_handler))
+        .with_state(state.clone());
+    let (base_url, shutdown) = spawn_server(app).await;
+
+    let cache = Arc::new(RemoteCountCache::default());
+    let client = OpenAiCountClient::new(
+        reqwest::Client::new(),
+        Some(base_url),
+        Some("k".to_string()),
+        cache,
+        Duration::from_secs(2),
+    );
+
+    // 同一 prompt 文本 ("call my tool"),但两个不同的 tools schema
+    let req_a = parse_chat(
+        r#"{
+            "model":"gpt-4",
+            "messages":[{"role":"user","content":"call my tool"}],
+            "tools":[{"type":"function","function":{"name":"f","parameters":{}}}]
+        }"#,
+    );
+    let req_b = parse_chat(
+        r#"{
+            "model":"gpt-4",
+            "messages":[{"role":"user","content":"call my tool"}],
+            "tools":[{"type":"function","function":{"name":"g","parameters":{"type":"object"}}}]
+        }"#,
+    );
+
+    let _ = client.count("gpt-4", &req_a, true).await;
+    let _ = client.count("gpt-4", &req_b, true).await;
+    assert_eq!(
+        state.call_count.load(Ordering::SeqCst),
+        2,
+        "different tools must produce different LRU keys"
+    );
+
+    // 第三次重复 req_a → 命中缓存,不再调用
+    let _ = client.count("gpt-4", &req_a, true).await;
+    assert_eq!(
+        state.call_count.load(Ordering::SeqCst),
+        2,
+        "repeating req_a must hit cache (same prompt+tools)"
+    );
+
+    let _ = shutdown.send(());
+}
+
+/// 同 prompt 但 tool_choice 不同 → 也必须区分
+#[tokio::test]
+async fn openai_lru_key_distinguishes_tool_choice() {
+    let state = OpenAiServerState {
+        return_tokens: 11,
+        ..Default::default()
+    };
+    let app = Router::new()
+        .route("/v1/responses/input_tokens", post(openai_handler))
+        .with_state(state.clone());
+    let (base_url, shutdown) = spawn_server(app).await;
+
+    let cache = Arc::new(RemoteCountCache::default());
+    let client = OpenAiCountClient::new(
+        reqwest::Client::new(),
+        Some(base_url),
+        Some("k".to_string()),
+        cache,
+        Duration::from_secs(2),
+    );
+
+    let req_a = parse_chat(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}"#,
+    );
+    let req_b = parse_chat(
+        r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"tool_choice":"none"}"#,
+    );
+    let _ = client.count("gpt-4", &req_a, true).await;
+    let _ = client.count("gpt-4", &req_b, true).await;
+    assert_eq!(
+        state.call_count.load(Ordering::SeqCst),
+        2,
+        "different tool_choice must not share cache"
+    );
+
+    let _ = shutdown.send(());
+}
+
 // ─── Anthropic mock server 测试 ─────────────────────────────────────────────
 
 #[derive(Clone, Default)]
