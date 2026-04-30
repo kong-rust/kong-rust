@@ -147,3 +147,7 @@ cargo test --workspace         # 全 workspace,0 fail
 - 多模态精确 token 计算(LLaVA/Qwen-VL/InternVL 公式各异)
 - 动态 mapping 配置:kong.conf 支持 `ai_tokenizer_mapping_<n>` 数组(目前只能代码注入)
 - HF 离线包:打包预下载常用模型 tokenizer.json 到 image
+
+## PR
+
+- https://github.com/kong-rust/kong-rust/pull/17 (8 commits: 5 feat + 3 fix)
