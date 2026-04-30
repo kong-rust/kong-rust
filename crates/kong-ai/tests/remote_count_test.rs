@@ -656,28 +656,39 @@ async fn anthropic_real_http_client_sends_correct_body() {
 #[derive(Clone, Default)]
 struct GeminiState {
     last_body: Arc<Mutex<Option<Value>>>,
-    last_model: Arc<Mutex<Option<String>>>,
+    last_path: Arc<Mutex<Option<String>>>,
+    last_header_key: Arc<Mutex<Option<String>>>,
     last_query_key: Arc<Mutex<Option<String>>>,
     return_tokens: u64,
 }
 
 async fn gemini_handler(
     State(state): State<GeminiState>,
-    // axum 不允许 ":xxx" 与 path 参数共段 → 用通配 *path,在 handler 里解析
-    Path(path): Path<String>,
+    // OriginalUri 保留 raw(未 percent-decoded)的 URI,用来验证客户端真的做了编码
+    // OriginalUri preserves the raw (un-decoded) URI for verifying client-side encoding
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
-    // path 形如 "v1beta/models/gemini-1.5-pro:countTokens"
-    let model = path
-        .strip_prefix("v1beta/models/")
-        .and_then(|s| s.strip_suffix(":countTokens"))
-        .unwrap_or(&path)
-        .to_string();
     *state.last_body.lock().unwrap() = Some(body);
-    *state.last_model.lock().unwrap() = Some(model);
+    // raw path 含原始 percent-encoded 序列(`%2F` 等)
+    *state.last_path.lock().unwrap() = Some(uri.path().to_string());
     *state.last_query_key.lock().unwrap() = q.get("key").cloned();
+    *state.last_header_key.lock().unwrap() = headers
+        .get("x-goog-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
     Json(serde_json::json!({"totalTokens": state.return_tokens}))
+}
+
+/// 从 mock server 抓到的 raw path 提取 encoded_model 段
+/// raw path 形如 "/v1beta/models/<encoded_model>:countTokens"(OriginalUri 保留 percent-encoding)
+fn extract_gemini_path_model(path: &str) -> &str {
+    path.strip_prefix("/v1beta/models/")
+        .or_else(|| path.strip_prefix("v1beta/models/"))
+        .and_then(|s| s.strip_suffix(":countTokens"))
+        .unwrap_or(path)
 }
 
 #[tokio::test]
@@ -719,15 +730,71 @@ async fn gemini_real_http_client_sends_correct_body() {
     assert_eq!(contents[1]["role"], "model");
     assert_eq!(contents[0]["parts"][0]["text"], "hi");
 
-    // model 在 path,api_key 在 query
+    // model 走 path(percent-encoded),api_key 走 x-goog-api-key header(不在 query)
+    let raw_path = state.last_path.lock().unwrap().clone().unwrap();
+    assert_eq!(extract_gemini_path_model(&raw_path), "gemini-1.5-pro");
     assert_eq!(
-        state.last_model.lock().unwrap().as_deref(),
-        Some("gemini-1.5-pro")
+        state.last_header_key.lock().unwrap().as_deref(),
+        Some("gem-key"),
+        "api_key must be in x-goog-api-key header"
     );
-    assert_eq!(
-        state.last_query_key.lock().unwrap().as_deref(),
-        Some("gem-key")
+    assert!(
+        state.last_query_key.lock().unwrap().is_none(),
+        "api_key must NOT leak into ?key= query"
     );
+
+    let _ = shutdown.send(());
+}
+
+/// model 名含特殊字符(`/`、空格等)→ 必须 percent-encode,不能破坏 URL 结构
+/// Model names with special chars must be percent-encoded so they cannot break URL structure.
+#[tokio::test]
+async fn gemini_url_encodes_special_chars_in_model() {
+    let state = GeminiState {
+        return_tokens: 7,
+        ..Default::default()
+    };
+    let app = Router::new()
+        .route("/{*path}", post(gemini_handler))
+        .with_state(state.clone());
+    let (base_url, shutdown) = spawn_server(app).await;
+
+    let cache = Arc::new(RemoteCountCache::default());
+    let client = GeminiCountClient::new(
+        reqwest::Client::new(),
+        Some(base_url),
+        Some("k".to_string()),
+        cache,
+        Duration::from_secs(2),
+    );
+
+    // 包含 `/` 和空格的 model 名(防御:即使 Google 官方 model 不会这样,
+    // 用户配置错误或被注入也不应破坏 URL 结构)
+    let weird_model = "tuned/my model";
+    let req = parse_chat(
+        r#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#,
+    );
+    let _ = client.count(weird_model, &req, false).await;
+
+    let raw_path = state.last_path.lock().unwrap().clone().unwrap();
+    let encoded_segment = extract_gemini_path_model(&raw_path);
+    // `/` 必须被编码为 %2F,空格被编码为 %20
+    assert!(
+        encoded_segment.contains("%2F") || encoded_segment.contains("%2f"),
+        "`/` should be percent-encoded, got: {}",
+        encoded_segment
+    );
+    assert!(
+        encoded_segment.contains("%20"),
+        "space should be percent-encoded, got: {}",
+        encoded_segment
+    );
+    // 解码后必须等于原 model
+    let decoded = encoded_segment
+        .replace("%2F", "/")
+        .replace("%2f", "/")
+        .replace("%20", " ");
+    assert_eq!(decoded, weird_model);
 
     let _ = shutdown.send(());
 }

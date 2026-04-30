@@ -487,8 +487,80 @@ impl RemoteCountClient for AnthropicCountClient {
 
 // ============ Gemini 客户端 ============
 
+/// 为 URL path segment 做 RFC 3986 percent-encoding
+/// Percent-encode bytes that are not in the unreserved set, so that `model` names containing
+/// `/`, `?`, `#`, whitespace, etc. cannot break the URL structure.
+pub(crate) fn percent_encode_path_segment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod url_encode_tests {
+    use super::percent_encode_path_segment;
+
+    #[test]
+    fn unreserved_chars_pass_through() {
+        assert_eq!(
+            percent_encode_path_segment("gemini-1.5-pro_v2.test~ok"),
+            "gemini-1.5-pro_v2.test~ok"
+        );
+    }
+
+    #[test]
+    fn slash_encoded() {
+        assert_eq!(percent_encode_path_segment("tuned/x"), "tuned%2Fx");
+    }
+
+    #[test]
+    fn space_encoded() {
+        assert_eq!(percent_encode_path_segment("a b"), "a%20b");
+    }
+
+    #[test]
+    fn question_mark_encoded() {
+        assert_eq!(percent_encode_path_segment("a?b"), "a%3Fb");
+    }
+
+    #[test]
+    fn hash_encoded() {
+        assert_eq!(percent_encode_path_segment("a#b"), "a%23b");
+    }
+
+    #[test]
+    fn colon_encoded() {
+        // 严格保守:也编码 ":" 防 host:port 注入
+        assert_eq!(percent_encode_path_segment("a:b"), "a%3Ab");
+    }
+
+    #[test]
+    fn unicode_utf8_bytes_encoded() {
+        assert_eq!(percent_encode_path_segment("中"), "%E4%B8%AD");
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(percent_encode_path_segment(""), "");
+    }
+}
+
 /// Gemini countTokens 客户端
-/// Endpoint: POST {base}/v1beta/models/{model}:countTokens?key=API_KEY
+/// Endpoint: POST {base}/v1beta/models/{model}:countTokens
+/// 鉴权:`x-goog-api-key` header(早期实现用 ?key= query,但 Google 文档现在推荐 header,
+/// 且把 key 写进 query 会泄漏到 access log / referrer / proxy 缓存)
+/// Auth: `x-goog-api-key` header (Google now recommends header over the legacy ?key= query;
+/// query strings can leak via access logs and intermediate proxies)
 pub struct GeminiCountClient {
     common: RemoteCommon,
 }
@@ -579,16 +651,18 @@ impl RemoteCountClient for GeminiCountClient {
             });
         }
 
+        // model 走 percent-encoding 防止特殊字符破坏 URL;api_key 走 header
+        // model is percent-encoded; api_key goes into the x-goog-api-key header
         let url = format!(
-            "{}/v1beta/models/{}:countTokens?key={}",
+            "{}/v1beta/models/{}:countTokens",
             self.common.base_url.trim_end_matches('/'),
-            model,
-            api_key
+            percent_encode_path_segment(model),
         );
         let req = self
             .common
             .http
             .post(&url)
+            .header("x-goog-api-key", api_key)
             .header("Content-Type", "application/json")
             .json(&body);
 
