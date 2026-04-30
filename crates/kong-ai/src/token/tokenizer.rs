@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use crate::codec::ChatRequest;
 
 use super::hf_loader::HfLoader;
+use super::remote_count::RemoteCountClient;
 
 /// Async tokenizer — 异步 tokenizer
 /// `count_prompt` 返回 None 表示该实现未能精确计算,由 registry 兜底走字符估算
@@ -59,25 +60,53 @@ impl PromptTokenizer for TiktokenTokenizer {
     }
 }
 
-/// OpenAI 双轨 tokenizer — 纯文本走 tiktoken,多模态/结构化走远端 count API
-/// OpenAI dual-path tokenizer — pure text uses tiktoken; multimodal/structured uses remote count API
+/// OpenAI 组合 tokenizer — 主路径 HF 本地编码,失败/Pending 时降到 tiktoken;非文本时叠加远端 count API
+/// OpenAI composite tokenizer — primary local path is HF encoding;
+/// non-text inputs prefer remote API; tiktoken is the final local fallback.
 ///
-/// 选择规则(最高优先级,凌驾于 strategy 之上):
-/// Selection rule (highest precedence, overrides strategy):
-/// - has_non_text_content == false → tiktoken(零延迟、零配额消耗)
-/// - has_non_text_content == true  → 远端 count API → tiktoken 兜底(image patch token 和
-///                                    tool schema 注入开销 tiktoken 算不准)
+/// 优先级链 / Priority chain:
+/// 1. has_non_text == true 且配置了 remote_client → 远端 `/v1/responses/input_tokens`(成功直返)
+/// 2. HF 主路径(Xenova/gpt-4o 等内置 mapping)— HfLoader 命中直接编码
+/// 3. tiktoken-rs(GPT 系兜底,o1/o3 等无 Xenova 端口的模型也走这条)
+/// 4. 全失败 → registry 字符估算兜底
 ///
-/// Step 4 在此结构内部加上 remote count + LRU 缓存。
-/// Step 1 阶段:has_non_text 命中时仍走 tiktoken(等同行为),保留分流骨架。
+/// 不再区分纯文本 / 多模态作为本地路径选择的唯一开关 —— 多模态优先走远端,但本地永远是
+/// 「HF 优先,tiktoken 兜底」。
 pub struct OpenAiTokenizer {
-    // step 4 在这里挂上 RemoteCounter + Arc<LruCache>
-    // step 4: hold RemoteCounter + Arc<LruCache> here
+    /// HF 主路径(由 registry 注入,内置 OpenAI Xenova mapping)
+    /// HF primary path injected by registry, with built-in OpenAI Xenova mapping
+    hf: Option<Arc<HfTokenizer>>,
+    /// 远端 count client(可选 — has_non_text=true 时优先尝试)
+    /// Remote count client (optional) — preferred when has_non_text=true
+    remote: Option<Arc<dyn RemoteCountClient>>,
 }
 
 impl OpenAiTokenizer {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            hf: None,
+            remote: None,
+        }
+    }
+
+    /// 注入远端 count client(由 registry 构造时传入)
+    pub fn with_remote(remote: Arc<dyn RemoteCountClient>) -> Self {
+        Self {
+            hf: None,
+            remote: Some(remote),
+        }
+    }
+
+    /// 注入 HF 主路径 + 可选远端 client
+    /// Inject HF primary path + optional remote client
+    pub fn with_hf_and_remote(
+        hf: Arc<HfTokenizer>,
+        remote: Option<Arc<dyn RemoteCountClient>>,
+    ) -> Self {
+        Self {
+            hf: Some(hf),
+            remote,
+        }
     }
 }
 
@@ -90,18 +119,111 @@ impl Default for OpenAiTokenizer {
 #[async_trait]
 impl PromptTokenizer for OpenAiTokenizer {
     async fn count_prompt(&self, model: &str, request: &ChatRequest) -> Option<u64> {
-        if has_non_text_content(request) {
-            // Multimodal/tools/structured output — should hit remote API per design.
-            // 多模态 / tools / structured output — 按设计应走远端 API
-            // Step 4 implements remote count here; we deliberately fall through to tiktoken
-            // for now so behavior degrades gracefully when remote is unavailable.
-            // Step 4 在此填入远端 count;现阶段直落 tiktoken,保证流程跑通且行为安全降级
+        let has_non_text = has_non_text_content(request);
+
+        // 优先级 1:非文本 → 远端 `/v1/responses/input_tokens`
+        if has_non_text {
+            if let Some(remote) = &self.remote {
+                if let Some(n) = remote.count(model, request, true).await {
+                    return Some(n);
+                }
+                // 远端失败/超时/缺 key → 继续走本地链路
+            }
         }
+
+        // 优先级 2:HF 主路径(Xenova/gpt-4o 等)
+        if let Some(hf) = &self.hf {
+            if let Some(n) = hf.count_prompt(model, request).await {
+                return Some(n);
+            }
+        }
+
+        // 优先级 3:tiktoken-rs 兜底
         count_with_tiktoken(model, request)
     }
 
     fn name(&self) -> &str {
-        "openai-dual"
+        "openai-composite"
+    }
+}
+
+// ============ Anthropic 远端 tokenizer ============
+
+/// Anthropic Claude tokenizer — 永远走远端 count_tokens API
+/// Anthropic Claude tokenizer — always hits remote count_tokens API
+///
+/// 失败/超时返回 None,由 registry 兜底字符估算(无本地 tokenizer)。
+/// Failures return None and the registry falls back to char estimation (no local tokenizer).
+pub struct AnthropicTokenizer {
+    remote: Arc<dyn RemoteCountClient>,
+}
+
+impl AnthropicTokenizer {
+    pub fn new(remote: Arc<dyn RemoteCountClient>) -> Self {
+        Self { remote }
+    }
+}
+
+#[async_trait]
+impl PromptTokenizer for AnthropicTokenizer {
+    async fn count_prompt(&self, model: &str, request: &ChatRequest) -> Option<u64> {
+        let has_non_text = has_non_text_content(request);
+        self.remote.count(model, request, has_non_text).await
+    }
+
+    fn name(&self) -> &str {
+        "anthropic-remote"
+    }
+}
+
+// ============ Gemini 远端 tokenizer ============
+
+/// Google Gemini tokenizer — 永远走远端 countTokens API
+/// Gemini tokenizer — always hits remote countTokens API
+pub struct GeminiTokenizer {
+    remote: Arc<dyn RemoteCountClient>,
+}
+
+impl GeminiTokenizer {
+    pub fn new(remote: Arc<dyn RemoteCountClient>) -> Self {
+        Self { remote }
+    }
+}
+
+#[async_trait]
+impl PromptTokenizer for GeminiTokenizer {
+    async fn count_prompt(&self, model: &str, request: &ChatRequest) -> Option<u64> {
+        let has_non_text = has_non_text_content(request);
+        self.remote.count(model, request, has_non_text).await
+    }
+
+    fn name(&self) -> &str {
+        "gemini-remote"
+    }
+}
+
+// ============ OpenAI 内置 Xenova mapping ============
+
+/// 内置 OpenAI 系列模型 → HF Xenova repo 映射
+/// Built-in OpenAI model → HuggingFace Xenova repo mapping.
+///
+/// Xenova 在 HF 上发布了 OpenAI 公开 BPE 词表的 tokenizer.json 端口(MIT/Apache),
+/// 可直接用 `tokenizers` 加载,精度等同 tiktoken-rs 但走统一 HF 路径。
+/// Xenova publishes tokenizer.json ports of OpenAI public BPE vocabularies on HF;
+/// these can be loaded by `tokenizers` and match tiktoken-rs precisely.
+///
+/// o1 / o3 / o4 系列暂未发布 Xenova 端口 → 返回 None,由 tiktoken 兜底处理。
+/// o1 / o3 / o4 series have no Xenova port yet → return None, tiktoken handles them.
+pub fn openai_default_xenova_repo(model: &str) -> Option<String> {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("gpt-4o") {
+        Some("Xenova/gpt-4o".to_string())
+    } else if m.starts_with("gpt-4") {
+        Some("Xenova/gpt-4".to_string())
+    } else if m.starts_with("gpt-3.5") {
+        Some("Xenova/gpt-3.5-turbo".to_string())
+    } else {
+        None
     }
 }
 

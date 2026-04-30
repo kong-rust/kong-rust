@@ -19,9 +19,13 @@ use crate::codec::ChatRequest;
 
 use super::counter::TokenCounter;
 use super::hf_loader::{default_cache_dir, HfDownloader, HfLoader};
+use super::remote_count::{
+    AnthropicCountClient, GeminiCountClient, OpenAiCountClient, RemoteCountCache,
+    RemoteCountClient,
+};
 use super::tokenizer::{
-    estimate_from_request, HfTokenizer, NoopTokenizer, OpenAiTokenizer, PromptTokenizer,
-    TiktokenTokenizer,
+    estimate_from_request, openai_default_xenova_repo, AnthropicTokenizer, GeminiTokenizer,
+    HfTokenizer, NoopTokenizer, OpenAiTokenizer, PromptTokenizer, TiktokenTokenizer,
 };
 
 /// Tokenizer 配置 — 由 kong.conf [ai.tokenizer] 段加载
@@ -48,6 +52,20 @@ pub struct TokenizerConfig {
     /// 远端 count 结果的 LRU TTL
     /// LRU TTL for remote count results
     pub cache_ttl: Duration,
+    /// OpenAI Responses input_tokens 端点 base URL(默认 https://api.openai.com)
+    /// OpenAI Responses input_tokens base URL (default https://api.openai.com)
+    pub openai_endpoint: Option<String>,
+    /// OpenAI API key(为空时双轨退化为 HF + tiktoken,远端不启用)
+    /// OpenAI API key — when absent, dual-path falls back to HF + tiktoken
+    pub openai_api_key: Option<String>,
+    /// Anthropic count_tokens 端点 base URL(默认 https://api.anthropic.com)
+    pub anthropic_endpoint: Option<String>,
+    /// Anthropic API key(为空时 Anthropic 永远走字符估算)
+    pub anthropic_api_key: Option<String>,
+    /// Gemini countTokens 端点 base URL(默认 https://generativelanguage.googleapis.com)
+    pub gemini_endpoint: Option<String>,
+    /// Gemini API key(为空时 Gemini 永远走字符估算)
+    pub gemini_api_key: Option<String>,
 }
 
 impl Default for TokenizerConfig {
@@ -61,6 +79,12 @@ impl Default for TokenizerConfig {
             mappings: Vec::new(),
             cache_capacity: 1024,
             cache_ttl: Duration::from_secs(60),
+            openai_endpoint: None,
+            openai_api_key: None,
+            anthropic_endpoint: None,
+            anthropic_api_key: None,
+            gemini_endpoint: None,
+            gemini_api_key: None,
         }
     }
 }
@@ -105,38 +129,94 @@ pub struct TokenizerRegistry {
     /// HuggingFace 本地 tokenizer 加载器(磁盘缓存 + 单飞下载)
     /// HuggingFace local tokenizer loader (disk cache + single-flight download)
     hf_loader: Arc<HfLoader>,
+    /// 远端 count 客户端(OpenAI / Anthropic / Gemini 共享)
+    /// Remote count clients (Option — None when api_key 缺失或测试场景)
+    openai_remote: Option<Arc<dyn RemoteCountClient>>,
+    anthropic_remote: Option<Arc<dyn RemoteCountClient>>,
+    gemini_remote: Option<Arc<dyn RemoteCountClient>>,
+    /// 共享 LRU 缓存(三家 provider 共用)
+    /// Shared LRU cache (used by all remote clients)
+    #[allow(dead_code)]
+    remote_cache: Arc<RemoteCountCache>,
 }
 
 impl TokenizerRegistry {
-    /// 用配置构造 registry,提前编译 mapping 正则 + 自动构造 HfLoader
+    /// 用配置构造 registry — 自动建好 HfLoader + 三个远端 client(基于 reqwest + 共享 LRU)
+    /// Build registry from config — sets up HfLoader and three remote clients
     pub fn new(config: TokenizerConfig) -> Self {
         let cache_dir = config
             .hf_cache_dir
             .clone()
             .unwrap_or_else(default_cache_dir);
         let hf_loader = Arc::new(HfLoader::new(cache_dir, config.offline));
-        Self::with_hf_loader(config, hf_loader)
+
+        // 共享 reqwest::Client + LRU
+        let http = reqwest::Client::builder()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let remote_cache = Arc::new(RemoteCountCache::new(
+            config.cache_capacity,
+            config.cache_ttl,
+        ));
+        let timeout = config.remote_count_timeout;
+
+        // 缺 api_key 时不构造 client(行为等同未启用),避免无意义请求
+        // Skip building a client when api_key is absent — equivalent to disabled
+        let openai_remote: Option<Arc<dyn RemoteCountClient>> = config
+            .openai_api_key
+            .as_ref()
+            .map(|_| {
+                Arc::new(OpenAiCountClient::new(
+                    http.clone(),
+                    config.openai_endpoint.clone(),
+                    config.openai_api_key.clone(),
+                    remote_cache.clone(),
+                    timeout,
+                )) as Arc<dyn RemoteCountClient>
+            });
+        let anthropic_remote: Option<Arc<dyn RemoteCountClient>> = config
+            .anthropic_api_key
+            .as_ref()
+            .map(|_| {
+                Arc::new(AnthropicCountClient::new(
+                    http.clone(),
+                    config.anthropic_endpoint.clone(),
+                    config.anthropic_api_key.clone(),
+                    remote_cache.clone(),
+                    timeout,
+                )) as Arc<dyn RemoteCountClient>
+            });
+        let gemini_remote: Option<Arc<dyn RemoteCountClient>> = config
+            .gemini_api_key
+            .as_ref()
+            .map(|_| {
+                Arc::new(GeminiCountClient::new(
+                    http.clone(),
+                    config.gemini_endpoint.clone(),
+                    config.gemini_api_key.clone(),
+                    remote_cache.clone(),
+                    timeout,
+                )) as Arc<dyn RemoteCountClient>
+            });
+
+        Self::build(
+            config,
+            hf_loader,
+            openai_remote,
+            anthropic_remote,
+            gemini_remote,
+            remote_cache,
+        )
     }
 
     /// 注入式构造 — 测试或自定义 HfLoader 用
     /// Inject a custom HfLoader (e.g. with a mock downloader for tests)
     pub fn with_hf_loader(config: TokenizerConfig, hf_loader: Arc<HfLoader>) -> Self {
-        let compiled_mappings = config
-            .mappings
-            .iter()
-            .filter_map(|m| {
-                Regex::new(&m.pattern)
-                    .ok()
-                    .map(|re| (re, m.strategy, m.hf_repo_id.clone()))
-            })
-            .collect();
-
-        Self {
-            config,
-            compiled_mappings,
-            tokenizers: DashMap::new(),
-            hf_loader,
-        }
+        // 远端 client 走默认构造逻辑(同 new),允许测试只关心 HF 行为
+        let mut reg = Self::new(config);
+        reg.hf_loader = hf_loader;
+        reg.tokenizers.clear();
+        reg
     }
 
     /// 注入式构造 — 直接传入 HfDownloader 实现(自动包装 HfLoader)
@@ -154,6 +234,63 @@ impl TokenizerRegistry {
             downloader,
         ));
         Self::with_hf_loader(config, hf_loader)
+    }
+
+    /// 注入式构造 — 测试用,可指定每个 provider 的远端 client(传入 mock)
+    /// For tests: inject specific RemoteCountClient implementations per provider
+    pub fn with_remote_clients(
+        config: TokenizerConfig,
+        openai_remote: Option<Arc<dyn RemoteCountClient>>,
+        anthropic_remote: Option<Arc<dyn RemoteCountClient>>,
+        gemini_remote: Option<Arc<dyn RemoteCountClient>>,
+    ) -> Self {
+        let cache_dir = config
+            .hf_cache_dir
+            .clone()
+            .unwrap_or_else(default_cache_dir);
+        let hf_loader = Arc::new(HfLoader::new(cache_dir, config.offline));
+        let remote_cache = Arc::new(RemoteCountCache::new(
+            config.cache_capacity,
+            config.cache_ttl,
+        ));
+        Self::build(
+            config,
+            hf_loader,
+            openai_remote,
+            anthropic_remote,
+            gemini_remote,
+            remote_cache,
+        )
+    }
+
+    fn build(
+        config: TokenizerConfig,
+        hf_loader: Arc<HfLoader>,
+        openai_remote: Option<Arc<dyn RemoteCountClient>>,
+        anthropic_remote: Option<Arc<dyn RemoteCountClient>>,
+        gemini_remote: Option<Arc<dyn RemoteCountClient>>,
+        remote_cache: Arc<RemoteCountCache>,
+    ) -> Self {
+        let compiled_mappings = config
+            .mappings
+            .iter()
+            .filter_map(|m| {
+                Regex::new(&m.pattern)
+                    .ok()
+                    .map(|re| (re, m.strategy, m.hf_repo_id.clone()))
+            })
+            .collect();
+
+        Self {
+            config,
+            compiled_mappings,
+            tokenizers: DashMap::new(),
+            hf_loader,
+            openai_remote,
+            anthropic_remote,
+            gemini_remote,
+            remote_cache,
+        }
     }
 
     /// 主入口:基于已解析的 ChatRequest 计算 prompt token
@@ -275,49 +412,91 @@ impl TokenizerRegistry {
         }
     }
 
+    /// 构造通用 HF repo_resolver — 配置 mapping > model 含 `/` → 直接当 repo_id
+    fn build_hf_repo_resolver(&self) -> Arc<dyn Fn(&str) -> Option<String> + Send + Sync> {
+        let mappings: Vec<(Regex, TokenizerStrategy, Option<String>)> = self
+            .compiled_mappings
+            .iter()
+            .map(|(r, s, h)| (r.clone(), *s, h.clone()))
+            .collect();
+        Arc::new(move |model: &str| -> Option<String> {
+            for (re, _, repo) in mappings.iter() {
+                if re.is_match(model) {
+                    if let Some(repo) = repo {
+                        return Some(repo.clone());
+                    }
+                    break;
+                }
+            }
+            if model.contains('/') {
+                Some(model.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 构造 OpenAI 专用 HF tokenizer — 内置 Xenova mapping(用户 mapping 优先,内置兜底)
+    /// Build OpenAI-specific HF tokenizer with built-in Xenova mapping
+    /// (user-supplied mapping wins; built-in is the fallback)
+    fn build_openai_hf_tokenizer(&self) -> Arc<HfTokenizer> {
+        let mappings: Vec<(Regex, TokenizerStrategy, Option<String>)> = self
+            .compiled_mappings
+            .iter()
+            .map(|(r, s, h)| (r.clone(), *s, h.clone()))
+            .collect();
+        let resolver = Arc::new(move |model: &str| -> Option<String> {
+            // 1. 用户配置的 mapping 优先
+            for (re, _, repo) in mappings.iter() {
+                if re.is_match(model) {
+                    if let Some(repo) = repo {
+                        return Some(repo.clone());
+                    }
+                    break;
+                }
+            }
+            // 2. 内置 OpenAI Xenova 默认映射(o1/o3/o4 返回 None,让 tiktoken 兜底)
+            if let Some(repo) = openai_default_xenova_repo(model) {
+                return Some(repo);
+            }
+            // 3. model 含 `/` → 直接当 repo_id(罕见场景)
+            if model.contains('/') {
+                return Some(model.to_string());
+            }
+            None
+        });
+        Arc::new(HfTokenizer::new(self.hf_loader.clone(), resolver))
+    }
+
     fn tokenizer_for(&self, strategy: TokenizerStrategy) -> Arc<dyn PromptTokenizer> {
         if let Some(t) = self.tokenizers.get(&strategy) {
             return t.clone();
         }
         let t: Arc<dyn PromptTokenizer> = match strategy {
-            // OpenAi 双轨:OpenAiTokenizer 内部按 has_non_text_content 分流
-            // (step 1 远端是 stub,实际仍落 tiktoken;step 4 填入 remote 调用)
-            // OpenAi dual-path: OpenAiTokenizer routes by has_non_text_content
-            // (step 1 keeps the remote branch as a no-op until step 4 wires reqwest)
-            TokenizerStrategy::OpenAi => Arc::new(OpenAiTokenizer::new()),
+            // OpenAi 组合 tokenizer:HF 主路径(Xenova 系列)+ tiktoken 兜底 + 非文本远端叠加
+            // OpenAi composite: HF primary (Xenova) + tiktoken fallback + remote on multimodal
+            TokenizerStrategy::OpenAi => {
+                let hf = self.build_openai_hf_tokenizer();
+                let remote = self.openai_remote.clone();
+                Arc::new(OpenAiTokenizer::with_hf_and_remote(hf, remote))
+            }
             // Tiktoken 直路 — 用于 vLLM / Ollama 等 OpenAI 兼容接口托管的开源模型(无远端 API)
-            // Direct tiktoken — for open-source models served via OpenAI-compatible endpoints
             TokenizerStrategy::Tiktoken => Arc::new(TiktokenTokenizer),
             // HuggingFace 走真实 HfTokenizer — 注入共享 HfLoader + repo_resolver closure
-            // HuggingFace path uses real HfTokenizer with shared HfLoader and repo_resolver
             TokenizerStrategy::HuggingFace => {
-                let mappings: Vec<(Regex, TokenizerStrategy, Option<String>)> = self
-                    .compiled_mappings
-                    .iter()
-                    .map(|(r, s, h)| (r.clone(), *s, h.clone()))
-                    .collect();
-                let resolver = Arc::new(move |model: &str| -> Option<String> {
-                    for (re, _, repo) in mappings.iter() {
-                        if re.is_match(model) {
-                            if let Some(repo) = repo {
-                                return Some(repo.clone());
-                            }
-                            break;
-                        }
-                    }
-                    if model.contains('/') {
-                        Some(model.to_string())
-                    } else {
-                        None
-                    }
-                });
-                Arc::new(HfTokenizer::new(self.hf_loader.clone(), resolver))
+                Arc::new(HfTokenizer::new(self.hf_loader.clone(), self.build_hf_repo_resolver()))
             }
-            // Step 4 实装 Anthropic/Gemini 远端
-            // Stubs until step 4 (remote count) lands
-            TokenizerStrategy::Anthropic
-            | TokenizerStrategy::Gemini
-            | TokenizerStrategy::Estimate => Arc::new(NoopTokenizer),
+            // Anthropic/Gemini:有 remote 走真实 client;没 remote → Noop(让 registry estimate 兜底)
+            // Anthropic/Gemini: real client if configured; else Noop (registry falls back to estimate)
+            TokenizerStrategy::Anthropic => match &self.anthropic_remote {
+                Some(r) => Arc::new(AnthropicTokenizer::new(r.clone())),
+                None => Arc::new(NoopTokenizer),
+            },
+            TokenizerStrategy::Gemini => match &self.gemini_remote {
+                Some(r) => Arc::new(GeminiTokenizer::new(r.clone())),
+                None => Arc::new(NoopTokenizer),
+            },
+            TokenizerStrategy::Estimate => Arc::new(NoopTokenizer),
         };
         self.tokenizers.insert(strategy, t.clone());
         t

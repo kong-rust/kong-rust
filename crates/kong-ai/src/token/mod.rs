@@ -5,6 +5,7 @@ pub mod counter;
 pub mod cost;
 pub mod hf_loader;
 pub mod registry;
+pub mod remote_count;
 pub mod tokenizer;
 
 pub use counter::TokenCounter;
@@ -14,7 +15,12 @@ pub use registry::{
     global_registry, set_global_registry, TokenizerConfig, TokenizerMapping, TokenizerRegistry,
     TokenizerStrategy,
 };
+pub use remote_count::{
+    AnthropicCountClient, GeminiCountClient, OpenAiCountClient, RemoteCountCache,
+    RemoteCountClient, RemoteCountKey,
+};
 pub use tokenizer::{
-    estimate_from_request, extract_prompt_text, has_non_text_content, HfTokenizer, NoopTokenizer,
-    OpenAiTokenizer, PromptTokenizer, TiktokenTokenizer,
+    estimate_from_request, extract_prompt_text, has_non_text_content, openai_default_xenova_repo,
+    AnthropicTokenizer, GeminiTokenizer, HfTokenizer, NoopTokenizer, OpenAiTokenizer,
+    PromptTokenizer, TiktokenTokenizer,
 };
