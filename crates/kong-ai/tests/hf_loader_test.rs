@@ -359,3 +359,135 @@ fn registry_resolve_hf_repo_mapping_overrides_model() {
         Some("Bar/Baz".to_string())
     );
 }
+
+// ─── 9. M5: 多模态请求 → HfTokenizer 返回 None(避免漏算 vision/audio token)────
+
+fn image_request(model: &str) -> ChatRequest {
+    serde_json::from_str(&format!(
+        r#"{{
+            "model":"{}",
+            "messages":[{{"role":"user","content":[
+                {{"type":"text","text":"hello world"}},
+                {{"type":"image_url","image_url":{{"url":"https://x/y.png"}}}}
+            ]}}]
+        }}"#,
+        model
+    ))
+    .unwrap()
+}
+
+/// 纯文本 → HF 直接命中 fixture,返回精确 token 数
+#[tokio::test]
+async fn hf_tokenizer_pure_text_returns_some() {
+    use std::sync::Arc as StdArc;
+
+    let dir = TempDir::new().unwrap();
+    write_fixture(dir.path(), "test-org/m5-text");
+    let downloader = MockHfDownloader::new(Duration::ZERO, false);
+    let loader = StdArc::new(HfLoader::with_downloader(
+        dir.path().to_path_buf(),
+        true, // offline:已经预填 fixture,不应该发起下载
+        downloader.clone(),
+    ));
+    let resolver: StdArc<dyn Fn(&str) -> Option<String> + Send + Sync> =
+        StdArc::new(|_m| Some("test-org/m5-text".to_string()));
+    let tok = kong_ai::token::HfTokenizer::new(loader, resolver);
+
+    let req = text_request("any", "hello world");
+    let n = kong_ai::token::PromptTokenizer::count_prompt(&tok, "any", &req).await;
+    assert!(
+        n.is_some(),
+        "pure text request should yield Some(precise count), got None"
+    );
+    assert!(n.unwrap() > 0);
+    assert_eq!(downloader.calls(), 0);
+}
+
+/// 多模态(image_url) → HF 直接返回 None,不漏算 vision token
+#[tokio::test]
+async fn hf_tokenizer_multimodal_returns_none() {
+    use std::sync::Arc as StdArc;
+
+    let dir = TempDir::new().unwrap();
+    write_fixture(dir.path(), "test-org/m5-image");
+    let downloader = MockHfDownloader::new(Duration::ZERO, false);
+    let loader = StdArc::new(HfLoader::with_downloader(
+        dir.path().to_path_buf(),
+        true,
+        downloader.clone(),
+    ));
+    let resolver: StdArc<dyn Fn(&str) -> Option<String> + Send + Sync> =
+        StdArc::new(|_m| Some("test-org/m5-image".to_string()));
+    let tok = kong_ai::token::HfTokenizer::new(loader, resolver);
+
+    let req = image_request("any");
+    let n = kong_ai::token::PromptTokenizer::count_prompt(&tok, "any", &req).await;
+    assert!(
+        n.is_none(),
+        "multimodal request must return None (vision/audio tokens cannot be counted), got {:?}",
+        n
+    );
+}
+
+/// 多模态(tools 顶层)→ HF 也返回 None
+#[tokio::test]
+async fn hf_tokenizer_with_tools_returns_none() {
+    use std::sync::Arc as StdArc;
+
+    let dir = TempDir::new().unwrap();
+    write_fixture(dir.path(), "test-org/m5-tools");
+    let downloader = MockHfDownloader::new(Duration::ZERO, false);
+    let loader = StdArc::new(HfLoader::with_downloader(
+        dir.path().to_path_buf(),
+        true,
+        downloader.clone(),
+    ));
+    let resolver: StdArc<dyn Fn(&str) -> Option<String> + Send + Sync> =
+        StdArc::new(|_m| Some("test-org/m5-tools".to_string()));
+    let tok = kong_ai::token::HfTokenizer::new(loader, resolver);
+
+    let req: ChatRequest = serde_json::from_str(
+        r#"{
+            "model":"any",
+            "messages":[{"role":"user","content":"call tool"}],
+            "tools":[{"type":"function","function":{"name":"f","parameters":{}}}]
+        }"#,
+    ).unwrap();
+    let n = kong_ai::token::PromptTokenizer::count_prompt(&tok, "any", &req).await;
+    assert!(n.is_none(), "tools at top level → multimodal-ish, must None");
+}
+
+/// Registry OpenAI 路由:含 image 的请求 → HF 返回 None → 链上退到 tiktoken / 远端
+/// (没配置 remote 时落 tiktoken,和 step 4 端到端测试语义一致)
+#[tokio::test]
+async fn registry_openai_image_request_falls_to_tiktoken_when_hf_returns_none() {
+    let dir = TempDir::new().unwrap();
+    // 把 fixture 预填到 cache(让 HF 主路径"可用"于纯文本,但多模态被规则拒绝)
+    write_fixture(dir.path(), "Xenova__gpt-4o");
+
+    let cfg = TokenizerConfig {
+        offline: true,
+        hf_cache_dir: Some(dir.path().to_path_buf()),
+        // openai_api_key 不配置 → remote 不启用,只剩 HF + tiktoken 链
+        ..TokenizerConfig::default()
+    };
+    let registry = TokenizerRegistry::new(cfg);
+
+    // 纯文本 → HF 命中,返回 fixture 编码结果(非 tiktoken)
+    let text_req = text_request("gpt-4o", "hello world");
+    let text_expected = fixture_expected_tokens(&text_req);
+    let n_text = registry.count_prompt("openai", "gpt-4o", &text_req).await;
+    assert_eq!(n_text, text_expected, "pure text uses HF Xenova fixture");
+
+    // 含 image_url → HF 直接 None → OpenAi 组合体落到 tiktoken;tiktoken 对 gpt-4o
+    // 能识别,返回真实 token 数,与 fixture 编码结果不同
+    let image_req = image_request("gpt-4o");
+    let image_text_via_fixture = fixture_expected_tokens(&image_req);
+    let n_image = registry.count_prompt("openai", "gpt-4o", &image_req).await;
+    assert!(n_image > 0, "tiktoken should produce a count");
+    assert_ne!(
+        n_image, image_text_via_fixture,
+        "image request must NOT reuse HF (which would silently miss vision tokens); \
+         expect tiktoken instead"
+    );
+}

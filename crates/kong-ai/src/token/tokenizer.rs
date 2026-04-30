@@ -420,20 +420,31 @@ impl HfTokenizer {
 #[async_trait]
 impl PromptTokenizer for HfTokenizer {
     async fn count_prompt(&self, model: &str, request: &ChatRequest) -> Option<u64> {
+        // 多模态请求不计入 image / audio / file 的 vision-tower / audio-encoder token,
+        // 只算文本部分会显著低估 → 限流欠扣 → 实际成本超预期。
+        // 直接返回 None,让 registry 走 fallback:OpenAI 链上会接着走 tiktoken / 远端;
+        // 纯 HF 模型(LLaMA/Qwen 等)无 fallback,会落到 registry 的字符估算 — 字符估算
+        // 至少包含了文本字节,语义上"未知"比"漏算"安全。
+        //
+        // Multimodal requests cannot be counted accurately by HfTokenizer alone — image patch
+        // tokens / audio encoder tokens depend on per-model vision/audio formulas. Counting only
+        // text parts would silently under-count and let real usage exceed rate-limit budgets.
+        // Return None so the registry falls back (to remote API → tiktoken on OpenAI; to char
+        // estimation on pure-HF models); "unknown" is safer than "wrong-low".
+        //
+        // TODO(multimodal): 后续多模态精确计数需要:
+        //   ① 各模型 vision tower 的 patch token 计算(LLaVA/Qwen-VL/InternVL 公式不同)
+        //   ② image preprocessing pipeline(原图尺寸 → resize → patch grid → token 数)
+        //   ③ audio/file 模态的对应预处理与 token 估算
+        // TODO(multimodal): per-model vision/audio token formulas remain to be implemented.
+        if has_non_text_content(request) {
+            return None;
+        }
+
         let repo_id = (self.repo_resolver)(model)?;
         // 同步快路径:命中即编码;未命中则后台下载,本次返回 None 让 registry estimate 兜底
         // Hot path returns immediately; misses spawn a background download
         let tok = self.loader.try_get(&repo_id)?;
-        // TODO(multimodal): 当前只编码文本内容(extract_prompt_text 在 array content 中只取
-        //   type=text 的 part,自动忽略 image_url / input_audio / input_file 等多模态字段)。
-        //   后续多模态精确计数需要:
-        //   ① 各模型 vision tower 的 patch token 计算(LLaVA/Qwen-VL/InternVL 公式不同)
-        //   ② image preprocessing pipeline(原图尺寸 → resize → patch grid → token 数)
-        //   ③ audio/file 模态的对应预处理与 token 估算
-        //   暂时只算文本部分 — 不降级到字符估算(因为文本部分已经精确了)。
-        // TODO(multimodal): currently encodes text-only content; image_url / input_audio /
-        //   input_file are dropped by extract_prompt_text. Full multimodal accounting needs
-        //   per-model vision/audio token formulas — deferred.
         let text = extract_prompt_text(request);
         let encoding = tok.encode(text, false).ok()?;
         Some(encoding.len() as u64)
