@@ -264,6 +264,21 @@ fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
     registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
 
+    // 注入全局 TokenizerRegistry — ai-rate-limit / ai-proxy 通过 OnceLock 单例访问
+    // Install global TokenizerRegistry — ai-rate-limit and ai-proxy reach it via OnceLock
+    if config.ai_tokenizer_enabled {
+        let tokenizer_cfg = kong_ai::token::TokenizerConfig::from_kong_config(config);
+        let registry_arc = Arc::new(kong_ai::token::TokenizerRegistry::new(tokenizer_cfg));
+        kong_ai::token::set_global_registry(registry_arc);
+        tracing::info!(
+            "ai tokenizer registry installed (deadline={}ms, remote_timeout={}ms, cache={}/{}s)",
+            config.ai_tokenizer_per_request_deadline_ms,
+            config.ai_tokenizer_remote_count_timeout_ms,
+            config.ai_tokenizer_cache_capacity,
+            config.ai_tokenizer_cache_ttl_seconds,
+        );
+    }
+
     registry
 }
 

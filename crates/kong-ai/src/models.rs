@@ -44,6 +44,13 @@ pub struct AiModel {
     pub output_cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<i32>,
+    /// 单次请求 prompt token 上限（balancer by_token_size 路由用）
+    /// 配合 TokenizerRegistry 计算的 prompt_tokens,在 ModelGroupBalancer.select_for 里做候选过滤:
+    /// `prompt_tokens <= max_input_tokens` 才能命中,超过则 fallback 到下一 priority
+    /// Per-request prompt token cap used by ModelGroupBalancer.select_for (by_token_size routing).
+    /// Candidates only match when `prompt_tokens <= max_input_tokens`; otherwise fallback to next priority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<i32>,
     pub config: serde_json::Value,
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

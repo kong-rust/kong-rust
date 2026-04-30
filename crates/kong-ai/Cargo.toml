@@ -21,8 +21,14 @@ anymap2 = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+# Step 3: HuggingFace tokenizer.json 本地加载(开源模型 LLaMA/Qwen/Mistral 等)
+tokenizers = { workspace = true }
+# Step 3: HF tokenizer.json 远端下载;Step 4 复用作为 OpenAI/Anthropic/Gemini count API 客户端
+reqwest = { workspace = true }
+# Step 4: 远端 count 结果共享 LRU(容量 + TTL)
+moka = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true }
-reqwest = { workspace = true }
+tempfile = { workspace = true }

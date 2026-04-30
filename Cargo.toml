@@ -84,6 +84,9 @@ md5 = "0.7"
 anymap2 = "0.13"
 tiktoken-rs = "0.6"
 dashmap = "6"
+# HuggingFace tokenizer.json 本地编码(开源模型如 LLaMA / Qwen / Mistral)
+# 关闭默认特性以避免大型 HTTP / Python 依赖,只保留纯 Rust 编解码核心
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # Workspace crates
 kong-core = { path = "crates/kong-core" }

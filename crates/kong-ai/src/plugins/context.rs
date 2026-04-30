@@ -49,4 +49,8 @@ pub struct AiRequestState {
     pub stripped_tools: Option<StrippedTools>,
     /// 流式 tool_call 本地计数器（用于重映射 Anthropic 全局 block index → 0-based tool_call index）
     pub stream_tool_call_count: u32,
+    /// access 阶段 TokenizerRegistry 计算的 prompt token 估值（供 balancer by_token_size、ai-rate-limit log 修正等下游消费）
+    /// Prompt-token estimate produced by TokenizerRegistry during access; consumed by
+    /// balancer by_token_size routing, ai-rate-limit log-stage reconciliation, etc.
+    pub estimated_prompt_tokens: u64,
 }

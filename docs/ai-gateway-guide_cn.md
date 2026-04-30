@@ -865,3 +865,78 @@ curl -X POST http://localhost:8001/ai-providers \
     "auth_config": {}
   }'
 ```
+
+## 10. 精确 prompt-token 计数(Tokenizer Registry)
+
+### 10.1 概述
+
+为了让 `ai-rate-limit` 的 TPM 预扣和 balancer 的 `by_token_size` 路由用上精确值,Kong-Rust 内置了一套统一的 token 计数器:
+
+```
+任何模型:
+  has_non_text == true   → 远端 count API → HF 兜底 → tiktoken 兜底 → 字符估算
+  has_non_text == false  → HF 本地编码 → tiktoken 兜底 → 字符估算
+```
+
+`has_non_text` 由 `has_non_text_content(request)` 判定 — 包含 image_url / tools / function_call / response_format 等任一非纯文本字段即为 true。
+
+### 10.2 路径细节
+
+| Provider | 纯文本主路径 | 非文本主路径 |
+|----------|-----------|-----------|
+| OpenAI(`gpt-4o*`/`gpt-4*`/`gpt-3.5*`) | HF `Xenova/gpt-4o` 等 → tiktoken 兜底 | `POST /v1/responses/input_tokens` → HF → tiktoken |
+| OpenAI o1/o3/o4 | tiktoken-rs(暂无 Xenova 端口) | `POST /v1/responses/input_tokens` → tiktoken |
+| Anthropic Claude | `POST /v1/messages/count_tokens` | 同左 |
+| Google Gemini | `POST /v1beta/models/{model}:countTokens` | 同左 |
+| HuggingFace 开源(LLaMA/Qwen/Mistral 等) | HF 本地 tokenizer.json | 同左(多模态先只算文本) |
+| OpenAI 兼容(vLLM/Ollama) | tiktoken-rs | tiktoken-rs |
+
+### 10.3 LRU 缓存
+
+三家远端 client 共享一个 moka LRU,key = `(provider, model, has_non_text, sha256(prompt))`,默认容量 1024、TTL 60 秒。本地路径(tiktoken / HF)不走缓存(已经够快)。
+
+### 10.4 HF 首次冷启动(不阻塞)
+
+模型 `Qwen/Qwen2.5-7B` 首次见到时:
+1. `try_get` 同步返回 None
+2. 后台 `tokio::spawn` 单飞下载 `tokenizer.json` 到 cache 目录
+3. 本次请求降级到字符估算(不阻塞)
+4. 下载完成后,后续请求同步命中 Loaded → 1-10ms 编码
+
+并发同 repo 的多个请求合并为一次下载(DashMap CAS)。
+
+### 10.5 配置(kong.conf)
+
+```ini
+ai_tokenizer_enabled = true
+ai_tokenizer_per_request_deadline_ms = 300       # 整体超时
+ai_tokenizer_remote_count_timeout_ms = 1000      # 远端 HTTP 单次超时
+ai_tokenizer_cache_capacity = 1024
+ai_tokenizer_cache_ttl_seconds = 60
+ai_tokenizer_offline = false                     # true 时只读 HF 磁盘缓存,不下载
+ai_tokenizer_cache_dir = /var/lib/kong/tokenizers   # 可选,默认 ~/.cache/kong-rust/tokenizers
+
+# 远端 API key — 不配置则该 provider 不启用远端,自动降级到本地路径
+ai_tokenizer_openai_api_key = sk-...
+ai_tokenizer_anthropic_api_key = sk-ant-...
+ai_tokenizer_gemini_api_key = AIzaSy...
+
+# Endpoint 默认指向官方,只在自定义代理时覆盖
+# ai_tokenizer_openai_endpoint = https://api.openai.com
+```
+
+### 10.6 已知限制
+
+- HF 多模态(image_url / input_audio)token 暂时只算文本部分;后续会按各模型 vision tower 公式补充 patch token 计算
+- OpenAI 远端 API 需要正式 OpenAI API key(非 Azure)
+- 离线模式仅读磁盘缓存,缺失则 HF 路径降级一次
+
+### 10.7 by_token_size 路由(可选)
+
+`AiModel.max_input_tokens` 字段 + balancer `select_for(prompt_tokens)` 实现"短 prompt 走小模型,长 prompt 自动升档"。同 priority 内若所有候选都被 token 阈值过滤,自动 fallback 到下一档:
+
+```sql
+INSERT INTO ai_models (name, model_name, priority, weight, max_input_tokens) VALUES
+  ('chat-group', 'gpt-3.5-turbo',  20, 1, 4096),       -- 短 prompt 优先
+  ('chat-group', 'gpt-4o',         10, 1, 128000);     -- 长 prompt 升档
+```
