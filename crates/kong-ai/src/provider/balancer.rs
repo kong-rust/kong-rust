@@ -97,16 +97,30 @@ impl ModelGroupBalancer {
         }
     }
 
-    /// 选择一个健康的 model
-    /// Select a healthy model.
+    /// 选择一个健康的 model(不考虑 prompt 大小,等价于 select_for(None))
+    /// Select a healthy model without size constraint (alias for select_for(None)).
+    pub fn select(&self) -> Result<(&AiModel, &AiProviderConfig)> {
+        self.select_for(None)
+    }
+
+    /// 选择一个健康且能容纳 prompt 的 model
+    /// Select a healthy model that can fit the given prompt size.
     ///
     /// 算法 / Algorithm:
     /// 1. 按 priority 降序分组（高 priority 优先）
-    /// 2. 从最高 priority 组开始，过滤掉冷却中和 disabled 的
+    /// 2. 从最高 priority 组开始，过滤:
+    ///    - enabled 且未冷却
+    ///    - prompt_tokens 未指定 OR model.max_input_tokens 未指定 OR prompt_tokens <= max_input_tokens
     /// 3. 在可用组内按 weight 加权 round-robin
-    /// 4. 该组全不可用 → fallback 到下一 priority 组
+    /// 4. 该组全不可用（含被 token 阈值过滤）→ fallback 到下一 priority 组
     /// 5. 全组不可用 → 返回 Err
-    pub fn select(&self) -> Result<(&AiModel, &AiProviderConfig)> {
+    ///
+    /// `prompt_tokens=None` 时不启用 token 过滤,行为与无 by_token_size 路由完全一致
+    /// When prompt_tokens=None, token filtering is disabled — behavior identical to legacy select()
+    pub fn select_for(
+        &self,
+        prompt_tokens: Option<u64>,
+    ) -> Result<(&AiModel, &AiProviderConfig)> {
         if self.entries.is_empty() {
             return Err(KongError::InternalError(
                 "model group is empty".to_string(),
@@ -119,20 +133,21 @@ impl ModelGroupBalancer {
         priorities.dedup();
 
         for priority in &priorities {
-            // 同 priority 的可用条目（enabled 且未冷却）
-            // Candidates in this priority tier: enabled and not in cooldown
+            // 同 priority 的可用条目（enabled 且未冷却 且 token 阈值通过）
+            // Candidates in this priority tier: enabled, not in cooldown, fits token budget
             let candidates: Vec<&ModelEntry> = self.entries
                 .iter()
                 .filter(|e| {
                     e.model.priority == *priority
                         && e.model.enabled
                         && e.health.is_available()
+                        && fits_token_budget(&e.model, prompt_tokens)
                 })
                 .collect();
 
             if candidates.is_empty() {
-                // 该优先级组全部不可用，fallback 到下一级
-                // This tier is exhausted, fall back to next priority
+                // 该优先级组全部不可用（含 token 阈值过滤），fallback 到下一级
+                // This tier is exhausted (incl. token-budget filtering), fall back to next priority
                 continue;
             }
 
@@ -201,5 +216,23 @@ impl ModelGroupBalancer {
     /// Check whether the balancer has no models.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// 判断 model 是否能容纳给定 prompt token 数
+/// Whether the model can accommodate the given prompt token count.
+///
+/// 规则:
+/// - prompt_tokens=None → 不启用过滤(永远通过)
+/// - model.max_input_tokens=None → 视为无限制(永远通过)
+/// - 否则 prompt_tokens <= max_input_tokens 才通过
+fn fits_token_budget(model: &AiModel, prompt_tokens: Option<u64>) -> bool {
+    match (prompt_tokens, model.max_input_tokens) {
+        (None, _) => true,
+        (_, None) => true,
+        // max_input_tokens 是 i32,允许负值(<=0)语义未定义 — 保守视为无限制
+        // i32 negative values undefined; conservatively treat as no limit
+        (_, Some(cap)) if cap <= 0 => true,
+        (Some(pt), Some(cap)) => pt <= cap as u64,
     }
 }

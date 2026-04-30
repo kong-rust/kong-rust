@@ -269,3 +269,152 @@ fn test_balancer_empty() {
     let result = balancer.select();
     assert!(result.is_err(), "empty balancer select() should return Err");
 }
+
+// ============ by_token_size 路由测试 — max_input_tokens filtering ============
+
+/// 构建带 max_input_tokens 的 model — build a model with a per-request prompt cap
+fn make_model_with_cap(
+    id: Uuid,
+    priority: i32,
+    weight: i32,
+    enabled: bool,
+    max_input_tokens: Option<i32>,
+) -> AiModel {
+    AiModel {
+        id,
+        name: "test-group".to_string(),
+        provider_id: Uuid::nil(),
+        model_name: "gpt-4".to_string(),
+        priority,
+        weight,
+        enabled,
+        max_input_tokens,
+        ..Default::default()
+    }
+}
+
+fn make_balancer_with_caps(
+    specs: Vec<(Uuid, i32, i32, bool, Option<i32>)>,
+) -> ModelGroupBalancer {
+    let pairs = specs
+        .into_iter()
+        .map(|(id, priority, weight, enabled, cap)| {
+            (
+                make_model_with_cap(id, priority, weight, enabled, cap),
+                make_provider(id),
+            )
+        })
+        .collect();
+    ModelGroupBalancer::new(pairs)
+}
+
+/// prompt_tokens=None 时 token 过滤完全禁用,行为与 select() 一致
+#[test]
+fn test_select_for_none_disables_token_filtering() {
+    let id_a = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![(id_a, 10, 1, true, Some(100))]);
+
+    // 即使 prompt 远超 cap,prompt_tokens=None 不启用过滤
+    let (model, _) = balancer.select_for(None).expect("None disables filter");
+    assert_eq!(model.id, id_a);
+}
+
+/// model.max_input_tokens=None 视为无限制
+#[test]
+fn test_select_for_unbounded_model_always_matches() {
+    let id_a = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![(id_a, 10, 1, true, None)]);
+
+    let (model, _) = balancer
+        .select_for(Some(1_000_000))
+        .expect("unbounded model should match any size");
+    assert_eq!(model.id, id_a);
+}
+
+/// 同 priority 内,prompt 超出 cap 的 model 被过滤
+/// Within the same priority, models exceeding cap are filtered out
+#[test]
+fn test_select_for_filters_oversized_within_priority() {
+    let id_small = Uuid::new_v4();
+    let id_large = Uuid::new_v4();
+    // 都在 priority=10,small cap=100,large cap=10000
+    let balancer = make_balancer_with_caps(vec![
+        (id_small, 10, 1, true, Some(100)),
+        (id_large, 10, 1, true, Some(10_000)),
+    ]);
+
+    // prompt=500 → small 被过滤,只剩 large
+    for _ in 0..20 {
+        let (model, _) = balancer.select_for(Some(500)).expect("large fits 500");
+        assert_eq!(model.id, id_large);
+    }
+}
+
+/// 同 priority 全部超出 cap → fallback 到下一 priority
+/// All candidates in tier exceed cap → fall back to next priority tier
+#[test]
+fn test_select_for_priority_fallback_on_oversize() {
+    let id_high_small = Uuid::new_v4(); // priority=20, cap=100
+    let id_low_huge = Uuid::new_v4(); // priority=10, cap=1_000_000
+
+    let balancer = make_balancer_with_caps(vec![
+        (id_high_small, 20, 1, true, Some(100)),
+        (id_low_huge, 10, 1, true, Some(1_000_000)),
+    ]);
+
+    // 短 prompt → 高优先级胜出
+    let (m, _) = balancer.select_for(Some(50)).expect("short prompt");
+    assert_eq!(m.id, id_high_small);
+
+    // 长 prompt → 高优先级被过滤,fallback 到低优先级大模型
+    let (m, _) = balancer.select_for(Some(500)).expect("falls back to low tier");
+    assert_eq!(m.id, id_low_huge);
+}
+
+/// 全部模型都装不下 → 返回 Err
+/// All models too small → returns Err
+#[test]
+fn test_select_for_all_oversize_returns_err() {
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![
+        (id_a, 20, 1, true, Some(100)),
+        (id_b, 10, 1, true, Some(200)),
+    ]);
+    let result = balancer.select_for(Some(10_000));
+    assert!(result.is_err(), "no model can fit huge prompt");
+}
+
+/// max_input_tokens 边界:prompt_tokens == cap 应通过
+/// Boundary: prompt_tokens == cap should pass
+#[test]
+fn test_select_for_exact_boundary_passes() {
+    let id_a = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![(id_a, 10, 1, true, Some(100))]);
+    let (m, _) = balancer.select_for(Some(100)).expect("equality is allowed");
+    assert_eq!(m.id, id_a);
+}
+
+/// max_input_tokens 边界:prompt_tokens == cap+1 应被过滤
+#[test]
+fn test_select_for_just_over_cap_filtered() {
+    let id_small = Uuid::new_v4();
+    let id_huge = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![
+        (id_small, 20, 1, true, Some(100)),
+        (id_huge, 10, 1, true, None),
+    ]);
+    let (m, _) = balancer.select_for(Some(101)).expect("falls back to unbounded");
+    assert_eq!(m.id, id_huge, "small model should be filtered when prompt=cap+1");
+}
+
+/// max_input_tokens<=0 视为无限制(防御 i32 负值或 0 值)
+#[test]
+fn test_select_for_non_positive_cap_treated_as_unlimited() {
+    let id_a = Uuid::new_v4();
+    let balancer = make_balancer_with_caps(vec![(id_a, 10, 1, true, Some(0))]);
+    let (m, _) = balancer
+        .select_for(Some(1_000_000))
+        .expect("cap=0 means unlimited");
+    assert_eq!(m.id, id_a);
+}
