@@ -927,3 +927,181 @@ ai_tokenizer_gemini_api_key = AIzaSy...
 ### 10.7 by_token_size routing
 
 Set `AiModel.max_input_tokens` per model and the balancer's `select_for(prompt_tokens)` filters candidates that don't fit. When the entire priority tier is filtered out, it falls back to the next tier — short prompts route to small models for cost, long prompts auto-escalate.
+
+## 11. By-Token-Size Routing in ai-proxy
+
+The token-budget primitive from §10.7 is wired into ai-proxy's `model_routes`, so route configuration alone (no DAO seeding) gives you cost-aware routing.
+
+### 11.1 What it does
+
+During `access`:
+
+1. ai-proxy decodes the ChatRequest and uses the tokenizer registry to estimate `prompt_tokens` (heuristic-inferred provider, registry-bounded deadline).
+2. The estimate is fed into `ModelRouter::resolve_for(model_name, prompt_tokens)`.
+3. Targets whose `max_input_tokens` is exceeded are dropped from the candidate set.
+4. Candidates are tried by descending `priority`; if a whole tier is exhausted by the budget filter, the next tier takes over.
+5. Within the surviving tier, weighted round-robin picks a target.
+
+If `prompt_tokens` is not available (registry disabled, body unparseable, etc.) the filter is bypassed and behavior matches `resolve(model_name)`.
+
+### 11.2 Configuration
+
+Two new fields on each `ModelTargetConfig`:
+
+| Field | Type | Default | Purpose |
+|------|------|--------|---------|
+| `priority` | i32 | 0 | Higher tier wins; weighted RR within tier |
+| `max_input_tokens` | i32? | unset | Per-target cap; targets above the cap are filtered |
+
+One new top-level switch on the plugin:
+
+| Field | Type | Default | Purpose |
+|------|------|--------|---------|
+| `enable_token_size_routing` | bool | true | Set false to bypass the estimate + filter |
+
+Example: cheap small model preferred, large-window fallback for long prompts.
+
+```yaml
+plugins:
+  - name: ai-proxy
+    config:
+      model: chat-default
+      enable_token_size_routing: true
+      model_routes:
+        - pattern: "^chat"
+          targets:
+            - provider_type: openai
+              model_name: gpt-4o-mini
+              priority: 10
+              max_input_tokens: 8000
+              auth_config: { header_value: sk-... }
+            - provider_type: openai
+              model_name: gpt-4o
+              priority: 0
+              max_input_tokens: 128000
+              auth_config: { header_value: sk-... }
+```
+
+A 500-token prompt picks `gpt-4o-mini`; a 50 000-token prompt cascades to `gpt-4o`. A prompt larger than every cap surfaces a 400 with the route-not-matched error.
+
+### 11.3 Observability
+
+Every request that hits a `model_routes` rule emits two response headers:
+
+- `X-Kong-AI-Selected-Model` — the resolved upstream model name (e.g. `gpt-4o-mini`)
+- `X-Kong-AI-Prompt-Tokens` — the estimate used for routing (only when token-size routing is enabled)
+
+These are stable contracts intended for integration tests, log pipelines, and tracing.
+
+## 12. ai-semantic-cache Plugin
+
+Caches LLM responses by prompt **embedding similarity** rather than string equality. Two semantically equivalent questions ("What's the weather" / "How is the weather") return the same cached answer.
+
+### 12.1 Lifecycle
+
+1. **access** — extract cache-key text from the ChatRequest (`LastMessage` / `AllMessages` / `FirstUserMessage`); call the embedding endpoint; cosine k-NN against the in-memory vector store; on a hit (cosine ≥ `similarity_threshold`) short-circuit with the cached payload and `X-Kong-AI-Cache: HIT-SEMANTIC`.
+2. **body_filter** — on miss, accumulate the upstream response and (if status is 200) store `(query_vector, response_body)` with TTL.
+
+### 12.2 Configuration
+
+```yaml
+plugins:
+  - name: ai-semantic-cache
+    config:
+      embedding_provider: openai_compat
+      embedding_endpoint_url: https://api.openai.com    # or Azure / vLLM / Ollama
+      embedding_api_key: sk-...
+      embedding_model: text-embedding-3-small
+      embedding_timeout_ms: 200
+      similarity_threshold: 0.92                        # cosine threshold
+      cache_ttl_seconds: 3600
+      max_cache_entries: 10000
+      cache_key_strategy: AllMessages                   # or LastMessage / FirstUserMessage
+      vector_store: InMemory                            # Redis backend = TODO
+      skip_header: X-AI-Skip-Cache
+```
+
+Plugin priority is `773` — higher than `ai-cache` (772, string-exact) and `ai-rate-limit` (771).
+
+### 12.3 Vector store backends
+
+- **`InMemory`** (MVP): brute-force cosine over a `Mutex<Vec<VectorEntry>>`, LRU eviction by `last_used`, lazy TTL pruning. Comfortable for ≤10 000 entries (~ms latency per query).
+- **`Redis`**: the `VectorStore` trait is already in place; the Redis-backed implementation is tracked in `tasks.md` under stage 19B as a follow-up. Until it lands, any non-`InMemory` value falls back to `InMemory` with a warning.
+
+### 12.4 Observability headers
+
+- `X-Kong-AI-Cache: HIT-SEMANTIC` — semantic match, response served from cache
+- `X-Kong-AI-Cache-Similarity: 0.9842` — cosine score of the matched entry (only on hit)
+- `X-Kong-AI-Cache: MISS-SEMANTIC` — no match above threshold; request proceeded upstream and the response was stored
+
+Send `X-AI-Skip-Cache: 1` to bypass both lookup and store on a per-request basis.
+
+### 12.5 Failure modes
+
+- Embedding endpoint timeout / 5xx → cache lookup is skipped; the request proceeds to upstream as if the plugin were not present.
+- Non-200 upstream responses are never cached.
+- TTL-expired entries are pruned lazily on insert/search.
+
+## 13. Semantic Routing in ai-proxy
+
+Picks the target that **best matches the prompt's semantics**, rather than the prompt's regex/keywords. Stacks on top of token-size routing — the `max_input_tokens` filter runs first, then semantic routing picks within the surviving tier.
+
+### 13.1 How it works
+
+1. On first request matching a `model_routes` rule, ai-proxy embeds every `target.semantic_routing_examples` and caches the index per `(endpoint, embedding_model, examples)` hash.
+2. On every subsequent request: extract the prompt text → embed once → for each candidate target, compute the **max** cosine vs that target's example vectors → pick the highest-scoring target above `semantic_routing_min_score`.
+3. Any failure (embedding service down, no examples configured, all scores below threshold) falls back to weighted round-robin within the same priority tier.
+
+### 13.2 Configuration
+
+```yaml
+plugins:
+  - name: ai-proxy
+    config:
+      model: smart-router
+      enable_semantic_routing: true
+      semantic_routing_endpoint_url: https://api.openai.com
+      semantic_routing_api_key: sk-...
+      semantic_routing_embedding_model: text-embedding-3-small
+      semantic_routing_timeout_ms: 200
+      semantic_routing_min_score: 0.5
+
+      model_routes:
+        - pattern: ".*"
+          targets:
+            - provider_type: openai
+              model_name: gpt-4o-mini
+              semantic_routing_examples:
+                - "summarize this paragraph"
+                - "translate to french"
+            - provider_type: anthropic
+              model_name: claude-3-opus
+              semantic_routing_examples:
+                - "write a rust function"
+                - "debug this stack trace"
+            - provider_type: openai
+              model_name: gpt-4o
+              semantic_routing_examples:
+                - "describe this image"
+                - "caption the photo"
+```
+
+First request: 6 example-embed calls (one-time warm-up). Subsequent requests: one embed for the live prompt + brute-force cosine over the example set.
+
+### 13.3 Composition with token-size routing
+
+Both can be enabled simultaneously:
+
+1. Regex match a `model_routes` rule.
+2. Token-size filter: drop targets where `max_input_tokens < prompt_tokens` (highest priority tier first; cascade to lower tier if exhausted).
+3. Semantic routing inside the surviving tier: pick the highest-cosine target.
+4. Fallback on any failure in step 3: weighted round-robin within the same tier.
+
+### 13.4 Failure modes
+
+- Per-example warm-up failure is logged and the example is dropped; the target remains routable through fallback.
+- If no target has examples configured, semantic routing is silently disabled (acts as identity).
+- Live-prompt embedding timeout → fallback to weighted RR.
+- All scores below `semantic_routing_min_score` → fallback to weighted RR.
+
+`semantic_routing_min_score` exists specifically to keep low-confidence semantic matches from overriding sensible weighted defaults.

@@ -99,9 +99,9 @@ make DOCKER_TAG=fengyi95/kong-rust:latest docker-push
 
 ### 进度概览
 
-- **已完成**：77 个任务（阶段 1-15, 16.3-16.5, 17.1, 20.1），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API（+ /cache + /debug/node/log-level + /timers）、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理、QA 测试与 Bug 修复、Hybrid 模式、AI Gateway v1/responses、gRPC 代理、Graceful Shutdown
-- **待实现**：8 个任务（阶段 16-19）— KeySet/Key 端点、Stream TLS Termination、RBAC、Lua 沙箱加固、Proxy Cache、OpenTelemetry、性能基准测试
-- **总计**：85 个任务（2026-04-19 审计修正：8 阶段补入 8.12a 子任务；4.3/6.3/8.15 的虚报声明已从任务描述中移除，缺失能力已在阶段 16-17 的待办中覆盖）
+- **已完成**：80 个任务（阶段 1-15, 16.3-16.5, 17.1, 19B.1-19B.3, 20.1），涵盖核心模型、配置、数据库、路由、代理引擎（L7 + L4 Stream）、插件系统、Admin API（+ /cache + /debug/node/log-level + /timers）、TLS、健康检查、负载均衡、集成测试、Access Log、异步 DNS、Body Buffering、Docker 镜像构建、HTTP 代理性能优化、HTTP/2、ws_id 兼容、WebSocket 代理、QA 测试与 Bug 修复、Hybrid 模式、AI Gateway v1/responses、gRPC 代理、Graceful Shutdown、AI 高级路由(token-size + 语义) + 语义缓存
+- **待实现**：9 个任务（阶段 16-19）— KeySet/Key 端点、Stream TLS Termination、RBAC、Lua 沙箱加固、Proxy Cache、OpenTelemetry、性能基准测试、Redis 向量后端(19B.4)
+- **总计**：89 个任务（2026-04-19 审计修正：8 阶段补入 8.12a 子任务；4.3/6.3/8.15 的虚报声明已从任务描述中移除，缺失能力已在阶段 16-17 的待办中覆盖；2026-05-01 新增阶段 19B 4 个任务）
 - **已知问题**：16 个（QA 发现，已全部修复 ✅，详见 `docs/tasks.md` 阶段 14）
 
 ## 强制要求：变更时同步更新文档

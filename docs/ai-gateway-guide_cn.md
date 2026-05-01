@@ -940,3 +940,181 @@ INSERT INTO ai_models (name, model_name, priority, weight, max_input_tokens) VAL
   ('chat-group', 'gpt-3.5-turbo',  20, 1, 4096),       -- 短 prompt 优先
   ('chat-group', 'gpt-4o',         10, 1, 128000);     -- 长 prompt 升档
 ```
+
+## 11. ai-proxy 按 token 大小路由
+
+§10.7 的 token 预算原语已经接通到 ai-proxy 的 `model_routes` — 仅靠路由配置(无需写 DAO)就能拿到成本感知路由能力。
+
+### 11.1 工作机制
+
+`access` 阶段:
+
+1. 解码 ChatRequest,通过 tokenizer registry 估算 `prompt_tokens`(provider 启发式推断、registry 自带 deadline)
+2. 估值传给 `ModelRouter::resolve_for(model_name, prompt_tokens)`
+3. `max_input_tokens` 不够的 target 被过滤掉
+4. 按 `priority` 降序尝试;某档全被预算过滤掉 → fallback 下一档
+5. 留下的候选在档内做加权 round-robin
+
+`prompt_tokens` 不可用时(registry 关闭、body 解析失败等)自动跳过过滤,行为等价于 `resolve(model_name)`。
+
+### 11.2 配置
+
+`ModelTargetConfig` 新增 2 个字段:
+
+| 字段 | 类型 | 默认 | 用途 |
+|------|------|------|------|
+| `priority` | i32 | 0 | 高优先级先选;同 priority 内做加权 RR |
+| `max_input_tokens` | i32? | 未设置 | 单 target 的 prompt 上限,超过则被过滤 |
+
+插件顶层新增 1 个开关:
+
+| 字段 | 类型 | 默认 | 用途 |
+|------|------|------|------|
+| `enable_token_size_routing` | bool | true | 设为 false 跳过估值 + 过滤 |
+
+示例:小模型优先,长 prompt fallback 大窗口模型。
+
+```yaml
+plugins:
+  - name: ai-proxy
+    config:
+      model: chat-default
+      enable_token_size_routing: true
+      model_routes:
+        - pattern: "^chat"
+          targets:
+            - provider_type: openai
+              model_name: gpt-4o-mini
+              priority: 10
+              max_input_tokens: 8000
+              auth_config: { header_value: sk-... }
+            - provider_type: openai
+              model_name: gpt-4o
+              priority: 0
+              max_input_tokens: 128000
+              auth_config: { header_value: sk-... }
+```
+
+500 token 的 prompt 命中 `gpt-4o-mini`;5 万 token 的 prompt 升档到 `gpt-4o`。所有 cap 都不够时返回 400。
+
+### 11.3 可观测性
+
+每个命中 `model_routes` 的请求都会带上两个响应头:
+
+- `X-Kong-AI-Selected-Model` — 实际选中的上游 model 名(如 `gpt-4o-mini`)
+- `X-Kong-AI-Prompt-Tokens` — 路由决策用的 token 估值(仅在启用 token-size 路由时输出)
+
+这两个头是稳定契约,可用于集成测试断言、日志管线、Tracing。
+
+## 12. ai-semantic-cache 插件
+
+按 prompt **embedding 相似度** 缓存 LLM 响应(不是字符串精确匹配)。"What's the weather" 和 "How is the weather" 这种语义等价的两个问题会命中同一份缓存。
+
+### 12.1 生命周期
+
+1. **access** — 从 ChatRequest 提取 cache-key 文本(`LastMessage` / `AllMessages` / `FirstUserMessage`)→ 调 embedding 端点 → vector store 余弦 KNN → 命中(cosine ≥ `similarity_threshold`)→ short-circuit 返回缓存内容,带头 `X-Kong-AI-Cache: HIT-SEMANTIC`
+2. **body_filter** — miss 时累积上游响应,end_of_stream 时若 status=200 → 把 (query_vector, response_body) 入 store(带 TTL)
+
+### 12.2 配置
+
+```yaml
+plugins:
+  - name: ai-semantic-cache
+    config:
+      embedding_provider: openai_compat
+      embedding_endpoint_url: https://api.openai.com    # 或 Azure / vLLM / Ollama
+      embedding_api_key: sk-...
+      embedding_model: text-embedding-3-small
+      embedding_timeout_ms: 200
+      similarity_threshold: 0.92                        # 余弦阈值
+      cache_ttl_seconds: 3600
+      max_cache_entries: 10000
+      cache_key_strategy: AllMessages                   # 或 LastMessage / FirstUserMessage
+      vector_store: InMemory                            # Redis 后端 = TODO
+      skip_header: X-AI-Skip-Cache
+```
+
+插件优先级 `773` — 高于 `ai-cache`(772,字符串精确)和 `ai-rate-limit`(771)。
+
+### 12.3 Vector store 后端
+
+- **`InMemory`**(MVP):`Mutex<Vec<VectorEntry>>` 暴力余弦,LRU 按 `last_used` 淘汰,TTL 惰性清理。≤10 000 条目时单次查询 ~ms 级。
+- **`Redis`**:`VectorStore` trait 已就位;Redis 后端实现作为 `tasks.md` 阶段 19B 的 follow-up。在它落地之前,任何非 `InMemory` 的值会 fallback 到 `InMemory` 并打 warn 日志。
+
+### 12.4 可观测性头
+
+- `X-Kong-AI-Cache: HIT-SEMANTIC` — 语义命中,响应来自缓存
+- `X-Kong-AI-Cache-Similarity: 0.9842` — 命中条目的余弦分数(仅命中时)
+- `X-Kong-AI-Cache: MISS-SEMANTIC` — 未达阈值,请求继续到上游,响应已写回缓存
+
+发送 `X-AI-Skip-Cache: 1` 头可单次绕过缓存查找 + 写回。
+
+### 12.5 失败语义
+
+- embedding 端点超时 / 5xx → 跳过缓存查找,请求按无插件正常进上游
+- 非 200 响应永远不写回
+- TTL 过期条目在下一次 insert/search 时惰性清理
+
+## 13. ai-proxy 语义路由
+
+按 prompt **语义** 选 target,而不是按 prompt 的正则 / 关键词。叠加在 token-size 路由之上 — 先 `max_input_tokens` 过滤,再在剩余候选里语义选择。
+
+### 13.1 工作机制
+
+1. 第一次匹配某条 `model_routes` 规则时,ai-proxy 把所有 `target.semantic_routing_examples` embed 一遍并按 `(endpoint, embedding_model, examples)` 哈希缓存索引
+2. 后续每个请求:提取 prompt 文本 → embed 一次 → 对每个候选 target 计算与其 examples 向量的 **最大** cosine → 选最高分(≥ `semantic_routing_min_score`)
+3. 任何失败(embedding 服务挂、未配 examples、所有分数低于阈值)→ fallback 加权 round-robin
+
+### 13.2 配置
+
+```yaml
+plugins:
+  - name: ai-proxy
+    config:
+      model: smart-router
+      enable_semantic_routing: true
+      semantic_routing_endpoint_url: https://api.openai.com
+      semantic_routing_api_key: sk-...
+      semantic_routing_embedding_model: text-embedding-3-small
+      semantic_routing_timeout_ms: 200
+      semantic_routing_min_score: 0.5
+
+      model_routes:
+        - pattern: ".*"
+          targets:
+            - provider_type: openai
+              model_name: gpt-4o-mini
+              semantic_routing_examples:
+                - "summarize this paragraph"
+                - "translate to french"
+            - provider_type: anthropic
+              model_name: claude-3-opus
+              semantic_routing_examples:
+                - "write a rust function"
+                - "debug this stack trace"
+            - provider_type: openai
+              model_name: gpt-4o
+              semantic_routing_examples:
+                - "describe this image"
+                - "caption the photo"
+```
+
+首次请求:6 次 example-embed 调用(一次性预热)。后续每个请求:1 次 prompt-embed + 暴力 cosine 计算。
+
+### 13.3 与 token-size 路由组合
+
+两者可同时启用,执行顺序:
+
+1. 正则匹配 `model_routes` 规则
+2. token-size 过滤:`max_input_tokens < prompt_tokens` 的 target 被丢弃(最高 priority 档优先;耗尽则降档)
+3. 在剩余候选里语义选择:挑最高 cosine target
+4. 第 3 步任何失败 → fallback 该档加权 RR
+
+### 13.4 失败语义
+
+- 单条 example 预热失败:打 warn 日志,该 example 被跳过;该 target 仍可通过 fallback 路径选中
+- 没有任何 target 配 examples → 语义路由静默禁用(等价于不启用)
+- 实时 prompt embedding 超时 → fallback 加权 RR
+- 所有 cosine 分数低于 `semantic_routing_min_score` → fallback 加权 RR
+
+`semantic_routing_min_score` 存在的目的就是防止"低置信度的语义匹配"覆盖合理的加权默认值。

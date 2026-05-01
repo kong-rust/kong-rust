@@ -509,6 +509,42 @@
   - 文件:`crates/kong-config/src/config.rs`(字段 + 默认值 + set 解析)、`crates/kong-ai/src/token/registry.rs`(from_kong_config)、`crates/kong-server/src/main.rs`
   - workspace 全量回归测试:**0 fail**
 
+## 阶段 19B:AI 高级路由 + 语义缓存
+
+为 Kong Manager AI 页面突出的三大能力做后端落地:按 input token 数路由(接通)、ai-semantic-cache 插件、prompt embedding 语义路由。
+
+- [x] **19B.1** Token-size routing 接通 ai-proxy `[R6]`
+  - `ModelTargetConfig` 新增 `priority` / `max_input_tokens` / `semantic_routing_examples` 三个可选字段
+  - `ModelRouter` 新增 `resolve_for(model_name, prompt_tokens)` — priority 分组 + token-budget 过滤 + 同档加权 RR + 跨档 fallback
+  - `AiProxyConfig` 新增 `enable_token_size_routing: bool`(默认 true)
+  - access 阶段把 prompt token 估算前置到 router 决议之前(provider 启发式推断 + 已有 deadline)
+  - 响应头 `X-Kong-AI-Selected-Model` + `X-Kong-AI-Prompt-Tokens` 用于观测 / 集成测试
+  - 9 个新测试覆盖:短 prompt 命中高 priority 小模型、长 prompt fallback 大窗口、超大 prompt 全部过滤、None 禁用过滤、同档加权 RR 80/20、未设/0/负 cap 视为无限制、三档级联 fallback、JSON 反序列化新字段、enable_token_size_routing=false
+  - 文件:`crates/kong-ai/src/provider/router.rs`、`crates/kong-ai/src/plugins/ai_proxy.rs`、`crates/kong-ai/tests/router_test.rs`
+
+- [x] **19B.2** ai-semantic-cache 插件(InMemory)`[R6]`
+  - 新模块 `crates/kong-ai/src/embedding/`:`EmbeddingClient` trait + `OpenAiEmbeddingClient`(POST /v1/embeddings,OpenAI/Azure/vLLM/Ollama 通用)+ `VectorStore` trait + `InMemoryVectorStore`(LRU + 惰性 TTL 清理)+ 余弦相似度工具
+  - 新插件 `crates/kong-ai/src/plugins/ai_semantic_cache.rs`(优先级 773)
+  - 完整 schema:embedding_provider/endpoint_url/api_key/model/timeout、similarity_threshold、cache_ttl_seconds、max_cache_entries、cache_key_strategy ∈ {LastMessage, AllMessages, FirstUserMessage}、vector_store ∈ {InMemory, Redis(TODO)}、skip_header
+  - 插件实例 DashMap<config_hash, SemanticCacheCore> 让多路由共享同一插件实例时按 config 隔离
+  - 命中:`X-Kong-AI-Cache: HIT-SEMANTIC` + `X-Kong-AI-Cache-Similarity: 0.xxxx` + short-circuit;miss:body_filter 写回(仅 200 响应)
+  - kong-server 注册插件
+  - 15 个新测试:embedding 相似度(identity/orthogonal/opposite/zero/dim mismatch/close)、vector store(insert+exact、close、threshold、TTL、LRU、highest sim 优先)、plugin 生命周期(miss-then-store、identical-hit、semantic-near-hit、unrelated-miss、TTL 过期 → MISS、LRU over capacity、skip header、embedding 失败降级、非 200 不缓存)
+  - 文件:`crates/kong-ai/src/embedding/{mod,openai,vector_store}.rs`、`crates/kong-ai/src/plugins/ai_semantic_cache.rs`、`crates/kong-ai/tests/ai_semantic_cache_test.rs`、`crates/kong-server/src/main.rs`、`crates/kong-ai/src/plugins/mod.rs`、`crates/kong-ai/src/lib.rs`
+
+- [x] **19B.3** Semantic routing(基于 prompt embedding 相似度)`[R6]`
+  - `ModelRouter` 新增 `candidates_for_priority(model_name, prompt_tokens)` 和 `build_resolution_at(rule_idx, target_idx)` 两个辅助接口
+  - `AiProxyConfig` 新增 `enable_semantic_routing` + `semantic_routing_endpoint_url/api_key/embedding_model/timeout_ms/min_score` 一组字段
+  - `AiProxyPlugin` 加 `semantic_indices: DashMap<config_hash, Arc<SemanticRoutingIndex>>` — 第一次匹配某 config 时把所有 `target.semantic_routing_examples` embed 一遍并缓存;config_hash 仅覆盖影响 examples embedding 的字段(timeout/threshold 改动不重建)
+  - access 阶段:enable_semantic_routing=true → token-size 过滤后的高 priority 候选集 → embed live prompt → 各 target examples max cosine → 选最高分(≥ min_score)→ 否则 fallback `resolve_for` 加权 RR
+  - 5 个新测试:weather/code/image 三领域 prompt 各自路由到对应 model、embedding 失败 fallback、unknown domain (低于 min_score) fallback
+  - 文件:`crates/kong-ai/src/provider/router.rs`、`crates/kong-ai/src/plugins/ai_proxy.rs`、`crates/kong-ai/tests/ai_proxy_semantic_routing_test.rs`
+
+- [ ] **19B.4** Redis 后端 vector store(follow-up,未实现)
+  - `VectorStore` trait 已就位,需要新增 `RedisVectorStore` 实现(KV 存 + 相似度可选 RediSearch / 客户端 brute-force)
+  - 配置切换:`vector_store: Redis` + `redis_url`
+  - 当前实现状态:任何非 InMemory 值 fallback 到 InMemory 并打 warn 日志
+
 ## 阶段 20：优雅生命周期管理
 
 - [x] **20.1** Graceful Shutdown 和连接排空 `[NFR]`
