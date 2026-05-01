@@ -221,6 +221,57 @@ impl ModelRouter {
         None
     }
 
+    /// 返回最高可用 priority 档内、通过 token-budget 过滤的所有 target 候选
+    /// (rule_idx, target_idx, &target) — 给 caller(如 ai-proxy)做 semantic-routing 二次选择用。
+    /// Return all target candidates in the highest available priority tier (after token filtering).
+    /// (rule_idx, target_idx, &target) — used by callers (e.g. ai-proxy) for semantic-routing.
+    pub fn candidates_for_priority(
+        &self,
+        model_name: &str,
+        prompt_tokens: Option<u64>,
+    ) -> Option<(usize, Vec<(usize, &ModelTargetConfig)>)> {
+        let (rule_idx, rule) = self
+            .rules
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.pattern.is_match(model_name))?;
+
+        if rule.targets.is_empty() {
+            return None;
+        }
+
+        let mut priorities: Vec<i32> = rule.targets.iter().map(|t| t.priority).collect();
+        priorities.sort_unstable_by(|a, b| b.cmp(a));
+        priorities.dedup();
+
+        for priority in priorities {
+            let candidates: Vec<(usize, &ModelTargetConfig)> = rule
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    t.priority == priority && fits_token_budget(t.max_input_tokens, prompt_tokens)
+                })
+                .collect();
+            if !candidates.is_empty() {
+                return Some((rule_idx, candidates));
+            }
+        }
+        None
+    }
+
+    /// 从一个具体的 (rule_idx, target_idx) 构建 RouteResolution
+    /// Build a RouteResolution from a specific (rule_idx, target_idx).
+    pub fn build_resolution_at(
+        &self,
+        model_name: &str,
+        rule_idx: usize,
+        target_idx: usize,
+    ) -> Option<RouteResolution> {
+        let target = self.rules.get(rule_idx)?.targets.get(target_idx)?;
+        Some(self.build_resolution(model_name, target))
+    }
+
     /// 从 target config 构建 RouteResolution — build resolution from target config
     fn build_resolution(&self, model_name: &str, target: &ModelTargetConfig) -> RouteResolution {
         let model = AiModel {

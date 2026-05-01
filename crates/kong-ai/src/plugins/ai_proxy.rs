@@ -165,10 +165,46 @@ pub struct AiProxyConfig {
     /// then filter targets by max_input_tokens with priority fallback during resolve.
     #[serde(default = "default_true")]
     pub enable_token_size_routing: bool,
+
+    /// 启用语义路由(默认 false): 在 token-size 过滤后的候选里,按 prompt embedding
+    /// 与 target.semantic_routing_examples 余弦相似度选最高分;失败 → fallback 加权 RR
+    /// Enable semantic routing (default false): pick the highest-scoring target by cosine
+    /// similarity between the prompt embedding and target.semantic_routing_examples;
+    /// any failure falls back to weighted RR.
+    #[serde(default)]
+    pub enable_semantic_routing: bool,
+    /// 语义路由 embedding endpoint(OpenAI 兼容 /v1/embeddings)
+    #[serde(default)]
+    pub semantic_routing_endpoint_url: Option<String>,
+    /// 语义路由 embedding API key
+    #[serde(default)]
+    pub semantic_routing_api_key: Option<String>,
+    /// 语义路由 embedding model(如 text-embedding-3-small)
+    #[serde(default = "default_semantic_embedding_model")]
+    pub semantic_routing_embedding_model: String,
+    /// 语义路由 embedding 调用 timeout(毫秒,默认 200)
+    #[serde(default = "default_semantic_timeout_ms")]
+    pub semantic_routing_timeout_ms: u64,
+    /// 语义路由命中阈值 — 低于此分数视为匹配过弱,fallback 加权 RR
+    /// Min cosine score; below this we treat the match as too weak and fall back.
+    #[serde(default = "default_semantic_min_score")]
+    pub semantic_routing_min_score: f32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_semantic_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+
+fn default_semantic_timeout_ms() -> u64 {
+    200
+}
+
+fn default_semantic_min_score() -> f32 {
+    0.5
 }
 
 /// 内联 provider 配置（嵌入在插件 config JSON 中）
@@ -203,6 +239,12 @@ impl Default for AiProxyConfig {
             auth: None,
             logging: None,
             enable_token_size_routing: true,
+            enable_semantic_routing: false,
+            semantic_routing_endpoint_url: None,
+            semantic_routing_api_key: None,
+            semantic_routing_embedding_model: default_semantic_embedding_model(),
+            semantic_routing_timeout_ms: default_semantic_timeout_ms(),
+            semantic_routing_min_score: default_semantic_min_score(),
         }
     }
 }
@@ -283,17 +325,110 @@ impl AiProxyConfig {
 
 // ============ 插件结构体 ============
 
+/// 语义路由 per-(rule_idx, target_idx) 的 examples 向量 — 启动时一次性预热
+/// Pre-warmed example embeddings keyed by (rule_idx, target_idx).
+pub struct SemanticRoutingIndex {
+    /// embedding 客户端 — used to embed the live prompt at runtime
+    pub client: crate::embedding::EmbeddingClientArc,
+    /// (rule_idx, target_idx) → Vec<embedding_vec>
+    pub examples: std::collections::HashMap<(usize, usize), Vec<Vec<f32>>>,
+    /// 命中阈值 — minimum cosine score
+    pub min_score: f32,
+}
+
 /// AI 代理插件 — 实现 PluginHandler trait
 pub struct AiProxyPlugin {
     driver_registry: DriverRegistry,
+    /// per-config-hash 的语义路由索引(惰性预热)
+    /// per-config-hash semantic-routing index, lazily warmed on first request
+    semantic_indices: dashmap::DashMap<u64, std::sync::Arc<SemanticRoutingIndex>>,
+    /// 共享 reqwest client(连接池复用)
+    http: reqwest::Client,
 }
 
 impl AiProxyPlugin {
     /// 创建新的 ai-proxy 插件实例
     pub fn new() -> Self {
+        let http = reqwest::Client::builder()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             driver_registry: DriverRegistry::new(),
+            semantic_indices: dashmap::DashMap::new(),
+            http,
         }
+    }
+
+    /// 测试用 — 注入预构建的 semantic routing index
+    /// Test hook — inject a pre-built semantic-routing index.
+    pub fn install_semantic_index_for_config(
+        &self,
+        cfg: &AiProxyConfig,
+        index: std::sync::Arc<SemanticRoutingIndex>,
+    ) {
+        self.semantic_indices.insert(semantic_config_hash(cfg), index);
+    }
+
+    /// 取或构建 semantic routing index — 第一次见到此 config 时,
+    /// 给所有 target.semantic_routing_examples 做 embedding(失败的 target 跳过)
+    /// Build the semantic-routing index on first use: embed every target.semantic_routing_examples.
+    /// Targets whose embeddings fail are simply omitted from the index (caller falls back).
+    async fn semantic_index_for(
+        &self,
+        cfg: &AiProxyConfig,
+    ) -> Option<std::sync::Arc<SemanticRoutingIndex>> {
+        let key = semantic_config_hash(cfg);
+        if let Some(existing) = self.semantic_indices.get(&key) {
+            return Some(existing.clone());
+        }
+
+        let client: crate::embedding::EmbeddingClientArc =
+            std::sync::Arc::new(crate::embedding::OpenAiEmbeddingClient::new(
+                self.http.clone(),
+                cfg.semantic_routing_endpoint_url.clone(),
+                cfg.semantic_routing_api_key.clone(),
+                cfg.semantic_routing_embedding_model.clone(),
+                std::time::Duration::from_millis(cfg.semantic_routing_timeout_ms),
+            ));
+
+        let mut examples_map: std::collections::HashMap<(usize, usize), Vec<Vec<f32>>> =
+            std::collections::HashMap::new();
+
+        for (rule_idx, route) in cfg.model_routes.iter().enumerate() {
+            for (target_idx, target) in route.targets.iter().enumerate() {
+                let Some(samples) = target.semantic_routing_examples.as_ref() else {
+                    continue;
+                };
+                let mut vectors = Vec::with_capacity(samples.len());
+                for sample in samples {
+                    match client.embed(sample).await {
+                        Ok(v) => vectors.push(v),
+                        Err(e) => {
+                            warn!(
+                                "ai-proxy semantic-routing: failed to embed example for target #{}: {}",
+                                target_idx, e
+                            );
+                        }
+                    }
+                }
+                if !vectors.is_empty() {
+                    examples_map.insert((rule_idx, target_idx), vectors);
+                }
+            }
+        }
+
+        if examples_map.is_empty() {
+            // 没有任何 target 配 examples → semantic routing 不适用
+            return None;
+        }
+
+        let index = std::sync::Arc::new(SemanticRoutingIndex {
+            client,
+            examples: examples_map,
+            min_score: cfg.semantic_routing_min_score,
+        });
+        self.semantic_indices.insert(key, index.clone());
+        Some(index)
     }
 }
 
@@ -301,6 +436,65 @@ impl Default for AiProxyPlugin {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 语义路由 config 哈希 — 仅包含影响 examples embedding 的字段
+/// 这样:用户改了 examples 或 embedding model,新建索引;改了 timeout/threshold 不重建。
+/// Hash only fields that affect example embeddings — model / endpoint / examples themselves.
+/// Timeout / threshold changes are runtime-only and don't invalidate the cached index.
+fn semantic_config_hash(cfg: &AiProxyConfig) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(cfg.semantic_routing_endpoint_url.as_deref().unwrap_or("").as_bytes());
+    hasher.update(cfg.semantic_routing_api_key.as_deref().unwrap_or("").as_bytes());
+    hasher.update(cfg.semantic_routing_embedding_model.as_bytes());
+    for route in &cfg.model_routes {
+        hasher.update(route.pattern.as_bytes());
+        for target in &route.targets {
+            hasher.update(target.provider_type.as_bytes());
+            hasher.update(target.model_name.as_bytes());
+            if let Some(samples) = &target.semantic_routing_examples {
+                for sample in samples {
+                    hasher.update(sample.as_bytes());
+                    hasher.update(b"\0");
+                }
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(buf)
+}
+
+/// 在过滤后的 candidate 集里,基于 prompt embedding 与 examples 选最高分 target
+/// Pick the candidate target whose example embeddings best match the prompt embedding.
+/// Returns None when no candidate has indexed examples or all scores are below min_score.
+fn pick_semantic_target(
+    candidates: &[(usize, &crate::provider::router::ModelTargetConfig)],
+    prompt_vec: &[f32],
+    rule_idx: usize,
+    index: &SemanticRoutingIndex,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (target_idx, _) in candidates {
+        let Some(vectors) = index.examples.get(&(rule_idx, *target_idx)) else {
+            continue;
+        };
+        let score = vectors
+            .iter()
+            .map(|v| crate::embedding::cosine_similarity(prompt_vec, v))
+            .fold(f32::NEG_INFINITY, f32::max);
+        match best {
+            Some((_, prev)) if score <= prev => {}
+            _ => best = Some((*target_idx, score)),
+        }
+    }
+    let (idx, score) = best?;
+    if score < index.min_score {
+        return None;
+    }
+    Some(idx)
 }
 
 // ============ 辅助函数 ============
@@ -500,15 +694,58 @@ impl PluginHandler for AiProxyPlugin {
             // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择 + 按 token 过滤）
             // AI Gateway routing: regex match model name → concrete provider + model
             let router = ModelRouter::from_configs(&cfg.model_routes)?;
-            let resolution = router
-                .resolve_for(&model_name, routing_prompt_tokens)
-                .ok_or_else(|| KongError::PluginError {
-                    plugin_name: "ai-proxy".to_string(),
-                    message: format!(
-                        "no model route matched for model '{}' (prompt_tokens={:?}) — 无路由规则匹配",
-                        model_name, routing_prompt_tokens
-                    ),
-                })?;
+
+            // 4.a 语义路由分支 — 在最高 priority 档候选里按 cosine 选最高分
+            // Semantic routing: pick highest-cosine target within highest-priority candidate set.
+            let mut semantic_resolution = None;
+            if cfg.enable_semantic_routing {
+                if let Some((rule_idx, candidates)) =
+                    router.candidates_for_priority(&model_name, routing_prompt_tokens)
+                {
+                    if let Some(index) = self.semantic_index_for(&cfg).await {
+                        // embed the live prompt — use the same client that warmed the examples
+                        let prompt_text =
+                            crate::token::extract_prompt_text(&chat_request);
+                        match index.client.embed(&prompt_text).await {
+                            Ok(prompt_vec) => {
+                                if let Some(target_idx) = pick_semantic_target(
+                                    &candidates,
+                                    &prompt_vec,
+                                    rule_idx,
+                                    &index,
+                                ) {
+                                    semantic_resolution =
+                                        router.build_resolution_at(&model_name, rule_idx, target_idx);
+                                    debug!(
+                                        "ai-proxy: semantic routing picked target #{} (rule #{})",
+                                        target_idx, rule_idx
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "ai-proxy semantic-routing: prompt embed failed, fallback to weighted RR: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let resolution = if let Some(r) = semantic_resolution {
+                r
+            } else {
+                router
+                    .resolve_for(&model_name, routing_prompt_tokens)
+                    .ok_or_else(|| KongError::PluginError {
+                        plugin_name: "ai-proxy".to_string(),
+                        message: format!(
+                            "no model route matched for model '{}' (prompt_tokens={:?}) — 无路由规则匹配",
+                            model_name, routing_prompt_tokens
+                        ),
+                    })?
+            };
 
             let driver = self
                 .driver_registry
