@@ -262,6 +262,10 @@ fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system
     registry.register("ai-proxy", Arc::new(kong_ai::plugins::AiProxyPlugin::new()));
     registry.register("ai-rate-limit", Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()));
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
+    registry.register(
+        "ai-semantic-cache",
+        Arc::new(kong_ai::plugins::AiSemanticCachePlugin::new()),
+    );
     registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
 
     // 注入全局 TokenizerRegistry — ai-rate-limit / ai-proxy 通过 OnceLock 单例访问

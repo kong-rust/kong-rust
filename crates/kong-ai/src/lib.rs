@@ -8,6 +8,7 @@ pub mod provider;
 pub mod codec;
 pub mod token;
 pub mod ratelimit;
+pub mod embedding;
 pub mod plugins;
 
 /// 解析插件配置 JSON — 统一错误处理
