@@ -12,6 +12,9 @@ fn target(provider: &str, model: &str, weight: u32) -> ModelTargetConfig {
         endpoint_url: None,
         auth_config: serde_json::json!({}),
         weight,
+        priority: 0,
+        max_input_tokens: None,
+        semantic_routing_examples: None,
     }
 }
 
@@ -27,6 +30,29 @@ fn target_with_endpoint(
         endpoint_url: Some(endpoint.to_string()),
         auth_config: serde_json::json!({"header_value": "test-key"}),
         weight,
+        priority: 0,
+        max_input_tokens: None,
+        semantic_routing_examples: None,
+    }
+}
+
+/// 构造带 priority + max_input_tokens 的 target — for by-token-size routing tests
+fn target_sized(
+    provider: &str,
+    model: &str,
+    weight: u32,
+    priority: i32,
+    max_input_tokens: Option<i32>,
+) -> ModelTargetConfig {
+    ModelTargetConfig {
+        provider_type: provider.to_string(),
+        model_name: model.to_string(),
+        endpoint_url: None,
+        auth_config: serde_json::json!({}),
+        weight,
+        priority,
+        max_input_tokens,
+        semantic_routing_examples: None,
     }
 }
 
@@ -278,6 +304,9 @@ fn test_weighted_routing_preserves_auth_config() {
             endpoint_url: None,
             auth_config: serde_json::json!({"header_value": "sk-my-secret-key"}),
             weight: 1,
+            priority: 0,
+            max_input_tokens: None,
+            semantic_routing_examples: None,
         }],
     )])
     .unwrap();
@@ -461,4 +490,227 @@ fn test_scenario_multi_region_failover() {
     assert_eq!(counts["https://us-east.azure.com"], 500);
     assert_eq!(counts["https://eu-west.azure.com"], 300);
     assert_eq!(counts["https://ap-east.azure.com"], 200);
+}
+
+// ============ By-token-size routing — 按 prompt 大小路由 ============
+
+#[test]
+fn test_resolve_for_short_prompt_hits_high_priority_small_model() {
+    // 高 priority 小窗口模型(p=10, max=1000)+ 低 priority 大窗口(p=0, max=128000)
+    // 短 prompt(500 token)→ 命中高 priority 的小模型
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o-mini", 1, 10, Some(1000)),
+            target_sized("openai", "gpt-4o", 1, 0, Some(128000)),
+        ],
+    )])
+    .unwrap();
+
+    let res = router.resolve_for("chat-default", Some(500)).unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o-mini");
+    assert_eq!(res.model.priority, 10);
+}
+
+#[test]
+fn test_resolve_for_long_prompt_falls_back_to_lower_priority_large_model() {
+    // 长 prompt(50000 token)→ 高 priority 小模型被过滤,fallback 到低 priority 大模型
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o-mini", 1, 10, Some(1000)),
+            target_sized("openai", "gpt-4o", 1, 0, Some(128000)),
+        ],
+    )])
+    .unwrap();
+
+    let res = router.resolve_for("chat-default", Some(50_000)).unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o");
+    assert_eq!(res.model.priority, 0);
+}
+
+#[test]
+fn test_resolve_for_oversize_prompt_returns_none() {
+    // 超过所有 priority 的 max_input_tokens → 全部过滤掉,返回 None
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o-mini", 1, 10, Some(1000)),
+            target_sized("openai", "gpt-4o", 1, 0, Some(128000)),
+        ],
+    )])
+    .unwrap();
+
+    assert!(router.resolve_for("chat-default", Some(200_000)).is_none());
+}
+
+#[test]
+fn test_resolve_for_none_token_count_disables_filtering() {
+    // prompt_tokens=None 时不启用过滤,只按 priority 选择
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o-mini", 1, 10, Some(1000)),
+            target_sized("openai", "gpt-4o", 1, 0, Some(128000)),
+        ],
+    )])
+    .unwrap();
+
+    // 即使是巨大 prompt,只要传 None 也走最高 priority 的小模型
+    let res = router.resolve_for("chat-default", None).unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o-mini");
+}
+
+#[test]
+fn test_resolve_for_same_priority_weighted_round_robin() {
+    // 同 priority 内仍按 weight 轮询 — 80/20 分布
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o", 80, 0, None),
+            target_sized("openai_compat", "gpt-4o", 20, 0, None),
+        ],
+    )])
+    .unwrap();
+
+    let mut openai = 0;
+    let mut compat = 0;
+    for _ in 0..1000 {
+        let res = router.resolve_for("chat-x", Some(100)).unwrap();
+        match res.provider_type.as_str() {
+            "openai" => openai += 1,
+            "openai_compat" => compat += 1,
+            _ => panic!("unexpected"),
+        }
+    }
+    assert_eq!(openai, 800);
+    assert_eq!(compat, 200);
+}
+
+#[test]
+fn test_resolve_for_unset_max_input_tokens_treated_as_unlimited() {
+    // max_input_tokens=None → 视为无限制,任何大小 prompt 都通过
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![target_sized("openai", "gpt-4o", 1, 0, None)],
+    )])
+    .unwrap();
+
+    let res = router.resolve_for("chat-x", Some(1_000_000)).unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o");
+}
+
+#[test]
+fn test_resolve_legacy_method_disables_token_filter() {
+    // resolve(...) 是 resolve_for(_, None) 的别名 — 不做 token 过滤
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o-mini", 1, 10, Some(1000)),
+            target_sized("openai", "gpt-4o", 1, 0, Some(128000)),
+        ],
+    )])
+    .unwrap();
+
+    // resolve() 永远走最高 priority,不论 prompt 大小
+    let res = router.resolve("chat-x").unwrap();
+    assert_eq!(res.model.model_name, "gpt-4o-mini");
+}
+
+#[test]
+fn test_resolve_for_zero_or_negative_max_treated_as_unlimited() {
+    // max_input_tokens=0 / 负值 → 视为无限制(防御性语义)
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "gpt-4o", 1, 5, Some(0)),
+            target_sized("openai", "gpt-4o-mini", 1, 0, Some(1000)),
+        ],
+    )])
+    .unwrap();
+
+    // 100 万 token 仍命中最高 priority(因为 cap=0 = 无限制)
+    let res = router.resolve_for("chat-x", Some(1_000_000)).unwrap();
+    assert_eq!(res.model.priority, 5);
+}
+
+#[test]
+fn test_three_priority_tiers_cascade_fallback() {
+    // 三档 priority + 不同 cap:小→中→大,逐级 fallback
+    let router = ModelRouter::from_configs(&[rule(
+        "^chat",
+        vec![
+            target_sized("openai", "small", 1, 20, Some(1_000)),
+            target_sized("openai", "medium", 1, 10, Some(8_000)),
+            target_sized("openai", "large", 1, 0, Some(128_000)),
+        ],
+    )])
+    .unwrap();
+
+    assert_eq!(
+        router.resolve_for("chat", Some(500)).unwrap().model.model_name,
+        "small"
+    );
+    assert_eq!(
+        router.resolve_for("chat", Some(5_000)).unwrap().model.model_name,
+        "medium"
+    );
+    assert_eq!(
+        router.resolve_for("chat", Some(50_000)).unwrap().model.model_name,
+        "large"
+    );
+    assert!(router.resolve_for("chat", Some(200_000)).is_none());
+}
+
+// ============ JSON 反序列化新字段 — new fields deserialization ============
+
+#[test]
+fn test_ai_proxy_config_with_priority_and_max_input_tokens() {
+    let json = serde_json::json!({
+        "model": "chat-default",
+        "model_routes": [
+            {
+                "pattern": "^chat",
+                "targets": [
+                    {
+                        "provider_type": "openai",
+                        "model_name": "gpt-4o-mini",
+                        "priority": 10,
+                        "max_input_tokens": 1000,
+                        "auth_config": { "header_value": "sk-x" }
+                    },
+                    {
+                        "provider_type": "openai",
+                        "model_name": "gpt-4o",
+                        "priority": 0,
+                        "max_input_tokens": 128000,
+                        "auth_config": { "header_value": "sk-x" }
+                    }
+                ]
+            }
+        ]
+    });
+
+    let cfg: kong_ai::plugins::ai_proxy::AiProxyConfig =
+        serde_json::from_value(json).expect("should parse");
+
+    let route = &cfg.model_routes[0];
+    assert_eq!(route.targets[0].priority, 10);
+    assert_eq!(route.targets[0].max_input_tokens, Some(1000));
+    assert_eq!(route.targets[1].priority, 0);
+    assert_eq!(route.targets[1].max_input_tokens, Some(128000));
+    // 默认 enable_token_size_routing=true
+    assert!(cfg.enable_token_size_routing);
+}
+
+#[test]
+fn test_ai_proxy_config_enable_token_size_routing_false() {
+    let json = serde_json::json!({
+        "model": "x",
+        "enable_token_size_routing": false
+    });
+
+    let cfg: kong_ai::plugins::ai_proxy::AiProxyConfig =
+        serde_json::from_value(json).expect("should parse");
+    assert!(!cfg.enable_token_size_routing);
 }

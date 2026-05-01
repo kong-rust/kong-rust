@@ -159,6 +159,16 @@ pub struct AiProxyConfig {
     pub auth: Option<KongAuthConfig>,
     /// Kong 官方 logging 配置 — logging config (official Kong format)
     pub logging: Option<KongLoggingConfig>,
+    /// 启用 by-token-size 路由(默认 true): access 阶段先估 prompt token 数,
+    /// 在 model_routes 解析时按 ModelTargetConfig.max_input_tokens 过滤 + priority fallback
+    /// Enable by-token-size routing (default true): estimate prompt tokens up-front,
+    /// then filter targets by max_input_tokens with priority fallback during resolve.
+    #[serde(default = "default_true")]
+    pub enable_token_size_routing: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 内联 provider 配置（嵌入在插件 config JSON 中）
@@ -192,6 +202,7 @@ impl Default for AiProxyConfig {
             model_routes: Vec::new(),
             auth: None,
             logging: None,
+            enable_token_size_routing: true,
         }
     }
 }
@@ -461,20 +472,43 @@ impl PluginHandler for AiProxyPlugin {
             _ => ClientProtocol::OpenAi,
         };
 
+        // 3.5 By-token-size routing 预算: 在路由决议前估算 prompt token 数
+        // 用启发式 provider 推断 + token registry 异步计数(自带 deadline + char fallback)
+        // Estimate prompt tokens before routing decision so resolve_for can filter targets.
+        // Provider type is inferred heuristically from model name; tokenizer registry has its own deadline.
+        let routing_prompt_tokens: Option<u64> = if cfg.enable_token_size_routing
+            && !cfg.model_routes.is_empty()
+        {
+            let inferred_provider = crate::token::TokenizerRegistry::infer_provider_type(&model_name);
+            let n = match crate::token::global_registry() {
+                Some(registry) => {
+                    registry
+                        .count_prompt(inferred_provider, &chat_request.model, &chat_request)
+                        .await
+                }
+                None => crate::token::estimate_from_request(&chat_request),
+            };
+            Some(n)
+        } else {
+            None
+        };
+
         // 4. 智能路由 / Intelligent routing
         // 优先使用 model_routes（AI 网关级智能路由）；fallback 到 inline provider 配置
         // Priority: model_routes (AI Gateway-level routing) > inline provider config
         let (driver, ai_model, provider_config) = if !cfg.model_routes.is_empty() {
-            // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
-            // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
+            // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择 + 按 token 过滤）
+            // AI Gateway routing: regex match model name → concrete provider + model
             let router = ModelRouter::from_configs(&cfg.model_routes)?;
-            let resolution = router.resolve(&model_name).ok_or_else(|| KongError::PluginError {
-                plugin_name: "ai-proxy".to_string(),
-                message: format!(
-                    "no model route matched for model '{}' — 无路由规则匹配",
-                    model_name
-                ),
-            })?;
+            let resolution = router
+                .resolve_for(&model_name, routing_prompt_tokens)
+                .ok_or_else(|| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!(
+                        "no model route matched for model '{}' (prompt_tokens={:?}) — 无路由规则匹配",
+                        model_name, routing_prompt_tokens
+                    ),
+                })?;
 
             let driver = self
                 .driver_registry
@@ -681,17 +715,25 @@ impl PluginHandler for AiProxyPlugin {
 
         // 通过 TokenizerRegistry 精确计算 prompt token 估值
         // (chat_request 已规范化,直接传 ChatRequest 引用,registry 内含 deadline + estimate 兜底)
-        let estimated_prompt_tokens = match crate::token::global_registry() {
-            Some(registry) => {
-                registry
-                    .count_prompt(
-                        &provider_config.provider_type,
-                        &chat_request.model,
-                        &chat_request,
-                    )
-                    .await
+        // 复用 by-token-size routing 阶段的估值(若已用启发式 provider 算过,这里用最终 provider 重算更精确)
+        // Reuse the upfront estimate when by-token-size routing already produced one with a heuristic provider.
+        // The provider used here is the resolved one — slightly more accurate, but the upfront estimate
+        // is good enough for downstream rate-limit/audit when available.
+        let estimated_prompt_tokens = if let Some(n) = routing_prompt_tokens {
+            n
+        } else {
+            match crate::token::global_registry() {
+                Some(registry) => {
+                    registry
+                        .count_prompt(
+                            &provider_config.provider_type,
+                            &chat_request.model,
+                            &chat_request,
+                        )
+                        .await
+                }
+                None => crate::token::estimate_from_request(&chat_request),
             }
-            None => crate::token::estimate_from_request(&chat_request),
         };
 
         // 11. 存储跨阶段状态
@@ -728,6 +770,23 @@ impl PluginHandler for AiProxyPlugin {
             ctx.response_headers_to_set.push((
                 "X-Kong-AI-Route-Type".to_string(),
                 "responses-translation".to_string(),
+            ));
+        }
+
+        // 11.6 输出选中 model + prompt tokens 用于路由可观测性 / 集成测试断言
+        // Emit selected model + prompt-token estimate for routing observability and integration tests.
+        if let Some(state) = ctx.extensions.get::<AiRequestState>() {
+            if !state.model.model_name.is_empty() {
+                ctx.response_headers_to_set.push((
+                    "X-Kong-AI-Selected-Model".to_string(),
+                    state.model.model_name.clone(),
+                ));
+            }
+        }
+        if cfg.enable_token_size_routing && !cfg.model_routes.is_empty() {
+            ctx.response_headers_to_set.push((
+                "X-Kong-AI-Prompt-Tokens".to_string(),
+                estimated_prompt_tokens.to_string(),
             ));
         }
 

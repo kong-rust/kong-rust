@@ -33,6 +33,18 @@ pub struct ModelTargetConfig {
     /// 权重（加权轮询）— weight for weighted round-robin
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// 路由优先级(高优先级先选,同优先级内做加权轮询)
+    /// Priority for routing (higher first; weighted RR within same priority)
+    #[serde(default)]
+    pub priority: i32,
+    /// 单次请求 prompt token 上限(超过则该 target 在 by-token-size 路由中被过滤)
+    /// Per-request prompt token cap; exceeded targets are filtered out under by-token-size routing
+    #[serde(default)]
+    pub max_input_tokens: Option<i32>,
+    /// 语义路由示例 prompt(用于 commit 3 — 启用 enable_semantic_routing 时使用)
+    /// Semantic routing example prompts (used by enable_semantic_routing in commit 3)
+    #[serde(default)]
+    pub semantic_routing_examples: Option<Vec<String>>,
 }
 
 fn default_weight() -> u32 {
@@ -128,41 +140,85 @@ impl ModelRouter {
         })
     }
 
-    /// 解析 model 名称 → 具体的 provider + model
-    /// Resolve model name → concrete provider + model
+    /// 解析 model 名称 → 具体的 provider + model(等价于 resolve_for(model_name, None))
+    /// Resolve model name → concrete provider + model (alias for resolve_for(model_name, None))
+    pub fn resolve(&self, model_name: &str) -> Option<RouteResolution> {
+        self.resolve_for(model_name, None)
+    }
+
+    /// 按 prompt token 数解析 model 名称 → 具体的 provider + model
+    /// Resolve model name with prompt-token-aware filtering → concrete provider + model
     ///
     /// 匹配逻辑 — matching logic:
-    /// 1. 按顺序遍历规则，找到第一条 pattern 匹配的规则（first-match wins）
-    /// 2. 在该规则的 targets 中按权重加权轮询选择一个目标
-    /// 3. 构建 RouteResolution 返回
-    /// 4. 无匹配 → 返回 None（fallback 到 inline provider 配置）
-    pub fn resolve(&self, model_name: &str) -> Option<RouteResolution> {
+    /// 1. 按顺序遍历规则,找到第一条 pattern 匹配的规则(first-match wins)
+    /// 2. 按 target.priority 降序分组,从最高 priority 开始
+    /// 3. 在该 priority 组内过滤:
+    ///    - max_input_tokens 未指定 OR prompt_tokens 未指定 OR prompt_tokens <= max_input_tokens
+    /// 4. 过滤后非空 → 加权轮询;为空 → 跳到下一档 priority
+    /// 5. 全档 priority 都过滤为空 → 返回 None
+    ///
+    /// `prompt_tokens=None` 时不启用 token 过滤,仅按 priority + 加权选择
+    /// When prompt_tokens=None, token filtering is disabled — only priority + weighted RR
+    pub fn resolve_for(
+        &self,
+        model_name: &str,
+        prompt_tokens: Option<u64>,
+    ) -> Option<RouteResolution> {
         // 第一条匹配的规则 — first matching rule
         let rule = self.rules.iter().find(|r| r.pattern.is_match(model_name))?;
 
-        if rule.targets.len() == 1 {
-            return Some(self.build_resolution(model_name, &rule.targets[0]));
+        if rule.targets.is_empty() {
+            return None;
         }
 
-        // 加权轮询选择 — weighted round-robin among targets
-        let total_weight: u64 = rule.targets.iter().map(|t| t.weight as u64).sum();
-        if total_weight == 0 {
-            return Some(self.build_resolution(model_name, &rule.targets[0]));
-        }
+        // 收集 distinct priority(降序)— collect distinct priorities (descending)
+        let mut priorities: Vec<i32> = rule.targets.iter().map(|t| t.priority).collect();
+        priorities.sort_unstable_by(|a, b| b.cmp(a));
+        priorities.dedup();
 
-        let tick = self.counter.fetch_add(1, Ordering::Relaxed);
-        let slot = tick % total_weight;
+        for priority in &priorities {
+            // 同 priority 且通过 token budget 过滤的候选
+            // Candidates in this priority tier passing token budget filter
+            let candidates: Vec<&ModelTargetConfig> = rule
+                .targets
+                .iter()
+                .filter(|t| {
+                    t.priority == *priority && fits_token_budget(t.max_input_tokens, prompt_tokens)
+                })
+                .collect();
 
-        let mut cumulative: u64 = 0;
-        for target in &rule.targets {
-            cumulative += target.weight as u64;
-            if slot < cumulative {
-                return Some(self.build_resolution(model_name, target));
+            if candidates.is_empty() {
+                continue;
             }
+
+            if candidates.len() == 1 {
+                return Some(self.build_resolution(model_name, candidates[0]));
+            }
+
+            // 加权轮询 — weighted round-robin within this priority tier
+            let total_weight: u64 = candidates.iter().map(|t| t.weight as u64).sum();
+            if total_weight == 0 {
+                let tick = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
+                let pick = candidates[tick % candidates.len()];
+                return Some(self.build_resolution(model_name, pick));
+            }
+
+            let tick = self.counter.fetch_add(1, Ordering::Relaxed);
+            let slot = tick % total_weight;
+
+            let mut cumulative: u64 = 0;
+            for target in &candidates {
+                cumulative += target.weight as u64;
+                if slot < cumulative {
+                    return Some(self.build_resolution(model_name, target));
+                }
+            }
+
+            return Some(self.build_resolution(model_name, candidates[0]));
         }
 
-        // 理论上不会到这里 — should never reach here
-        Some(self.build_resolution(model_name, &rule.targets[0]))
+        // 所有 priority 档全被 token-budget 过滤掉 — every tier exhausted by token budget
+        None
     }
 
     /// 从 target config 构建 RouteResolution — build resolution from target config
@@ -171,6 +227,9 @@ impl ModelRouter {
             id: Uuid::new_v4(),
             name: model_name.to_string(),
             model_name: target.model_name.clone(),
+            priority: target.priority,
+            weight: target.weight as i32,
+            max_input_tokens: target.max_input_tokens,
             enabled: true,
             ..Default::default()
         };
@@ -190,5 +249,21 @@ impl ModelRouter {
             model,
             provider_config,
         }
+    }
+}
+
+/// 判断 target 是否能容纳给定 prompt token 数
+/// Whether the target can accommodate the given prompt token count.
+///
+/// 规则 / Rules:
+/// - prompt_tokens=None → 不启用过滤(永远通过)
+/// - max_input_tokens=None / Some(<=0) → 视为无限制(永远通过)
+/// - 否则 prompt_tokens <= max_input_tokens 才通过
+fn fits_token_budget(max_input_tokens: Option<i32>, prompt_tokens: Option<u64>) -> bool {
+    match (prompt_tokens, max_input_tokens) {
+        (None, _) => true,
+        (_, None) => true,
+        (_, Some(cap)) if cap <= 0 => true,
+        (Some(pt), Some(cap)) => pt <= cap as u64,
     }
 }
