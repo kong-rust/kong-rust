@@ -59,6 +59,12 @@ const sidebarItems = computed<SidebarPrimaryItem[]>(() => [
     active: route.meta?.entity === 'plugin',
   },
   {
+    name: 'AI Gateway',
+    to: { name: 'ai-gateway-overview' },
+    key: 'AI Gateway',
+    active: route.meta?.entity === 'ai-gateway',
+  },
+  {
     name: 'Upstreams',
     to: { name: 'upstream-list' },
     key: 'Upstreams',

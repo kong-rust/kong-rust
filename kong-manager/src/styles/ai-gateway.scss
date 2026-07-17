@@ -1,0 +1,173 @@
+.ai-gateway-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $kui-space-30;
+  margin-bottom: $kui-space-90;
+
+  a {
+    border: 1px solid $kui-color-border;
+    border-radius: $kui-border-radius-30;
+    color: $kui-color-text;
+    font-weight: $kui-font-weight-semibold;
+    line-height: 1;
+    padding: $kui-space-40 $kui-space-60;
+    text-decoration: none;
+
+    &.router-link-active {
+      background-color: $kui-color-background-primary-weakest;
+      border-color: $kui-color-border-primary;
+      color: $kui-color-text-primary;
+    }
+  }
+}
+
+.ai-gateway-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: $kui-space-70;
+}
+
+.ai-gateway-card-link {
+  color: inherit;
+  display: block;
+  height: 100%;
+  text-decoration: none;
+}
+
+.ai-gateway-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: $kui-space-40;
+}
+
+.ai-gateway-card-metric {
+  color: $kui-color-text;
+  font-size: $kui-font-size-80;
+  font-weight: $kui-font-weight-bold;
+}
+
+.ai-gateway-card-copy {
+  color: $kui-color-text-neutral;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.ai-gateway-stack {
+  display: grid;
+  gap: $kui-space-90;
+}
+
+.ai-gateway-table-card {
+  overflow: hidden;
+}
+
+.ai-gateway-alert {
+  margin-bottom: $kui-space-70;
+}
+
+.ai-gateway-overview-alert {
+  margin-top: $kui-space-70;
+}
+
+.ai-gateway-form-card {
+  margin-bottom: $kui-space-90;
+}
+
+.ai-gateway-form {
+  display: grid;
+  gap: $kui-space-70;
+}
+
+.ai-gateway-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: $kui-space-70;
+}
+
+.ai-gateway-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: $kui-space-20;
+
+  label {
+    color: $kui-color-text;
+    font-size: $kui-font-size-30;
+    font-weight: $kui-font-weight-semibold;
+  }
+
+  input,
+  select,
+  textarea {
+    background-color: $kui-color-background;
+    border: 1px solid $kui-color-border;
+    border-radius: $kui-border-radius-20;
+    color: $kui-color-text;
+    font: inherit;
+    min-height: 40px;
+    padding: $kui-space-40 $kui-space-50;
+    width: 100%;
+  }
+
+  textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    min-height: 140px;
+    resize: vertical;
+  }
+}
+
+.ai-gateway-checkbox {
+  align-items: center;
+  display: inline-flex;
+  gap: $kui-space-30;
+
+  input {
+    height: 16px;
+    width: 16px;
+  }
+}
+
+.ai-gateway-form-actions,
+.ai-gateway-row-actions,
+.ai-gateway-key-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: $kui-space-40;
+}
+
+.ai-gateway-row-actions {
+  justify-content: flex-end;
+}
+
+.ai-gateway-muted {
+  color: $kui-color-text-neutral;
+}
+
+.ai-gateway-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.ai-gateway-badge-list {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: $kui-space-20;
+}
+
+.ai-gateway-secret {
+  border: 1px solid $kui-color-border-primary;
+  border-radius: $kui-border-radius-30;
+  display: grid;
+  gap: $kui-space-40;
+  margin-bottom: $kui-space-70;
+  padding: $kui-space-70;
+}
+
+.ai-gateway-secret input {
+  border: 1px solid $kui-color-border;
+  border-radius: $kui-border-radius-20;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  min-width: 0;
+  padding: $kui-space-40 $kui-space-50;
+  width: 100%;
+}

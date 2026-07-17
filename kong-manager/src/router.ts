@@ -16,13 +16,41 @@ const routes: RouteRecordRaw[] = [
     },
   },
 
-  // not found page
+  // AI Gateway pages
   {
-    name: 'not-found',
-    path: '/:pathMatch(.*)*',
-    component: () => import('@/pages/NotFound.vue'),
+    name: 'ai-gateway-overview',
+    path: '/ai-gateway',
+    component: () => import('@/pages/ai-gateway/Overview.vue'),
     meta: {
-      title: 'Not Found',
+      entity: 'ai-gateway',
+      title: 'AI Gateway',
+    },
+  },
+  {
+    name: 'ai-provider-list',
+    path: '/ai-gateway/providers',
+    component: () => import('@/pages/ai-gateway/Providers.vue'),
+    meta: {
+      entity: 'ai-gateway',
+      title: 'AI Providers',
+    },
+  },
+  {
+    name: 'ai-model-list',
+    path: '/ai-gateway/models',
+    component: () => import('@/pages/ai-gateway/Models.vue'),
+    meta: {
+      entity: 'ai-gateway',
+      title: 'AI Models',
+    },
+  },
+  {
+    name: 'ai-virtual-key-list',
+    path: '/ai-gateway/virtual-keys',
+    component: () => import('@/pages/ai-gateway/VirtualKeys.vue'),
+    meta: {
+      entity: 'ai-gateway',
+      title: 'AI Virtual Keys',
     },
   },
 
@@ -466,6 +494,15 @@ entities.forEach((entityName: EntityName) => {
       },
     },
   )
+})
+
+routes.push({
+  name: 'not-found',
+  path: '/:pathMatch(.*)*',
+  component: () => import('@/pages/NotFound.vue'),
+  meta: {
+    title: 'Not Found',
+  },
 })
 
 export const router = createRouter({
