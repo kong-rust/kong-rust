@@ -219,6 +219,7 @@ KONG_TEST_DATABASE=off make test
 | `make dev-dbless` | DB-less mode start |
 
 See the [Makefile](Makefile) for all available commands.
+AI-assisted contributions should also follow the repository [Codex agent guide](AGENTS.md).
 
 ## Compatibility
 
@@ -271,6 +272,8 @@ See [docs/designs/kong-rust-roadmap.md](docs/designs/kong-rust-roadmap.md) for t
 
 | Document | Description |
 |----------|-------------|
+| [Codex Agent Guide](AGENTS.md) | Repository instructions, validation commands, and completion criteria for Codex |
+| [Claude-to-Codex Migration](docs/codex-agent-migration.md) | Mapping of the former Claude Code workflow to Codex-native configuration |
 | [AI Gateway Guide](docs/ai-gateway-guide.md) | Usage guide: quick start, plugin config, Admin API, multi-provider LB, intelligent routing |
 | [AI Gateway Strategy](docs/designs/ai-gateway-strategy.md) | AI gateway positioning & dual-track execution plan |
 | [Roadmap](docs/designs/kong-rust-roadmap.md) | Hybrid mode detailed design & legacy roadmap |

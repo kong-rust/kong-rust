@@ -8,7 +8,7 @@
 
 - Files Changed:
   - `crates/kong-admin/src/lib.rs`
-  - `.spec-workflow/specs/kong-rust/tasks.md`
+  - `docs/tasks.md`
 
 - Artifacts:
   - **GUI Router:** `build_gui_router()`

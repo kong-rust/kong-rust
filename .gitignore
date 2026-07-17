@@ -12,7 +12,6 @@
 # ========================
 # IDE / 编辑器
 # ========================
-.claude/
 .idea/
 .vscode/
 *.swp
@@ -58,13 +57,6 @@ kong-manager/dist/
 kong-manager/bundle-analyzer/
 
 # ========================
-# Claude Code（工具配置保留，对话记录忽略）
-# ========================
-.claude/projects/
-.claude/todos/
-
-# ========================
 # AI 工具
 # ========================
-.gstack/
-.omc/
+.omx/

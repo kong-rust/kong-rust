@@ -211,6 +211,31 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 
 22. 系统应支持以下集群相关配置项：`role`、`cluster_listen`（默认 `0.0.0.0:8005`）、`cluster_control_plane`（DP 指向的 CP 地址）、`cluster_cert`、`cluster_cert_key`、`cluster_data_plane_purge_delay`、`cluster_max_payload`
 
+### R10：AI Gateway
+
+**用户故事：** 作为 AI 应用开发者，我希望通过 Kong-Rust 统一代理不同 LLM Provider，并复用网关的路由、限流、安全检查和管理能力。
+
+#### 验收标准
+
+1. 当启用 `ai-proxy` 时，系统应支持 `openai`、`anthropic`、`gemini` 和 `openai_compat` Provider，并完成非流式响应、SSE 流式响应及 tool call 的协议转换
+2. 当客户端使用 OpenAI Chat Completions 或 Anthropic Messages 格式时，系统应将请求转换为目标 Provider 格式，并将响应转换回客户端所选协议
+3. 当 `route_type=llm/v1/responses` 时，OpenAI Provider 应透传 Responses API；其他已支持 Provider 应通过内部 Chat 格式完成降级转换，并返回兼容的非流式或流式 Responses 结果
+4. 当多个同名 AI Model 组成模型组时，系统应按优先级选择、在同优先级内按权重轮转，并在模型被禁用或超过 `max_input_tokens` 时回退到下一优先级
+5. 当配置 `model_routes` 时，系统应按声明顺序匹配模型名正则，并在命中的目标间按权重选择 Provider 和实际模型
+6. 当调用 `/ai-providers`、`/ai-models`、`/ai-model-groups` 和 `/ai-virtual-keys` 端点时，系统应提供当前定义的管理操作；Provider 凭据不得在读取响应中明文返回，Virtual Key 原文仅在创建或轮换成功时返回一次
+7. 当启用 AI Tokenizer Registry 时，系统应按 Provider/模型选择远端计数、Hugging Face tokenizer、tiktoken 或字符估算策略，并在远端失败、超时或本地 tokenizer 尚不可用时安全降级
+8. 当启用 `ai-rate-limit` 时，系统应支持进程内固定窗口的 RPM/TPM 限流，并可按 global 或 route 维度计数；TPM 应先预扣估算值，再在日志阶段按 Provider 返回的实际用量修正
+9. 当启用 `ai-prompt-guard` 时，系统应仅检查 user 消息，支持最大消息长度、正则拒绝/允许列表，以及 block 或 log-only 行为
+10. 当使用 Kong Manager 的 `/ai-gateway` 页面时，用户应能管理 Provider、Model 和 Virtual Key，并能为 model group 创建可实际转发请求的 Chat Completions Route；页面不得读取或复制已遮蔽的 Provider 凭据
+
+#### 当前范围边界
+
+- `ai-cache` 当前只生成缓存键和处理跳过标头，不提供响应存储、命中读取或语义相似度检索
+- Virtual Key 当前提供安全生成、存储、查询和轮换管理；请求认证、模型授权、RPM/TPM 绑定和预算扣减尚未接入代理链路
+- AI 限流器当前为单进程内存实现，不提供 Redis 后端或多节点共享配额
+- `limit_by=consumer` 的配置分支已存在，但实时代理链尚未把 Consumer 身份注入 AI 插件；当前不能提供真正的 per-consumer 隔离
+- Prompt Guard 当前为正则和长度规则，不包含基于模型或 embedding 的语义检测
+
 ## 非功能性需求
 
 ### 代码架构和模块化

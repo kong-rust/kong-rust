@@ -22,6 +22,24 @@ Repo: kong-rust
 3. **Phase 2 拆分**：原始 6 个能力（2a Token 限流、2b 多模型 LB+Fallback、2c Virtual API Key、2d Token 成本追踪、2e 语义缓存、2f Prompt Guard）从一次性交付 → 重组为 5 个增量交付单元
 4. **Phase 5 新增**：重写 Kong Manager 为企业版 AI 网关控制台，替换现有 OSS 版本
 
+## 当前实现基线
+
+本文档保留长期产品路线；以下内容是当前代码支持范围，优先于后文早期阶段估算：
+
+- **Provider 与协议**：`kong-ai` 已内置 OpenAI、Anthropic、Gemini、OpenAI-compatible driver，支持非流式、SSE 流式和 tool call 转换。客户端入口支持 OpenAI Chat 与 Anthropic Messages；`llm/v1/responses` 对 OpenAI 走原生透传，对其他已支持 Provider 走 Chat 中间格式转换。
+- **模型路由**：支持插件内正则路由与加权选择，也支持由 `ai_models` 同名记录组成的模型组，执行优先级 fallback、同级加权轮转和 `max_input_tokens` 过滤。
+- **管理面**：Provider、Model、Model Group 和 Virtual Key 已有 Admin API；Provider 敏感字段在响应中遮蔽，Virtual Key 原文只在创建/轮换时返回。Provider、Model、Virtual Key 可使用 PostgreSQL 或 DB-less DAO。
+- **策略插件**：`ai-rate-limit` 已提供单进程内存 RPM/TPM；`ai-prompt-guard` 已提供 user 消息长度与正则 allow/deny 检查；Tokenizer Registry 已提供远端计数、Hugging Face、tiktoken 和估算降级链。
+
+### 未交付与限制
+
+- `ai-cache` 目前只有缓存键/跳过标头基础设施，没有响应存储、缓存命中或语义向量检索；后文 Phase 2c 仍是规划。
+- Virtual Key 尚未接入代理认证、allowed-model 校验、配额和预算扣减；当前是管理面能力，不应视为企业级 key enforcement 已完成。
+- 限流状态为进程内存状态，多节点不会共享且重启会清空；Redis/分布式配额仍属后续范围。模型 balancer 已有健康冷却结构，但代理链尚未回报请求成功/失败，运行时健康 fallback 尚未接通。
+- Prompt Guard 仅支持正则和长度规则，语义检测未实现；MCP Gateway、Agent Gateway 和 Phase 5 控制台也仍为路线图。
+- Token 计数在远端不可用、本地 tokenizer 未加载或模型未知时会降级为估算，因此不能保证所有 Provider/模型均达到计费级精度。
+- Provider 凭据读取时会遮蔽，但持久化层尚未集成 Vault；生产部署仍需限制 Admin API 和数据库访问。
+
 ## Scope Decisions
 
 | # | Proposal | Effort | Decision | Reasoning |
@@ -45,8 +63,8 @@ Repo: kong-rust
 
 ## 执行假设
 
-- **人力模型**：CC+gstack 驱动开发，单人+AI 可支撑双轨并行。轨道 A 和轨道 B 交替推进，非同时编码。
-- **Effort 标注说明**：S=几小时, M=1-3天, L=1-2周, XL=2-4周（均为 CC+gstack 时间）。表格中 `M→S` 表示 human 时间→CC 时间。
+- **人力模型**：Codex 智能体辅助开发，单人+AI 可支撑双轨并行。轨道 A 和轨道 B 交替推进，非同时编码。
+- **Effort 标注说明**：S=几小时, M=1-3天, L=1-2周, XL=2-4周（均为 Codex 辅助开发时间）。表格中 `M→S` 表示人工开发时间→Codex 辅助开发时间。
 
 ## 更新后的路线图
 
@@ -237,10 +255,10 @@ kong-server (binary entry point)
 | Pingora SSE 长连接支持 | Agent/LLM Gateway 核心依赖 | 已验证：Pingora 支持 SSE 流式响应（kong-proxy 已有 SSE 透传能力） |
 | 语义缓存向量检索性能 | Phase 2c 延迟敏感 | 优先使用 usearch（Rust binding，内嵌式），避免外部向量数据库依赖 |
 | A2A 协议尚在演进 | Phase 4 接口不稳定 | Phase 4 最晚交付，协议稳定后再实现；先实现自定义 Agent 路由协议 |
-| Token 计数准确性 | LLM 计费依赖精确 token 数 | Phase 2a-MVP 用 `tiktoken-rs` 支持 GPT 系列，其他 provider 用 char/4 近似；Phase 2a-Full 按 provider 接入准确 tokenizer |
+| Token 计数准确性 | LLM 计费依赖精确 token 数 | 已实现 Provider 远端计数、Hugging Face、tiktoken 与估算降级链；对远端不可用、tokenizer 未加载或未知模型明确保留估算误差 |
 | 语义缓存 embedding 来源 | 需要额外网络调用和成本 | 优先调用外部 Embedding API（如 OpenAI text-embedding-3-small），后期支持本地 ONNX 模型减少依赖 |
 | usearch Rust binding 成熟度 | 向量索引 API 稳定性 | 备选方案：hora（纯 Rust HNSW）或退化为精确线性扫描（小规模场景足够） |
-| 前端全新技术栈 | Phase 5 开发效率 | React + Next.js 生态成熟，CC+gstack 前端代码生成效率高；shadcn/ui 组件可快速搭建 |
+| 前端全新技术栈 | Phase 5 开发效率 | React + Next.js 生态成熟，Codex 可辅助前端实现与验证；shadcn/ui 组件可快速搭建 |
 | Kong Manager OSS 兼容性 | 用户迁移成本 | Phase 5a 完整覆盖 OSS 全部功能后再替换，渐进式迁移 |
 
 ### 竞品对比（更新版）

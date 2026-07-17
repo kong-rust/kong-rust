@@ -6,7 +6,11 @@
 
 ## 测试结果汇总
 
-### Admin API Spec (Task 4) — 375/375 (100%)
+> 范围说明：`375/375 (100%)` 只表示 Task 4 的 Admin API 子集最终汇总运行，不表示 Phase 0 的 Proxy、Status API、DB-less 和插件套件全部通过。后述套件仍有失败、阻塞或不适用项。
+
+### Admin API Spec（Task 4 最终汇总）— 375/375 (100%)
+
+下表保留修复过程中的分文件快照，用于说明覆盖面；它不是最终 375 用例汇总的可加总明细。
 
 | Spec 文件 | 通过 | 总数 | 通过率 |
 |-----------|------|------|--------|
@@ -47,7 +51,7 @@
 | 14-request-termination/02-access | 12 | 14 | **86%** |
 | 03-http-log/04-legacy_queue | 1 | 1 | **100%** ✅ |
 
-### 总计
+### Phase 0 广义覆盖汇总（含非 Admin API 套件）
 
 - **已通过测试:** ~456 个
 - **覆盖 spec 文件:** 17 个 100% 通过，4 个 >80% 通过
@@ -63,7 +67,7 @@
 - 断言系统对齐（assert.response/request/status/header/jsonbody 等）
 - ngx 全局变量 shim（sleep, base64, worker, timer 等）
 
-### Task 4: Admin API Spec — 375/375 (100%)
+### Task 4: Admin API 子集最终汇总 — 375/375 (100%)
 - FlexibleBody 提取器（JSON + form-urlencoded + multipart）
 - 完整 CRUD 验证（PATCH 深度合并、PUT 替换语义、唯一约束 409）
 - Schema 验证（必填字段、类型检查、entity_checks）

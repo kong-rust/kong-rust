@@ -18,13 +18,13 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| 15 | AI Gateway — v1/responses | 1 | 1 | 0 |
+| 15 | AI Gateway — 协议与管理面 | 2 | 2 | 0 |
 | 16 | Admin API 补全 | 5 | 5 | 0 |
 | 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **85** | **80** | **5** |
+| **合计** | | **86** | **81** | **5** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -203,7 +203,8 @@
   - 文件：`crates/kong-proxy/tests/`, `scripts/run-cargo-test.sh`
 
 - [x] **8.12a** 构建 busted + spec.helpers 兼容层 `[R5]`
-  - Phase 0 全部完成：375/375 (100%) — 8 个 spec 全部 0 failures, 0 errors
+  - Admin API 子集（Task 4）最终汇总运行：375/375 (100%) — 8 个 spec 全部 0 failures, 0 errors
+  - Phase 0 更广范围仍有 Proxy、Status API、DB-less 和插件 spec 的残余失败/阻塞项；状态与适用性边界见实现日志
   - busted CLI + spec.helpers (1800+行) + mock upstream + 断言系统
   - Kong Lua shim 模块、FlexibleBody 提取器（多 Content-Type 支持）、ngx 全局 shim
   - 已复制：31 个 Kong 官方 spec 文件（admin_api 11、proxy 8、db 3、status 5、dbless 4）
@@ -368,7 +369,7 @@
   - 修复 4 个路由器单元测试缺失 scheme 字段的已有 bug
   - 文件：`crates/kong-router/src/traditional.rs`, `crates/kong-proxy/src/balancer.rs`, `crates/kong-proxy/src/lib.rs`
 
-## 阶段 15：AI Gateway — v1/responses 协议支持
+## 阶段 15：AI Gateway — 协议与管理面
 
 - [x] **15.1** ai-proxy 支持 v1/responses API `[R1, R5]`
   - 分层架构：OpenAI pass-through 快速通道 + 跨 provider 降级/升级转换路径
@@ -378,6 +379,14 @@
   - Admin API schema 支持 route_type=llm/v1/responses
   - X-Kong-AI-Route-Type 响应头（调试辅助）
   - 文件：`crates/kong-ai/src/codec/responses_format.rs`（新建）、`crates/kong-ai/src/plugins/ai_proxy.rs`、`crates/kong-ai/src/plugins/context.rs`、`crates/kong-ai/src/provider/anthropic.rs`、`crates/kong-ai/src/provider/gemini.rs`
+
+- [x] **15.2** 数据库 Model Group 运行时与 Kong Manager 管理页面 `[R10]`
+  - `ai-proxy` 通过共享 PostgreSQL / DB-less DAO 解析 model group、Provider、端点和服务端凭据，支持 Chat 与 OpenAI Responses 的真实模型名改写
+  - `ai_models.max_input_tokens` 添加 forward migration、DAO schema 与 DB-less 实体/FK 索引
+  - Kong Manager 新增 Overview、Providers、Models、Virtual Keys 页面，以及创建可运行 Chat Completions Route 的向导
+  - 修复 Pingora ResponseHeader 直接修改导致 preserved-case map 失配、代理响应序列化 panic 的问题
+  - Playwright 覆盖页面 CRUD、Provider 依赖保护、密钥一次性展示/轮换，以及真实请求经 kong-rust 转发到本地 OpenAI-compatible mock
+  - 文件：`crates/kong-ai/src/provider/resolver.rs`、`crates/kong-proxy/src/lib.rs`、`crates/kong-server/src/main.rs`、`kong-manager/src/pages/ai-gateway/`
 
 ## 阶段 16：Admin API 补全
 
@@ -521,4 +530,4 @@
 
 ### 已知问题（QA 发现，全部已修复 ✅）
 
-以下 16 个问题由 QA 测试（2026-03-20）发现，已全部修复。完整原始报告未入库（原路径 `.gstack/qa-reports/qa-report-kong-rust-2026-03-20.md` 不存在于工作树），关键发现摘要见阶段 14.3 / 14.4 的任务描述。
+以下 16 个问题由 QA 测试（2026-03-20）发现，已全部修复。完整原始报告未入库，关键发现摘要见阶段 14.3 / 14.4 的任务描述。

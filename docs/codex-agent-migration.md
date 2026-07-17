@@ -1,0 +1,72 @@
+# Claude Code to Codex Migration
+
+This repository now uses Codex-native agent guidance. The authoritative project
+instructions are in [`AGENTS.md`](../AGENTS.md).
+
+## What Changed
+
+| Previous Claude surface | Codex replacement | Migration decision |
+| --- | --- | --- |
+| Root `CLAUDE.md` | Root `AGENTS.md` | Project facts, commands, constraints, verification, and documentation rules migrated. |
+| `.claude/settings.local.json` | Codex permission/sandbox policy | Removed rather than copied. The Claude tool allowlist has no safe one-to-one project setting. |
+| `/browse` and Claude-in-Chrome rules | `browser:control-in-app-browser` | Use Codex's browser skill for local UI inspection and testing. |
+| gstack planning commands | Codex Plan mode | Use Plan mode for ambiguous or high-risk work. |
+| gstack review/QA commands | Codex review plus repository tests | Follow the verification matrix in `AGENTS.md`. |
+| gstack reusable workflows | `.agents/skills/<name>/SKILL.md` | Rewrite only workflows the project repeatedly needs. Do not copy generated gstack files. |
+| `docs/superpowers` specs and plans | `docs/design.md`, `docs/requirements.md`, `docs/tasks.md`, and implementation logs | Unique architecture and status were migrated; superseded plans were removed. |
+| `.claude/worktrees/*` | Normal Git/Codex worktrees | Removed as generated legacy state, not retained as project source. |
+
+## Why gstack Was Not Copied
+
+The former `.claude/skills/gstack/` tree was a vendored tool distribution rather
+than project guidance. It includes Claude hooks, `claude -p` execution,
+Anthropic SDK/evaluation support, telemetry, compiled browser binaries,
+generated Codex variants, dependency trees, and its own contributor
+documentation.
+
+Copying that directory into `.agents/skills` would preserve hidden Claude
+runtime dependencies and add thousands of generated files. Codex already
+provides planning, review, browser control, subagents, and reusable skills.
+Project-specific workflows should be recreated as small skills only when a
+repeated need is demonstrated.
+
+## Configuration Boundaries
+
+- Repository behavior and commands: `AGENTS.md`.
+- Optional team-shared Codex settings: `.codex/config.toml`.
+- Personal model, reasoning, approvals, sandbox, and MCP settings:
+  `~/.codex/config.toml`.
+- Reusable repository skills: `.agents/skills/<skill-name>/SKILL.md`.
+- Runtime logs, sessions, worktrees, and local credentials: never commit.
+
+No project `.codex/config.toml` is required for this migration. The legacy
+Claude allowlist only granted Claude-specific tools and should not be translated
+into broader repository permissions.
+
+## Working With Codex
+
+1. Open Codex at the repository root so it discovers `AGENTS.md`.
+2. Trust the repository only after reviewing its project configuration.
+3. Ask Codex to use the Makefile commands from `AGENTS.md`.
+4. Use Plan mode before complex or ambiguous changes.
+5. Use the in-app browser for Kong Manager flows and real local UI validation.
+6. Put new repeatable agent workflows in `.agents/skills`, following the Agent
+   Skills format.
+
+## Retired Legacy Tooling
+
+The repository-local `.spec-workflow/`, `.claude/`, `.gstack/`, and `.omc/`
+trees, together with the superseded `docs/superpowers/` plan tree, were removed
+after their relevant guidance was migrated. They are no longer treated as
+active tooling, compatibility surfaces, or ignored local state.
+
+Current `.omx/` runtime state remains ignored and excluded from the Docker build
+context. `.codex/` and `.agents/` are deliberately not ignored because they may
+contain reviewable team configuration and repository skills.
+
+## Intentionally Retained Claude References
+
+Kong-Rust supports Anthropic and Claude models as AI Gateway products. Provider
+drivers, codecs, tests, routes, and user documentation that mention Claude model
+names or the Anthropic protocol are not Claude Code configuration and remain
+valid.

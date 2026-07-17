@@ -219,6 +219,7 @@ KONG_TEST_DATABASE=off make test
 | `make dev-dbless` | DB-less 模式启动 |
 
 更多命令请参考 [Makefile](Makefile)。
+使用 AI 辅助开发时，还应遵循仓库的 [Codex 智能体指南](AGENTS.md)。
 
 ## 兼容性
 
@@ -271,6 +272,8 @@ Kong-Rust 的目标是与 Kong Gateway 100% 行为兼容：
 
 | 文档 | 说明 |
 |------|------|
+| [Codex 智能体指南](AGENTS.md) | Codex 在本仓库中的项目规则、验证命令和完成标准 |
+| [Claude Code → Codex 迁移说明](docs/codex-agent-migration.md) | 原 Claude Code 工作流到 Codex 原生配置的映射 |
 | [AI 网关使用指南](docs/ai-gateway-guide_cn.md) | 快速开始、插件配置、Admin API、多 Provider 负载均衡、智能路由 |
 | [AI 网关战略](docs/designs/ai-gateway-strategy.md) | AI 网关定位与双轨并行执行计划 |
 | [产品路线图](docs/designs/kong-rust-roadmap.md) | Hybrid 模式详细设计与历史路线图 |

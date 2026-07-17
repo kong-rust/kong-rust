@@ -1028,51 +1028,143 @@ match config.role {
 
 ### 组件 10：kong-ai — AI Gateway
 
-**职责：** 作为 AI 原生网关引擎的根基，负责 LLM provider 适配、跨协议翻译、成本追踪、Virtual Key 管理等 AI 专属能力。通过 plugin-system 注册 ai-proxy / ai-prompt-* / ai-response-transformer 等插件，让 Kong-Rust 能直接代理 OpenAI / Anthropic / Gemini / OpenAI-compat 等上游。
+**职责：** 提供 Rust 原生的 LLM 请求代理、provider 适配、协议转换、流式事件处理、模型组路由和 token 统计基础设施。`kong-server` 将 AI 插件与 Lua 插件并列注册到 `kong-plugin-system`；AI 热路径不经过 Lua 桥接。
 
-**定位：** 独立 crate，位于 kong-plugin-system 之上，与 kong-lua-bridge 平级。AI 能力**不经过 Lua 桥接**，全部用 Rust 原生实现以保留流式性能和 token 级控制。
+#### 10.1 数据实体与关系
 
-**Workspace 结构（当前阶段已交付）：**
+AI 实体使用通用 `Dao<T>` / `PgDao<T>` 和 DB-less DAO。PostgreSQL 表由 migration `002_ai_gateway` 创建，`004_ai_model_max_input_tokens` 为模型补充输入 token 上限。
+
+| 实体 | 当前字段 | 关系与用途 |
+|------|----------|------------|
+| `ai_providers` | `id`, `name`, `provider_type`, `endpoint_url`, `auth_config`, `default_model`, `config`, `enabled`, `tags`, `ws_id`, timestamps | 保存上游类型、端点和认证信息；`provider_type` 选择 driver |
+| `ai_models` | `id`, `name`, `provider_id`, `model_name`, `priority`, `weight`, `input_cost`, `output_cost`, `max_tokens`, `max_input_tokens`, `config`, `enabled`, `tags`, `ws_id`, timestamps | `provider_id` 外键指向 provider；相同 `name` 构成一个 model group，`model_name` 是发给上游的真实模型名 |
+| `ai_virtual_keys` | `id`, `name`, `key_hash`, `key_prefix`, `consumer_id`, `allowed_models`, `tpm_limit`, `rpm_limit`, `budget_limit`, `budget_used`, `enabled`, `expires_at`, `tags`, `ws_id`, timestamps | 可选关联 Consumer；保存密钥哈希、模型范围、限额和预算元数据 |
 
 ```
-crates/kong-ai/
-├── src/
-│   ├── lib.rs                      # 插件注册入口
-│   ├── codec/                      # 协议编解码
-│   │   ├── chat_completions.rs     # OpenAI Chat Completions
-│   │   └── responses_format.rs     # OpenAI Responses API（v1/responses，阶段 15.1）
-│   ├── provider/                   # Provider 适配
-│   │   ├── openai.rs               # pass-through 快速通道
-│   │   ├── anthropic.rs            # Messages API + streaming tool_calls
-│   │   ├── gemini.rs               # generateContent + streaming function_call
-│   │   └── openai_compat.rs        # DeepSeek / Mistral / Together 等兼容层
-│   ├── plugins/
-│   │   ├── ai_proxy.rs             # 主代理插件（route_type: llm/chat, llm/responses）
-│   │   └── context.rs              # AI 请求上下文（token 统计、provider 元数据）
-│   └── schemas/                    # Kong 风格插件 schema
+Plugin config.model / request.model
+             │
+             ▼
+      model group name
+             │
+             ├── ai_models (same name, priority + weight + max_input_tokens)
+             │          │
+             │          └── provider_id
+             │                    │
+             ▼                    ▼
+        selected model ───► ai_providers (driver + endpoint + auth)
+
+ai_virtual_keys ── optional consumer_id ──► consumers
 ```
 
-**核心概念：**
+Provider 删除会级联删除其模型；Consumer 删除只会清空 virtual key 的 `consumer_id`。认证数据当前以 JSONB 保存，Admin API 返回 provider 时会遮蔽 `header_value`、`param_value`、`aws_secret_access_key` 和 `gcp_service_account_json`。
 
-- **双引擎架构（参见 `docs/designs/ai-gateway-strategy.md`）**：Kong-Rust AI 网关下辖 LLM Gateway / Agent Gateway / MCP Gateway / API Gateway 四子网关，kong-ai crate 当前承载 LLM Gateway 能力。
-- **分层路径**：
-  - **Pass-through 快速通道**：OpenAI 原生协议 + OpenAI 上游 → 零翻译代理
-  - **跨 provider 翻译路径**：请求降级（Responses → Chat Completions）、响应升级、流式事件状态机
-- **多形态支持**：Chat Completions、v1/responses、Anthropic Messages、Gemini generateContent、OpenAI-compat
-- **可观测性**：`X-Kong-AI-Route-Type` 响应头（调试）、provider/model/token 字段注入 Prometheus serialize
+#### 10.2 Model Resolver 与 Driver 边界
 
-**接口约定：**
+`ai-proxy` 按以下顺序解析上游，命中后不再继续：
 
-- 遵循 `PluginHandler` trait（来自 kong-core），与 Lua 插件平行注册
-- 依赖 `kong-plugin-system` 的四级配置合并（Global / Service / Route / Consumer）
-- Admin API schema 在 `kong-admin/src/handlers/ai_*.rs` 暴露（ai_providers / ai_models / ai_virtual_keys）
+1. `model_routes`：第一条匹配请求模型名的正则规则生效，在规则的 targets 内按权重轮转。
+2. 插件内联 provider：支持 kong-rust 的 `config.provider`，也支持 Kong 风格的 `config.model.provider` + `config.auth`。
+3. 数据库 model group：`ModelGroupResolver` 按 group name 加载启用的 model/provider，缓存 2 秒；先选较高 `priority`，同一档按 `weight` 轮转，并用 provider 无关的预路由 prompt 估值与 `max_input_tokens` 过滤无法容纳请求的候选。
 
-**演进规划（见 ai-gateway-strategy.md Phase 2-5）：**
+数据库 resolver 当前只读取 `ws_id IS NULL` 的全局 AI 实体。`AiDriver` 是 provider 与代理生命周期的稳定边界：
 
-- Token 限流器（跨 LLM/MCP/Agent 复用的通用基础设施）
-- Virtual API Key + 成本追踪
-- 语义缓存 + Prompt Guard
-- 未来新增 crate：`kong-mcp`（MCP Gateway）、`kong-agent`（Agent Gateway）
+```rust
+trait AiDriver {
+    fn transform_request(...) -> Result<ProviderRequest>;
+    fn transform_response(...) -> Result<ChatResponse>;
+    fn transform_stream_event(...) -> Result<Option<SseEvent>>;
+    fn configure_upstream(...) -> Result<UpstreamConfig>;
+    fn extract_usage(...) -> Option<TokenUsage>;
+    fn extract_stream_usage(...) -> Option<TokenUsage>;
+}
+```
+
+内置 `DriverRegistry` 注册 `openai`、`anthropic`、`gemini` 和 `openai_compat`。driver 负责 provider 原生 JSON、SSE 事件、端点、路径和认证头；`ai-proxy` 只依赖统一的 `ChatRequest` / `ChatResponse` / `SseEvent` 和 `UpstreamConfig`。OpenAI-compatible driver 复用 OpenAI codec，但要求显式 `endpoint_url`。
+
+#### 10.3 规范化协议与流式处理
+
+OpenAI Chat Completions 是跨 provider 的内部规范格式：
+
+- OpenAI 客户端请求直接解析为 `ChatRequest`；Anthropic Messages 先由 `AnthropicCodec` 转为 `ChatRequest`。
+- OpenAI、Anthropic、Gemini 和 OpenAI-compatible driver 将规范请求转成各自上游格式，并将响应还原成规范 `ChatResponse`。
+- `route_type=llm/v1/responses` 且上游为 OpenAI 时，请求和响应走 `/v1/responses` pass-through；其他 provider 先降级到 Chat Completions，再把响应升级为 Responses API 形态。
+- Responses 翻译路径拒绝 `background=true`，只保留 function tools；被剥离的内置 tool 类型通过非流式响应的 `metadata.warnings.unsupported_tools` 返回。
+
+流式路径如下：
+
+```
+upstream chunk
+    │
+    ▼
+SseParser.feed() ──跨 chunk 重组──► provider-native SseEvent
+    │
+    ├── driver.extract_stream_usage() ──► TokenUsage
+    │
+    ▼
+driver.transform_stream_event()
+    │
+    ├── OpenAI client ────────────────► OpenAI SSE
+    ├── Anthropic client ─────────────► Anthropic event sequence
+    └── Responses translation ────────► Responses event state machine
+```
+
+`SseParser` 可解析标准 SSE 和 NDJSON，并在流结束时 flush 残留帧；当前 `ai-proxy` 的响应路径统一实例化标准 SSE parser。`header_filter` 移除可能失效的 `Content-Length` / `Content-Encoding`，流式响应统一声明 `text/event-stream`。AI 上游连接强制 HTTP/1.1，以避免 provider 侧 HTTP/2 多路复用、GOAWAY 和长流停滞问题。非流式响应在 `body_filter` 中完整缓冲后转换。
+
+Token usage 优先采用 provider 响应值。选定 provider/model 后，`TokenizerRegistry` 可使用远端 count API、HuggingFace tokenizer 或 tiktoken，并受单请求 deadline 约束；不可用或超时时降级为字符估算，该结果用于 TPM 预扣和请求上下文。数据库 model group 必须在 provider 选定前完成候选过滤，因此 `max_input_tokens` 当前使用规范化 `ChatRequest` 的 provider 无关字符估值。
+
+#### 10.4 插件顺序与当前生命周期
+
+同名插件配置先按关联范围解析，再按 handler priority 降序执行。当前 AI 插件顺序为：
+
+| Priority | 插件 | 当前阶段与行为 |
+|----------|------|----------------|
+| 773 | `ai-prompt-guard` | `access`：检查 user 消息长度、deny/allow 正则；可阻断或仅记录 |
+| 772 | `ai-cache` | `access`：处理 skip header，按最后一条或全部 user 消息计算 SHA-256 cache key；`log` 当前不写缓存 |
+| 771 | `ai-rate-limit` | `access`：内存 60 秒窗口的 RPM/TPM 原子预扣；`log`：用实际 usage 修正 TPM |
+| 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
+
+插件间通过 `RequestCtx.extensions` 传递类型化的 `AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
+
+`kong-plugin-system` 的解析器支持 Global / Service / Route / Consumer 关联，同名配置由更具体关联覆盖；但是当前代理链在 Consumer 身份可用前以 `consumer_id=None` 构建，因此运行时实际生效的是 Global / Service / Route 配置，Consumer 级 AI 插件配置尚未接入动态重解析。
+
+#### 10.5 Admin API
+
+| 资源 | 当前端点 |
+|------|----------|
+| Provider | `GET/POST /ai-providers`; `GET/PATCH/PUT/DELETE /ai-providers/{id_or_name}`; `GET /ai-providers/{id}/ai-models` |
+| Model | `GET/POST /ai-models`; `GET/PATCH/PUT/DELETE /ai-models/{id}`; `GET /ai-model-groups` |
+| Virtual Key | `GET/POST /ai-virtual-keys`; `GET/PATCH/DELETE /ai-virtual-keys/{id_or_name}`; `POST /ai-virtual-keys/{id}/rotate` |
+
+创建或轮换 virtual key 时生成 `sk-kr-...` 明文，只在该次响应返回；持久化内容是 SHA-256 `key_hash` 和可识别的 `key_prefix`。列表、查询和更新响应不返回 `key_hash`。AI 实体在 PostgreSQL 和 DB-less 启动路径中都注入 Admin state；`ai-proxy` 共享相同的 model/provider DAO。
+
+#### 10.6 Kong Manager 管理页面
+
+Kong Manager 在 `/ai-gateway` 下提供 Overview、Providers、Models 和 Virtual Keys 页面：
+
+- Provider 页面管理类型、端点、认证 JSON、默认模型、启用状态和标签；编辑时不会把 Admin API 返回的遮蔽凭据写回，除非用户明确提供新的认证 JSON。
+- Model 页面管理 model group、provider 绑定、真实上游模型名、优先级、权重、成本和 token 上限。
+- “Create Route” 会按顺序创建 Service、Route 和 route-scoped `ai-proxy` 插件；插件只保存 model group name，运行时再通过共享 DAO 读取 provider 和凭据。中途失败会逆序清理本次已创建的资源。
+- Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并明确标注它当前只是管理元数据，尚未接入代理认证和配额执行。
+
+页面创建的代理路由只覆盖 `llm/v1/chat`。Responses、Anthropic 客户端协议、全局/Service 级插件及高级策略仍通过 Admin API 配置。删除 Model 不会自动删除由页面创建的 Service、Route 或 Plugin；这些是独立的 Kong 资源。
+
+#### 10.7 可观测性
+
+- `ai-proxy.log` 合并 `ai.proxy.{provider,model,route_type,stream}`、`ai.usage.{prompt_tokens,completion_tokens,total_tokens}` 和 `ai.latency.e2e_ms` 到 `ctx.log_serialize`，供现有日志插件消费。
+- Responses 路径返回 `X-Kong-AI-Route-Type: responses-pass-through|responses-translation`；成功转换的非流式 Chat 响应返回 `X-Kong-LLM-Model`。
+- 流式状态记录 TTFT 供请求内使用，但当前序列化日志尚未输出 TTFT/TPOT。
+- 当前没有 AI analytics Admin API、AI 专用持久化统计表或 `kong_ai_*` Prometheus 指标；不能把通用 `log_serialize` 集成视为这些能力已经交付。
+
+#### 10.8 当前限制与延期项
+
+- `ai-cache` 只有 cache key/skip-header 基础设施；Redis 读写、命中短路、回写和语义缓存未实现。
+- `ai-rate-limit` 只有进程内窗口；`limit_by=virtual_key` 当前退化为 global，尚未查询 `ai_virtual_keys`，也未校验 enabled、expiry、allowed models、实体级 TPM/RPM 或 budget。Redis 分布式限流未实现。
+- Virtual Key 的创建、轮换和 CRUD 已实现，但请求认证、预算扣减和成本追踪尚未接入。`calculate_cost` 与扩展 DAO trait 已定义，但未连接代理 log 生命周期。
+- Prompt Guard 当前只有正则/长度规则；语义 guard、embedding 检测和分类评分未实现。
+- Model balancer 已实现 priority、weight、token-size 过滤和健康冷却结构，但 `ai-proxy` 尚未回报成功/失败，也未使用插件配置中的 `retries`，因此运行时没有跨 provider 失败重试或健康 fallback。
+- 数据库 model group 的 `max_input_tokens` 预路由过滤使用 provider 无关字符估值；选定 provider/model 后才执行 `TokenizerRegistry` 的精细计数。临界阈值附近可能保守或乐观选模。
+- `ai-proxy` 接受 `timeout`、`model_name_header`、`log_payloads` 和 `log_statistics` 配置字段，但这些开关尚未完整驱动运行时行为；连接和读写超时仍主要服从 Service/Pingora 配置。
+- Workspace-scoped AI model/provider 解析、Consumer 级插件动态选择、专用 analytics/Prometheus、MCP Gateway 和 Agent Gateway 均为后续工作。
 
 ## 错误处理
 

@@ -10,8 +10,8 @@
   - `docker-entrypoint.sh`
   - `README.md`
   - `README_CN.md`
-  - `.spec-workflow/specs/kong-rust/tasks.md`
-  - `.spec-workflow/steering/tech.md`
+  - `docs/tasks.md`
+  - `docs/design.md`
 
 - Artifacts:
   - **Environment Defaults:** 容器默认设置 `KONG_ADMIN_LISTEN=0.0.0.0:8001`
