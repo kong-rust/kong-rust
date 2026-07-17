@@ -81,7 +81,8 @@ curl -s -X POST http://localhost:8001/routes \
     "name": "ai-chat",
     "paths": ["/v1/chat/completions"],
     "methods": ["POST"],
-    "strip_path": false
+    "strip_path": false,
+    "response_buffering": false
   }'
 ```
 
@@ -96,22 +97,15 @@ curl -s -X POST http://localhost:8001/plugins \
     \"name\": \"ai-proxy\",
     \"route\": {\"id\": \"${ROUTE_ID}\"},
     \"config\": {
-      \"model\": \"gpt-4o\",
+      \"model_group\": \"gpt-4o\",
       \"model_source\": \"config\",
       \"route_type\": \"llm/v1/chat\",
-      \"client_protocol\": \"openai\",
-      \"provider\": {
-        \"provider_type\": \"openai\",
-        \"auth_config\": {
-          \"header_name\": \"Authorization\",
-          \"header_value\": \"Bearer sk-...\"
-        }
-      }
+      \"client_protocol\": \"openai\"
     }
   }"
 ```
 
-> **Note**: In the current MVP phase, ai-proxy Provider credentials are inlined directly in the plugin `config.provider` (the `model_source=config` path). Future versions will support referencing AI Provider / AI Model entities via the `model` field.
+> **Note**: `model_group` resolves the AI Model entities created above and reads credentials from their server-side AI Provider records. The official Kong-compatible `model` record remains available for inline provider configurations.
 
 ### 1.5 Send a Request
 
@@ -183,7 +177,8 @@ The core plugin responsible for converting client OpenAI / Anthropic format requ
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | `""` | Logical model name (references the AI Model `name`); required when `model_source=config` |
+| `model` | object | `null` | Official Kong model record (`provider`, optional `name` and `options`) for inline provider configuration |
+| `model_group` | string | `null` | Kong-Rust extension: logical AI Model group name resolved from AI Model and AI Provider entities |
 | `model_source` | string | `"config"` | Model source: `config` (from plugin config) or `request` (from request body `model` field) |
 | `route_type` | string | `"llm/v1/chat"` | Route type: `llm/v1/chat` or `llm/v1/completions` |
 | `client_protocol` | string | `"openai"` | Client protocol: `openai` or `anthropic` |
@@ -195,7 +190,10 @@ The core plugin responsible for converting client OpenAI / Anthropic format requ
 | `log_payloads` | boolean | `false` | Whether to log request/response bodies (for debugging) |
 | `log_statistics` | boolean | `true` | Whether to log token statistics |
 | `model_routes` | array | `[]` | Intelligent routing rules (regex matching + weighted selection, see the "Intelligent Routing" section below) |
-| `provider` | object | `null` | Inline Provider configuration (see below); may be omitted when `model_routes` is configured |
+| `auth` | object | `null` | Official Kong authentication record used with `model.provider` |
+| `provider` | object | `null` | Legacy Kong-Rust inline Provider configuration (see below); may be omitted for `model_group` or `model_routes` |
+
+When present, a non-empty `model_group` takes precedence over inline `model` / `provider` fields so provider selection and credentials come from server-side AI entities. New page-created configurations always use `model_group`.
 
 #### Inline Provider Configuration (`provider` field)
 
@@ -211,19 +209,19 @@ The core plugin responsible for converting client OpenAI / Anthropic format requ
 
 ```json
 {
-  "model": "gpt-4o",
+  "model": {
+    "provider": "openai",
+    "name": "gpt-4o"
+  },
   "model_source": "config",
   "route_type": "llm/v1/chat",
   "client_protocol": "openai",
   "response_streaming": "allow",
   "timeout": 30000,
   "log_statistics": true,
-  "provider": {
-    "provider_type": "openai",
-    "auth_config": {
-      "header_name": "Authorization",
-      "header_value": "Bearer sk-..."
-    }
+  "auth": {
+    "header_name": "Authorization",
+    "header_value": "Bearer sk-..."
   }
 }
 ```
@@ -483,7 +481,7 @@ Reference the logical name `gpt4-tier` in the ai-proxy plugin:
 
 ```json
 {
-  "model": "gpt4-tier",
+  "model_group": "gpt4-tier",
   "model_source": "config"
 }
 ```
@@ -525,12 +523,9 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-openai"},
     "config": {
-      "model": "claude-main",
+      "model": {"provider": "anthropic", "name": "claude-main"},
       "client_protocol": "openai",
-      "provider": {
-        "provider_type": "anthropic",
-        "auth_config": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
-      }
+      "auth": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
     }
   }'
 ```
@@ -550,12 +545,9 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-anthropic"},
     "config": {
-      "model": "claude-main",
+      "model": {"provider": "anthropic", "name": "claude-main"},
       "client_protocol": "anthropic",
-      "provider": {
-        "provider_type": "anthropic",
-        "auth_config": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
-      }
+      "auth": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
     }
   }'
 ```
@@ -663,18 +655,15 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-full-stack"},
     "config": {
-      "model": "gpt-4o",
+      "model": {"provider": "openai", "name": "gpt-4o"},
       "model_source": "config",
       "route_type": "llm/v1/chat",
       "client_protocol": "openai",
       "response_streaming": "allow",
       "log_statistics": true,
-      "provider": {
-        "provider_type": "openai",
-        "auth_config": {
-          "header_name": "Authorization",
-          "header_value": "Bearer sk-..."
-        }
+      "auth": {
+        "header_name": "Authorization",
+        "header_value": "Bearer sk-..."
       }
     }
   }'

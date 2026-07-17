@@ -1,7 +1,7 @@
 import { expect } from '@playwright/test'
 import baseTest from '@pw/base-test'
 import axios from 'axios'
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
 const test = baseTest()
@@ -14,13 +14,19 @@ const tag = `pw-ai-gateway-${suffix}`
 let mockUpstream: Server
 let mockUpstreamEndpoint = ''
 let lastUpstreamModel = ''
+let streamingResponse: ServerResponse | null = null
+let streamingUpstreamClosed = false
+let streamingRequestStarted: Promise<void>
+let resolveStreamingRequestStarted: () => void
 
 interface KongEntity {
   id: string
   name?: string
+  response_buffering?: boolean
   tags?: string[]
   config?: {
     model?: string
+    model_group?: string
   }
 }
 
@@ -48,7 +54,10 @@ const deleteMatching = async (
 }
 
 const cleanup = async () => {
-  await deleteMatching('plugins', entity => entity.config?.model === modelGroup)
+  await deleteMatching(
+    'plugins',
+    entity => entity.config?.model_group === modelGroup || entity.config?.model === modelGroup,
+  )
   await deleteMatching('routes', entity => entity.name === routeResourceName)
   await deleteMatching('services', entity => entity.name === routeResourceName)
   await deleteMatching('ai-virtual-keys', entity => entity.name === virtualKeyName)
@@ -59,13 +68,36 @@ const cleanup = async () => {
 test.describe('AI Gateway manager', () => {
   test.beforeAll(async () => {
     await cleanup()
+    streamingRequestStarted = new Promise(resolve => {
+      resolveStreamingRequestStarted = resolve
+    })
     mockUpstream = createServer((request, response) => {
       const chunks: string[] = []
       request.setEncoding('utf8')
       request.on('data', chunk => chunks.push(chunk))
       request.on('end', () => {
-        const body = JSON.parse(chunks.join('')) as { model?: string }
+        const body = JSON.parse(chunks.join('')) as { model?: string, stream?: boolean }
         lastUpstreamModel = body.model ?? ''
+
+        if (body.stream) {
+          streamingResponse = response
+          response.on('finish', () => {
+            streamingUpstreamClosed = true
+          })
+          response.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          })
+          response.flushHeaders()
+          response.write(
+            'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk",'
+            + '"created":1,"model":"deepseek-chat","choices":[{"index":0,'
+            + '"delta":{"content":"first"},"finish_reason":null}]}\n\n',
+          )
+          resolveStreamingRequestStarted()
+          return
+        }
+
         response.writeHead(200, { 'Content-Type': 'application/json' })
         response.end(JSON.stringify({
           id: 'chatcmpl-test',
@@ -147,6 +179,11 @@ test.describe('AI Gateway manager', () => {
     await expect(endpointInput).toHaveValue(
       `http://127.0.0.1:8000/ai/${modelGroup}/v1/chat/completions`,
     )
+    const { data: createdRoute } = await axios.get<KongEntity>(
+      `${apiUrl()}/routes/${routeResourceName}`,
+    )
+    expect(createdRoute.response_buffering).toBe(false)
+
     const proxyResponse = await page.request.post(await endpointInput.inputValue(), {
       data: {
         model: modelGroup,
@@ -154,8 +191,51 @@ test.describe('AI Gateway manager', () => {
       },
     })
     expect(proxyResponse.ok()).toBe(true)
+    expect(proxyResponse.headers()['content-type']).toContain('application/json')
+    expect(proxyResponse.headers()['x-kong-llm-model']).toBe('deepseek-chat')
     expect((await proxyResponse.json()).choices[0].message.content).toBe('mock upstream ok')
     expect(lastUpstreamModel).toBe('deepseek-chat')
+
+    const streamingFetch = fetch(await endpointInput.inputValue(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelGroup,
+        messages: [{ role: 'user', content: 'stream hello' }],
+        stream: true,
+      }),
+    })
+
+    await streamingRequestStarted
+
+    try {
+      const firstChunk = await Promise.race([
+        streamingFetch.then(async response => {
+          expect(response.ok).toBe(true)
+          expect(response.headers.get('content-type')).toContain('text/event-stream')
+
+          const reader = response.body?.getReader()
+
+          if (!reader) {
+            throw new Error('Streaming proxy response did not include a readable body')
+          }
+
+          const chunk = await reader.read()
+          return new TextDecoder().decode(chunk.value)
+        }),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error('Proxy did not forward the first SSE chunk while the upstream remained open')),
+            5_000,
+          )
+        }),
+      ])
+
+      expect(streamingUpstreamClosed).toBe(false)
+      expect(firstChunk).toContain('"content":"first"')
+    } finally {
+      streamingResponse?.end('data: [DONE]\n\n')
+    }
 
     await page.getByRole('link', { name: 'Virtual Keys', exact: true }).click()
     await expect(page.getByText(/management metadata only/)).toBeVisible()

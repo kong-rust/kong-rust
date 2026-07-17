@@ -96,8 +96,17 @@ async fn test_ai_proxy_header_filter_detects_streaming() {
     let has_sse_ct = ctx
         .response_headers_to_set
         .iter()
-        .any(|(k, v)| k == "content-type" && v == "text/event-stream");
+        .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "text/event-stream");
     assert!(has_sse_ct, "header_filter 应设置 content-type: text/event-stream");
+
+    let has_model_header = ctx
+        .response_headers_to_set
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-kong-llm-model") && v == "gpt-4");
+    assert!(
+        has_model_header,
+        "流式响应也应在 header_filter 阶段设置 X-Kong-LLM-Model"
+    );
 }
 
 /// 测试：header_filter 对 application/x-ndjson 也激活流式模式

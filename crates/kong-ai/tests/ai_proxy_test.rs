@@ -106,6 +106,26 @@ fn test_ai_proxy_config_defaults() {
     assert!(cfg.provider.is_none());
 }
 
+#[test]
+fn test_ai_proxy_model_group_takes_precedence_and_empty_value_falls_back() {
+    let grouped: AiProxyConfig = serde_json::from_value(json!({
+        "model": {
+            "provider": "openai",
+            "name": "gpt-4"
+        },
+        "model_group": "production-chat"
+    }))
+    .unwrap();
+    assert_eq!(grouped.effective_model_name(), "production-chat");
+
+    let fallback: AiProxyConfig = serde_json::from_value(json!({
+        "model": "gpt-4",
+        "model_group": ""
+    }))
+    .unwrap();
+    assert_eq!(fallback.effective_model_name(), "gpt-4");
+}
+
 // ============ access 阶段测试 ============
 
 #[tokio::test]

@@ -334,6 +334,42 @@ async fn inline_provider_takes_precedence_over_database_group() {
 }
 
 #[tokio::test]
+async fn explicit_model_group_takes_precedence_over_inline_provider() {
+    let provider_id = Uuid::new_v4();
+    let plugin = AiProxyPlugin::with_model_resolver(resolver(
+        vec![model(
+            Uuid::new_v4(),
+            provider_id,
+            "shared-name",
+            "database-model",
+            100,
+        )],
+        vec![provider(provider_id, "anthropic", true)],
+    ));
+    let config = PluginConfig {
+        name: "ai-proxy".to_string(),
+        config: json!({
+            "model_group": "shared-name",
+            "provider": {
+                "provider_type": "openai",
+                "auth_config": {"header_value": "Bearer inline-test-token"}
+            }
+        }),
+    };
+    let mut ctx = request_context();
+
+    plugin.access(&config, &mut ctx).await.unwrap();
+
+    let state = ctx.extensions.get::<AiRequestState>().unwrap();
+    assert_eq!(state.provider_config.provider_type, "anthropic");
+    assert_eq!(state.model.model_name, "database-model");
+    assert_eq!(
+        state.provider_config.auth_config["header_value"],
+        "Bearer test-token"
+    );
+}
+
+#[tokio::test]
 async fn unchanged_group_preserves_weighted_selection_across_refreshes() {
     let provider_a = Uuid::new_v4();
     let provider_b = Uuid::new_v4();

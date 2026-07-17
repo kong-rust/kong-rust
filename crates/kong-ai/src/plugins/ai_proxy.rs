@@ -129,6 +129,8 @@ impl ModelField {
 pub struct AiProxyConfig {
     /// 模型配置：String（kong-rust）或 Object（Kong 官方）
     pub model: ModelField,
+    /// AI Gateway 模型组；非空时优先于兼容字段 model
+    pub model_group: Option<String>,
     /// 模型来源："config" 从插件配置取，"request" 从请求体取
     pub model_source: String,
     /// 路由类型："llm/v1/chat" | "llm/v1/completions"
@@ -178,6 +180,7 @@ impl Default for AiProxyConfig {
     fn default() -> Self {
         Self {
             model: ModelField::Simple(String::new()),
+            model_group: None,
             model_source: "config".to_string(),
             route_type: "llm/v1/chat".to_string(),
             client_protocol: "openai".to_string(),
@@ -211,8 +214,20 @@ impl AiProxyConfig {
         &self.client_protocol
     }
 
+    /// 获取非空模型组名称 — get a non-empty model group name
+    pub fn model_group_name(&self) -> Option<&str> {
+        self
+            .model_group
+            .as_deref()
+            .map(str::trim)
+            .filter(|model_group| !model_group.is_empty())
+    }
+
     /// 获取有效的模型名称 — get effective model name
     pub fn effective_model_name(&self) -> &str {
+        if let Some(model_group) = self.model_group_name() {
+            return model_group;
+        }
         self.model.model_name()
     }
 
@@ -473,7 +488,15 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 4. 智能路由 / Intelligent routing
-        // Priority: model_routes > inline provider > database model-group resolver.
+        // Priority: model_routes > explicit model_group > inline provider >
+        // database fallback for legacy/request-selected model names.
+        // An explicit model_group skips inline provider fields so credentials and
+        // provider selection always come from the server-side AI entities.
+        let inline_provider = if cfg.model_group_name().is_some() {
+            None
+        } else {
+            cfg.effective_provider()
+        };
         let (driver, ai_model, provider_config) = if !cfg.model_routes.is_empty() {
             // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
             // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
@@ -505,7 +528,7 @@ impl PluginHandler for AiProxyPlugin {
             );
 
             (driver, resolution.model, resolution.provider_config)
-        } else if let Some(inline_provider) = cfg.effective_provider() {
+        } else if let Some(inline_provider) = inline_provider {
             // Fallback：使用内联 provider 配置（兼容 kong-rust 格式和 Kong 官方格式）
             // Fallback: use inline provider config (supports both kong-rust and official Kong format)
             let provider_type = &inline_provider.provider_type;
@@ -789,7 +812,9 @@ impl PluginHandler for AiProxyPlugin {
         Ok(())
     }
 
-    async fn header_filter(&self, _config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+    async fn header_filter(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        let cfg: AiProxyConfig = crate::parse_plugin_config(config)?;
+
         // 检查 AiRequestState 是否存在（access 阶段应已设置）
         let ai_state = match ctx.extensions.get_mut::<AiRequestState>() {
             Some(s) => s,
@@ -829,6 +854,20 @@ impl PluginHandler for AiProxyPlugin {
             ));
 
             debug!("ai-proxy header_filter: detected streaming response, content-type={}", content_type);
+        } else if !ai_state.responses_pass_through {
+            // Translation paths always emit JSON. Queue this before Pingora sends
+            // the downstream headers; body_filter runs too late to change them.
+            ctx.response_headers_to_set.push((
+                "content-type".to_string(),
+                "application/json".to_string(),
+            ));
+        }
+
+        if cfg.model_name_header && !ai_state.model.model_name.is_empty() {
+            ctx.response_headers_to_set.push((
+                "x-kong-llm-model".to_string(),
+                ai_state.model.model_name.clone(),
+            ));
         }
 
         Ok(())
@@ -1190,11 +1229,6 @@ impl PluginHandler for AiProxyPlugin {
                             responses_format::chat_to_responses(&chat_response, &stripped);
                         let json = serde_json::to_string(&responses_resp).unwrap_or_default();
                         *body = Some(Bytes::from(json));
-
-                        ctx.response_headers_to_set.push((
-                            "Content-Type".to_string(),
-                            "application/json".to_string(),
-                        ));
                     }
                     Err(e) => {
                         warn!("ai-proxy body_filter (responses): transform error: {}", e);
@@ -1205,10 +1239,6 @@ impl PluginHandler for AiProxyPlugin {
                         );
                         let json = serde_json::to_string(&err_resp).unwrap_or_default();
                         *body = Some(Bytes::from(json));
-                        ctx.response_headers_to_set.push((
-                            "Content-Type".to_string(),
-                            "application/json".to_string(),
-                        ));
                     }
                 }
             } else {
@@ -1263,20 +1293,6 @@ impl PluginHandler for AiProxyPlugin {
 
                     // 替换响应体
                     *body = Some(Bytes::from(response_json));
-
-                    // 设置响应头
-                    ctx.response_headers_to_set.push((
-                        "Content-Type".to_string(),
-                        "application/json".to_string(),
-                    ));
-                    if let Some(state) = ctx.extensions.get::<AiRequestState>() {
-                        if !state.model.model_name.is_empty() {
-                            ctx.response_headers_to_set.push((
-                                "X-Kong-LLM-Model".to_string(),
-                                state.model.model_name.clone(),
-                            ));
-                        }
-                    }
                 }
                 Err(e) => {
                     // 上游返回错误（如 4xx/5xx），透传错误信息

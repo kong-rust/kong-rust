@@ -81,7 +81,8 @@ curl -s -X POST http://localhost:8001/routes \
     "name": "ai-chat",
     "paths": ["/v1/chat/completions"],
     "methods": ["POST"],
-    "strip_path": false
+    "strip_path": false,
+    "response_buffering": false
   }'
 ```
 
@@ -96,22 +97,15 @@ curl -s -X POST http://localhost:8001/plugins \
     \"name\": \"ai-proxy\",
     \"route\": {\"id\": \"${ROUTE_ID}\"},
     \"config\": {
-      \"model\": \"gpt-4o\",
+      \"model_group\": \"gpt-4o\",
       \"model_source\": \"config\",
       \"route_type\": \"llm/v1/chat\",
-      \"client_protocol\": \"openai\",
-      \"provider\": {
-        \"provider_type\": \"openai\",
-        \"auth_config\": {
-          \"header_name\": \"Authorization\",
-          \"header_value\": \"Bearer sk-...\"
-        }
-      }
+      \"client_protocol\": \"openai\"
     }
   }"
 ```
 
-> **注意**：当前 MVP 阶段 ai-proxy 的 Provider 凭证直接内联在插件 `config.provider` 中（`model_source=config` 路径）。后续版本将支持通过 `model` 字段引用已创建的 AI Provider / AI Model 实体。
+> **注意**：`model_group` 会解析上面创建的 AI Model 实体，并从服务端 AI Provider 记录读取凭证。Kong 官方兼容的 `model` record 仍可用于内联 Provider 配置。
 
 ### 1.5 发送请求
 
@@ -183,7 +177,8 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `model` | string | `""` | 模型逻辑名称（引用 AI Model 的 `name`）；`model_source=config` 时必填 |
+| `model` | object | `null` | Kong 官方模型 record（`provider`、可选 `name` 和 `options`），用于内联 Provider 配置 |
+| `model_group` | string | `null` | Kong-Rust 扩展：从 AI Model 与 AI Provider 实体解析的逻辑模型组名称 |
 | `model_source` | string | `"config"` | 模型来源：`config`（从插件配置取）或 `request`（从请求体 `model` 字段取） |
 | `route_type` | string | `"llm/v1/chat"` | 路由类型：`llm/v1/chat` 或 `llm/v1/completions` |
 | `client_protocol` | string | `"openai"` | 客户端协议：`openai` 或 `anthropic` |
@@ -195,7 +190,10 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 | `log_payloads` | boolean | `false` | 是否记录请求/响应体（调试用） |
 | `log_statistics` | boolean | `true` | 是否在日志中记录 token 统计 |
 | `model_routes` | array | `[]` | 智能路由规则（正则匹配 + 加权选择，见下方"智能路由"章节） |
-| `provider` | object | `null` | 内联 Provider 配置（见下方）；配置了 `model_routes` 时可省略 |
+| `auth` | object | `null` | 与 `model.provider` 搭配使用的 Kong 官方认证 record |
+| `provider` | object | `null` | 旧版 Kong-Rust 内联 Provider 配置（见下方）；使用 `model_group` 或 `model_routes` 时可省略 |
+
+非空 `model_group` 会优先于内联 `model` / `provider` 字段，Provider 选择与凭证统一来自服务端 AI 实体。页面新建的配置统一使用 `model_group`。
 
 #### 内联 Provider 配置（`provider` 字段）
 
@@ -211,19 +209,19 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 
 ```json
 {
-  "model": "gpt-4o",
+  "model": {
+    "provider": "openai",
+    "name": "gpt-4o"
+  },
   "model_source": "config",
   "route_type": "llm/v1/chat",
   "client_protocol": "openai",
   "response_streaming": "allow",
   "timeout": 30000,
   "log_statistics": true,
-  "provider": {
-    "provider_type": "openai",
-    "auth_config": {
-      "header_name": "Authorization",
-      "header_value": "Bearer sk-..."
-    }
+  "auth": {
+    "header_name": "Authorization",
+    "header_value": "Bearer sk-..."
   }
 }
 ```
@@ -484,7 +482,7 @@ curl -X POST http://localhost:8001/ai-models \
 
 ```json
 {
-  "model": "gpt4-tier",
+  "model_group": "gpt4-tier",
   "model_source": "config"
 }
 ```
@@ -526,12 +524,9 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-openai"},
     "config": {
-      "model": "claude-main",
+      "model": {"provider": "anthropic", "name": "claude-main"},
       "client_protocol": "openai",
-      "provider": {
-        "provider_type": "anthropic",
-        "auth_config": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
-      }
+      "auth": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
     }
   }'
 ```
@@ -551,12 +546,9 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-anthropic"},
     "config": {
-      "model": "claude-main",
+      "model": {"provider": "anthropic", "name": "claude-main"},
       "client_protocol": "anthropic",
-      "provider": {
-        "provider_type": "anthropic",
-        "auth_config": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
-      }
+      "auth": {"header_name": "x-api-key", "header_value": "sk-ant-..."}
     }
   }'
 ```
@@ -664,18 +656,15 @@ curl -X POST http://localhost:8001/plugins \
     "name": "ai-proxy",
     "route": {"name": "ai-full-stack"},
     "config": {
-      "model": "gpt-4o",
+      "model": {"provider": "openai", "name": "gpt-4o"},
       "model_source": "config",
       "route_type": "llm/v1/chat",
       "client_protocol": "openai",
       "response_streaming": "allow",
       "log_statistics": true,
-      "provider": {
-        "provider_type": "openai",
-        "auth_config": {
-          "header_name": "Authorization",
-          "header_value": "Bearer sk-..."
-        }
+      "auth": {
+        "header_name": "Authorization",
+        "header_value": "Bearer sk-..."
       }
     }
   }'

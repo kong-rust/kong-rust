@@ -804,6 +804,7 @@ const submitGatewayRoute = async () => {
       paths: [path],
       methods: ['POST'],
       strip_path: false,
+      response_buffering: false,
     })
     resources.routeId = createdEntityId(routeResponse.data, 'route')
 
@@ -811,7 +812,7 @@ const submitGatewayRoute = async () => {
       name: 'ai-proxy',
       route: { id: resources.routeId },
       config: {
-        model: model.name,
+        model_group: model.name,
         model_source: 'config',
         route_type: 'llm/v1/chat',
         client_protocol: 'openai',

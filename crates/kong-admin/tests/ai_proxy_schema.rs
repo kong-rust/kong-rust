@@ -92,8 +92,42 @@ async fn test_plugin_schema_ai_proxy() {
             .unwrap_or_else(|| panic!("missing ai-proxy config field: {name}"))
     };
 
-    assert_eq!(config_field("model")["type"], "string");
-    assert!(config_field("model").get("required").is_none());
+    let model = config_field("model");
+    assert_eq!(model["type"], "record");
+    assert!(model.get("required").is_none());
+    let model_fields = model["fields"]
+        .as_array()
+        .expect("official Kong model record fields must be present");
+    let model_field = |name: &str| {
+        model_fields
+            .iter()
+            .find_map(|field| field.get(name))
+            .unwrap_or_else(|| panic!("missing official Kong model field: {name}"))
+    };
+    assert_eq!(model_field("provider")["type"], "string");
+    assert_eq!(model_field("provider")["required"], true);
+    assert_eq!(
+        model_field("provider")["one_of"],
+        serde_json::json!(["openai", "anthropic", "gemini", "openai_compat"])
+    );
+    assert_eq!(model_field("name")["type"], "string");
+    assert_eq!(model_field("options")["type"], "record");
+    let model_options = model_field("options")["fields"]
+        .as_array()
+        .expect("official Kong model options must be present");
+    let model_option = |name: &str| {
+        model_options
+            .iter()
+            .find_map(|field| field.get(name))
+            .unwrap_or_else(|| panic!("missing official Kong model option: {name}"))
+    };
+    assert_eq!(model_option("upstream_url")["type"], "string");
+    assert_eq!(model_option("anthropic_version")["type"], "string");
+    assert_eq!(model_option("azure_api_version")["type"], "string");
+
+    let model_group = config_field("model_group");
+    assert_eq!(model_group["type"], "string");
+    assert!(model_group.get("required").is_none());
     assert_eq!(config_field("model_source")["type"], "string");
     assert_eq!(config_field("model_source")["default"], "config");
     assert_eq!(config_field("model_source")["one_of"], serde_json::json!(["config", "request"]));

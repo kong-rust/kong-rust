@@ -1041,7 +1041,7 @@ AI 实体使用通用 `Dao<T>` / `PgDao<T>` 和 DB-less DAO。PostgreSQL 表由 
 | `ai_virtual_keys` | `id`, `name`, `key_hash`, `key_prefix`, `consumer_id`, `allowed_models`, `tpm_limit`, `rpm_limit`, `budget_limit`, `budget_used`, `enabled`, `expires_at`, `tags`, `ws_id`, timestamps | 可选关联 Consumer；保存密钥哈希、模型范围、限额和预算元数据 |
 
 ```
-Plugin config.model / request.model
+Plugin config.model_group / request.model
              │
              ▼
       model group name
@@ -1063,8 +1063,9 @@ Provider 删除会级联删除其模型；Consumer 删除只会清空 virtual ke
 `ai-proxy` 按以下顺序解析上游，命中后不再继续：
 
 1. `model_routes`：第一条匹配请求模型名的正则规则生效，在规则的 targets 内按权重轮转。
-2. 插件内联 provider：支持 kong-rust 的 `config.provider`，也支持 Kong 风格的 `config.model.provider` + `config.auth`。
-3. 数据库 model group：`ModelGroupResolver` 按 group name 加载启用的 model/provider，缓存 2 秒；先选较高 `priority`，同一档按 `weight` 轮转，并用 provider 无关的预路由 prompt 估值与 `max_input_tokens` 过滤无法容纳请求的候选。
+2. 显式数据库 model group：非空 `config.model_group` 会跳过所有内联 provider 字段，强制由服务端 AI Model / AI Provider 实体解析。
+3. 插件内联 provider：支持旧版 kong-rust 的 `config.provider`，也支持 Kong 风格的 `config.model.provider` + `config.auth`。
+4. 数据库回退：没有内联 provider 时，从旧字符串 `config.model` 或 `model_source=request` 的请求 `model` 读取 group name。`ModelGroupResolver` 按 group name 加载启用的 model/provider，缓存 2 秒；先选较高 `priority`，同一档按 `weight` 轮转，并用 provider 无关的预路由 prompt 估值与 `max_input_tokens` 过滤无法容纳请求的候选。Admin schema 将 `config.model` 保留为 Kong 官方 record，页面和新配置统一使用 `model_group`。
 
 数据库 resolver 当前只读取 `ws_id IS NULL` 的全局 AI 实体。`AiDriver` 是 provider 与代理生命周期的稳定边界：
 
