@@ -32,6 +32,10 @@ const CORE_MIGRATIONS: &[Migration] = &[
         name: "003_keys",
         sql: include_str!("../migrations/core/003_keys.sql"),
     },
+    Migration {
+        name: "004_ai_model_max_input_tokens",
+        sql: include_str!("../migrations/core/004_ai_model_max_input_tokens.sql"),
+    },
 ];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
@@ -324,4 +328,22 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CORE_MIGRATIONS;
+
+    #[test]
+    fn max_input_tokens_has_a_forward_migration() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "004_ai_model_max_input_tokens")
+            .expect("forward migration must be registered");
+
+        assert!(migration
+            .sql
+            .contains("ADD COLUMN max_input_tokens INTEGER"));
+        assert!(!migration.sql.contains("IF NOT EXISTS"));
+    }
 }

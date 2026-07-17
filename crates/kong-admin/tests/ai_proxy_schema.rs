@@ -81,4 +81,32 @@ async fn test_plugin_schema_ai_proxy() {
     assert_eq!(value["name"], "ai-proxy");
     assert_eq!(value["fields"][0]["protocols"]["type"], "set");
     assert_eq!(value["fields"][1]["config"]["type"], "record");
+
+    let config_fields = value["fields"][1]["config"]["fields"]
+        .as_array()
+        .expect("ai-proxy config fields must be an array");
+    let config_field = |name: &str| {
+        config_fields
+            .iter()
+            .find_map(|field| field.get(name))
+            .unwrap_or_else(|| panic!("missing ai-proxy config field: {name}"))
+    };
+
+    assert_eq!(config_field("model")["type"], "string");
+    assert!(config_field("model").get("required").is_none());
+    assert_eq!(config_field("model_source")["type"], "string");
+    assert_eq!(config_field("model_source")["default"], "config");
+    assert_eq!(config_field("model_source")["one_of"], serde_json::json!(["config", "request"]));
+    assert_eq!(config_field("client_protocol")["type"], "string");
+    assert_eq!(config_field("client_protocol")["default"], "openai");
+    assert_eq!(config_field("client_protocol")["one_of"], serde_json::json!(["openai", "anthropic"]));
+    assert_eq!(config_field("route_type")["type"], "string");
+    assert_eq!(config_field("route_type")["default"], "llm/v1/chat");
+    assert_eq!(config_field("route_type")["one_of"], serde_json::json!(["llm/v1/chat", "llm/v1/completions", "llm/v1/responses"]));
+    assert_eq!(config_field("response_streaming")["type"], "string");
+    assert_eq!(config_field("response_streaming")["default"], "allow");
+    assert_eq!(config_field("response_streaming")["one_of"], serde_json::json!(["allow", "deny", "always"]));
+    assert_eq!(config_field("auth")["type"], "record");
+    assert_eq!(config_field("logging")["type"], "record");
+    assert_eq!(config_field("llm_format")["type"], "string");
 }

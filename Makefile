@@ -115,7 +115,7 @@ manager-install:
 manager-build:
 	cd $(MANAGER_DIR) && pnpm build
 
-# 开发模式启动 kong-manager（热更新，默认 8080 端口）
+# 开发模式启动 kong-manager（热更新，默认 8002 端口）
 # Admin API 地址通过 ADMIN_API 变量配置
 # 用法: make manager-dev
 #        make ADMIN_API=http://10.0.0.1:8001 manager-dev
@@ -154,6 +154,8 @@ dev:
 		. $$KONG_SERVICE_ENV_FILE && \
 		echo "PostgreSQL 端口: $$KONG_PG_PORT" && \
 		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server --bin kong -- -c kong.conf.default db bootstrap; \
+		. $$KONG_SERVICE_ENV_FILE && \
+		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server --bin kong -- -c kong.conf.default db up; \
 		. $$KONG_SERVICE_ENV_FILE && \
 		KONG_PG_PORT=$$KONG_PG_PORT RUST_LOG=info cargo run -p kong-server --bin kong -- -c kong.conf.default; \
 		rm -f $$KONG_SERVICE_ENV_FILE

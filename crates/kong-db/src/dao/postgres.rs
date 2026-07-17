@@ -1379,6 +1379,7 @@ pub fn ai_model_schema() -> EntitySchema {
         .float_opt("input_cost")
         .float_opt("output_cost")
         .integer_opt("max_tokens")
+        .integer_opt("max_input_tokens")
         .jsonb("config")
         .boolean("enabled")
         .tags()
@@ -1403,4 +1404,21 @@ pub fn ai_virtual_key_schema() -> EntitySchema {
         .column("expires_at", "expires_at", ColumnType::Timestamp, true)
         .tags()
         .column("ws_id", "ws_id", ColumnType::Uuid, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ai_model_schema, ColumnType};
+
+    #[test]
+    fn ai_model_schema_includes_max_input_tokens() {
+        let schema = ai_model_schema();
+        let column = schema
+            .find_column("max_input_tokens")
+            .expect("max_input_tokens must be persisted");
+
+        assert_eq!(column.db_column, "max_input_tokens");
+        assert_eq!(column.col_type, ColumnType::Integer);
+        assert!(column.nullable);
+    }
 }

@@ -251,15 +251,9 @@ fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
             "fields": [
                 {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
                 {"config": {"type": "record", "required": true, "fields": [
-                    {"model": {"type": "record", "required": true, "fields": [
-                        {"provider": {"type": "string", "required": true, "one_of": ["openai", "anthropic", "gemini", "openai_compat"]}},
-                        {"name": {"type": "string"}},
-                        {"options": {"type": "record", "fields": [
-                            {"upstream_url": {"type": "string"}},
-                            {"anthropic_version": {"type": "string"}},
-                            {"azure_api_version": {"type": "string"}},
-                        ]}},
-                    ]}},
+                    {"model": {"type": "string"}},
+                    {"model_source": {"type": "string", "default": "config", "one_of": ["config", "request"]}},
+                    {"client_protocol": {"type": "string", "default": "openai", "one_of": ["openai", "anthropic"]}},
                     {"auth": {"type": "record", "fields": [
                         {"header_name": {"type": "string"}},
                         {"header_value": {"type": "string"}},

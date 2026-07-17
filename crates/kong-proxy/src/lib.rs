@@ -41,6 +41,18 @@ use crate::phases::PhaseRunner;
 use crate::spillable_buffer::SpillableBuffer;
 use crate::tls::CertificateManager;
 
+fn set_upstream_header(upstream_request: &mut RequestHeader, name: String, value: &str) {
+    let _ = upstream_request.insert_header(name, value);
+}
+
+fn apply_proxy_response_headers(response: &mut ResponseHeader, headers: &[String]) {
+    for header in headers {
+        if let Some((name, value)) = header.split_once(':') {
+            let _ = response.insert_header(name.trim().to_string(), value.trim().to_string());
+        }
+    }
+}
+
 /// Per-request context — passed between Pingora phases — 请求级上下文 — 在 Pingora 各阶段间传递
 pub struct KongCtx {
     /// Route match result — 路由匹配结果
@@ -422,18 +434,7 @@ impl KongProxy {
         }
 
         // 注入自定义响应头
-        for header_str in &self.config.proxy_response_headers {
-            if let Some((name, value)) = header_str.split_once(':') {
-                let name = name.trim();
-                let value = value.trim();
-                if let (Ok(hn), Ok(hv)) = (
-                    http::header::HeaderName::from_bytes(name.as_bytes()),
-                    http::header::HeaderValue::from_str(value),
-                ) {
-                    resp.headers.insert(hn, hv);
-                }
-            }
-        }
+        apply_proxy_response_headers(&mut resp, &self.config.proxy_response_headers);
 
         Ok(resp)
     }
@@ -990,16 +991,10 @@ impl ProxyHttp for KongProxy {
 
         // 2. Apply upstream request header modifications set by plugins — 应用插件设置的上游请求头修改
         for (name, value) in ctx.plugin_ctx.upstream_headers_to_set.drain(..) {
-            if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
-                    upstream_request.headers.insert(header_name, header_value);
-                }
-            }
+            set_upstream_header(upstream_request, name, &value);
         }
         for name in ctx.plugin_ctx.upstream_headers_to_remove.drain(..) {
-            if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                upstream_request.headers.remove(header_name);
-            }
+            upstream_request.remove_header(name.as_str());
         }
 
         // 3. strip_path handling — strip_path 处理
@@ -1398,11 +1393,11 @@ impl ProxyHttp for KongProxy {
         ctx.upstream_response_time = Some(std::time::Instant::now());
 
         // Remove hop-by-hop headers from upstream response — 移除上游响应中的逐跳头
-        upstream_response.headers.remove("keep-alive");
-        upstream_response.headers.remove("proxy-authenticate");
+        upstream_response.remove_header("keep-alive");
+        upstream_response.remove_header("proxy-authenticate");
         // gRPC uses HTTP/2 trailers for grpc-status/grpc-message; do not strip — gRPC 使用 HTTP/2 trailer，不能剥离
         if !ctx.is_grpc_request {
-            upstream_response.headers.remove("trailer");
+            upstream_response.remove_header("trailer");
         }
 
         // Populate response snapshot into RequestCtx — 填充响应快照到 RequestCtx
@@ -1421,8 +1416,8 @@ impl ProxyHttp for KongProxy {
 
         if defer_header_filter {
             // The buffered-response path may replace the body later, so avoid locking in a stale length/encoding now. — 完整缓冲响应路径后续可能替换响应体，因此这里先不要锁死旧的长度和编码。
-            upstream_response.headers.remove(http::header::CONTENT_LENGTH);
-            upstream_response.headers.remove(http::header::CONTENT_ENCODING);
+            upstream_response.remove_header(&http::header::CONTENT_LENGTH);
+            upstream_response.remove_header(&http::header::CONTENT_ENCODING);
         } else {
             // Execute header_filter phase — 执行 header_filter 阶段
             let plugins = ctx.resolved_plugins.clone();
@@ -1434,13 +1429,13 @@ impl ProxyHttp for KongProxy {
             for (name, value) in ctx.plugin_ctx.response_headers_to_set.drain(..) {
                 if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
                     if let Ok(header_value) = http::header::HeaderValue::from_str(&value) {
-                        upstream_response.headers.insert(header_name, header_value);
+                        let _ = upstream_response.insert_header(header_name, header_value);
                     }
                 }
             }
             for name in ctx.plugin_ctx.response_headers_to_remove.drain(..) {
                 if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
-                    upstream_response.headers.remove(header_name);
+                    upstream_response.remove_header(&header_name);
                 }
             }
         }
@@ -1476,18 +1471,7 @@ impl ProxyHttp for KongProxy {
         // The upstream's Server header is preserved as-is — 保留上游的 Server 头原样
 
         // 注入自定义响应头
-        for header_str in &self.config.proxy_response_headers {
-            if let Some((name, value)) = header_str.split_once(':') {
-                let name = name.trim();
-                let value = value.trim();
-                if let (Ok(hn), Ok(hv)) = (
-                    http::header::HeaderName::from_bytes(name.as_bytes()),
-                    http::header::HeaderValue::from_str(value),
-                ) {
-                    upstream_response.headers.insert(hn, hv);
-                }
-            }
-        }
+        apply_proxy_response_headers(upstream_response, &self.config.proxy_response_headers);
 
         Ok(())
     }
@@ -1853,6 +1837,64 @@ impl ProxyHttp for KongProxy {
         if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Log 阶段执行失败: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_proxy_response_headers, set_upstream_header};
+    use pingora_http::{RequestHeader, ResponseHeader};
+
+    #[test]
+    fn plugin_header_insertion_keeps_pingora_case_map_in_sync() {
+        let mut request = RequestHeader::build("GET", b"/", Some(2)).unwrap();
+        request.insert_header("X-Existing", "present").unwrap();
+
+        set_upstream_header(
+            &mut request,
+            "Authorization".to_string(),
+            "Bearer test-placeholder",
+        );
+
+        assert_eq!(
+            request.headers.get("authorization").unwrap(),
+            "Bearer test-placeholder"
+        );
+        assert_eq!(
+            request.case_header_iter().count(),
+            request.headers.iter().count()
+        );
+
+        let mut wire = Vec::new();
+        request.header_to_h1_wire(&mut wire);
+        let wire = String::from_utf8(wire).unwrap();
+        assert!(wire.contains("Authorization: Bearer test-placeholder\r\n"));
+    }
+
+    #[test]
+    fn response_header_mutations_keep_pingora_case_map_in_sync() {
+        let mut response = ResponseHeader::build(200, Some(4)).unwrap();
+        response
+            .insert_header("Content-Length", "10")
+            .unwrap();
+        response.insert_header("Connection", "close").unwrap();
+
+        response.remove_header("content-length");
+        apply_proxy_response_headers(
+            &mut response,
+            &["X-Proxy-Test: present".to_string()],
+        );
+
+        assert_eq!(
+            response.case_header_iter().count(),
+            response.headers.iter().count()
+        );
+
+        let mut wire = Vec::new();
+        response.header_to_h1_wire(&mut wire);
+        let wire = String::from_utf8(wire).unwrap();
+        assert!(!wire.to_ascii_lowercase().contains("content-length:"));
+        assert!(wire.contains("X-Proxy-Test: present\r\n"));
     }
 }
 

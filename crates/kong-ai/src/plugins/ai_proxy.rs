@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
 
@@ -16,7 +17,7 @@ use crate::codec::ChatRequest;
 use crate::models::{AiModel, AiProviderConfig};
 use crate::plugins::context::{AiRequestState, ClientProtocol};
 use crate::provider::router::{ModelRouteConfig, ModelRouter};
-use crate::provider::{DriverRegistry, TokenUsage};
+use crate::provider::{DriverRegistry, ModelGroupResolver, TokenUsage};
 
 // ============ 插件配置 ============
 
@@ -275,6 +276,7 @@ impl AiProxyConfig {
 /// AI 代理插件 — 实现 PluginHandler trait
 pub struct AiProxyPlugin {
     driver_registry: DriverRegistry,
+    model_resolver: Option<Arc<ModelGroupResolver>>,
 }
 
 impl AiProxyPlugin {
@@ -282,6 +284,15 @@ impl AiProxyPlugin {
     pub fn new() -> Self {
         Self {
             driver_registry: DriverRegistry::new(),
+            model_resolver: None,
+        }
+    }
+
+    /// Create an ai-proxy plugin backed by the shared AI model/provider DAOs.
+    pub fn with_model_resolver(model_resolver: Arc<ModelGroupResolver>) -> Self {
+        Self {
+            driver_registry: DriverRegistry::new(),
+            model_resolver: Some(model_resolver),
         }
     }
 }
@@ -462,8 +473,7 @@ impl PluginHandler for AiProxyPlugin {
         };
 
         // 4. 智能路由 / Intelligent routing
-        // 优先使用 model_routes（AI 网关级智能路由）；fallback 到 inline provider 配置
-        // Priority: model_routes (AI Gateway-level routing) > inline provider config
+        // Priority: model_routes > inline provider > database model-group resolver.
         let (driver, ai_model, provider_config) = if !cfg.model_routes.is_empty() {
             // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
             // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
@@ -495,15 +505,9 @@ impl PluginHandler for AiProxyPlugin {
             );
 
             (driver, resolution.model, resolution.provider_config)
-        } else {
+        } else if let Some(inline_provider) = cfg.effective_provider() {
             // Fallback：使用内联 provider 配置（兼容 kong-rust 格式和 Kong 官方格式）
             // Fallback: use inline provider config (supports both kong-rust and official Kong format)
-            let effective_provider = cfg.effective_provider();
-            let inline_provider = effective_provider.as_ref().ok_or_else(|| KongError::PluginError {
-                plugin_name: "ai-proxy".to_string(),
-                message: "missing provider: configure model_routes, inline provider, or model.provider — 需要配置 model_routes、inline provider 或 model.provider".to_string(),
-            })?;
-
             let provider_type = &inline_provider.provider_type;
             let driver = self
                 .driver_registry
@@ -531,6 +535,31 @@ impl PluginHandler for AiProxyPlugin {
             };
 
             (driver, ai_model, provider_config)
+        } else if let Some(resolver) = &self.model_resolver {
+            let routing_prompt_tokens = crate::token::estimate_from_request(&chat_request);
+            let (ai_model, provider_config) = resolver
+                .resolve_for(&model_name, Some(routing_prompt_tokens))
+                .await?;
+            let driver = self
+                .driver_registry
+                .get(&provider_config.provider_type)
+                .ok_or_else(|| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("unsupported provider type: {}", provider_config.provider_type),
+                })?
+                .clone();
+
+            chat_request.model = ai_model.model_name.clone();
+            debug!(
+                "ai-proxy: model group '{}' resolved → provider={}, model_name={}",
+                model_name, provider_config.provider_type, ai_model.model_name
+            );
+            (driver, ai_model, provider_config)
+        } else {
+            return Err(KongError::PluginError {
+                plugin_name: "ai-proxy".to_string(),
+                message: "missing provider: configure model_routes, inline provider, model.provider, or a database model group — 需要配置 model_routes、inline provider、model.provider 或数据库模型组".to_string(),
+            });
         };
 
         // 6.5 v1/responses pass-through 检测
@@ -539,12 +568,33 @@ impl PluginHandler for AiProxyPlugin {
             is_responses_route && driver.provider_type() == "openai";
 
         if is_responses_pass_through {
-            // Pass-through：直接转发原始请求体到 OpenAI /v1/responses
+            // Pass-through：保留原始 Responses 字段，仅用路由后的实际模型名覆盖 model。
             // 不走 ChatRequest 转换管线，不调用 driver.transform_request()
             let stream_mode = responses_request
                 .as_ref()
                 .and_then(|r| r.stream)
                 .unwrap_or(false);
+            let mut upstream_body: serde_json::Value =
+                serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to prepare v1/responses request body: {}", e),
+                })?;
+            let body_object =
+                upstream_body
+                    .as_object_mut()
+                    .ok_or_else(|| KongError::PluginError {
+                        plugin_name: "ai-proxy".to_string(),
+                        message: "v1/responses request body must be a JSON object".to_string(),
+                    })?;
+            body_object.insert(
+                "model".to_string(),
+                serde_json::Value::String(ai_model.model_name.clone()),
+            );
+            let upstream_body =
+                serde_json::to_string(&upstream_body).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to serialize v1/responses request body: {}", e),
+                })?;
 
             // 通过 TokenizerRegistry 计算 prompt token 估值(供下游消费)
             // body 是 v1/responses 格式,registry 内部尝试解析为 ChatRequest 失败时
@@ -555,11 +605,11 @@ impl PluginHandler for AiProxyPlugin {
                         .count_prompt_from_body(
                             &provider_config.provider_type,
                             &ai_model.model_name,
-                            body_str,
+                            &upstream_body,
                         )
                         .await
                 }
-                None => crate::token::TokenCounter::count_estimate(body_str),
+                None => crate::token::TokenCounter::count_estimate(&upstream_body),
             };
 
             let upstream = driver
@@ -574,7 +624,7 @@ impl PluginHandler for AiProxyPlugin {
             ctx.upstream_target_port = Some(upstream.port);
             ctx.upstream_scheme = Some(upstream.scheme);
             ctx.upstream_path = Some("/v1/responses".to_string());
-            ctx.upstream_body = Some(body_str.to_string());
+            ctx.upstream_body = Some(upstream_body);
 
             // 设置上游请求头
             ctx.upstream_headers_to_set

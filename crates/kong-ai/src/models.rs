@@ -21,9 +21,9 @@ pub struct AiProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<f64>,
+    pub created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<f64>,
+    pub updated_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
 }
@@ -56,9 +56,9 @@ pub struct AiModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<f64>,
+    pub created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<f64>,
+    pub updated_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
 }
@@ -84,13 +84,13 @@ pub struct AiVirtualKey {
     pub budget_used: f64,
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<f64>,
+    pub expires_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<f64>,
+    pub created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<f64>,
+    pub updated_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
 }
@@ -138,4 +138,39 @@ impl Entity for AiVirtualKey {
     fn endpoint_key() -> Option<&'static str> { Some("name") }
     fn endpoint_key_value(&self) -> Option<String> { Some(self.name.clone()) }
     fn tags(&self) -> Option<&Vec<String>> { self.tags.as_ref() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AiModel, AiProviderConfig, AiVirtualKey};
+
+    fn assert_integer_timestamps(value: serde_json::Value) {
+        assert!(value["created_at"].as_i64().is_some());
+        assert!(value["updated_at"].as_i64().is_some());
+    }
+
+    #[test]
+    fn ai_entity_timestamps_serialize_as_integer_epoch_seconds() {
+        let created_at = 1_700_000_000;
+        let updated_at = 1_700_000_001;
+
+        assert_integer_timestamps(serde_json::to_value(AiProviderConfig {
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            ..Default::default()
+        }).unwrap());
+        assert_integer_timestamps(serde_json::to_value(AiModel {
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            ..Default::default()
+        }).unwrap());
+        let virtual_key = serde_json::to_value(AiVirtualKey {
+            expires_at: Some(updated_at),
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            ..Default::default()
+        }).unwrap();
+        assert_integer_timestamps(virtual_key.clone());
+        assert!(virtual_key["expires_at"].as_i64().is_some());
+    }
 }

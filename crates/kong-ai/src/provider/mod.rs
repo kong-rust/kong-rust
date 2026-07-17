@@ -6,9 +6,11 @@ pub mod balancer;
 pub mod gemini;
 pub mod openai;
 pub mod openai_compat;
+pub mod resolver;
 pub mod router;
 
 pub use balancer::ModelGroupBalancer;
+pub use resolver::ModelGroupResolver;
 pub use router::ModelRouter;
 
 use crate::codec::{ChatRequest, ChatResponse, SseEvent};

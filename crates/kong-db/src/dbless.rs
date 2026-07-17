@@ -89,6 +89,9 @@ impl DblessStore {
             ("vaults", "prefix"),
             ("key_sets", "name"),
             ("keys", "name"),
+            ("ai_providers", "name"),
+            ("ai_models", ""),
+            ("ai_virtual_keys", "name"),
         ];
 
         for (table_name, endpoint_key) in entity_types {
@@ -116,9 +119,7 @@ impl DblessStore {
 
                     // Build endpoint key index — 建立端点键索引
                     if !endpoint_key.is_empty() {
-                        if let Some(key_val) =
-                            entity.get(endpoint_key).and_then(|v| v.as_str())
-                        {
+                        if let Some(key_val) = entity.get(endpoint_key).and_then(|v| v.as_str()) {
                             ek_map.insert(key_val.to_string(), id);
                         }
                     }
@@ -377,7 +378,7 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
             params.size * 10
         };
 
-        let (entities_json, _next_offset) =
+        let (entities_json, next_offset) =
             self.store
                 .list_entities(table_name, offset_uuid.as_ref(), fetch_size)?;
 
@@ -385,15 +386,22 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
         let filtered_json: Vec<Value> = if params.filters.is_empty() {
             entities_json
         } else {
-            entities_json.into_iter().filter(|v| {
-                params.filters.iter().all(|(field, expected)| {
-                    v.get(field).and_then(|val| val.as_str()) == Some(expected.as_str())
+            entities_json
+                .into_iter()
+                .filter(|v| {
+                    params.filters.iter().all(|(field, expected)| {
+                        v.get(field).and_then(|val| val.as_str()) == Some(expected.as_str())
+                    })
                 })
-            }).collect()
+                .collect()
         };
 
         // Re-apply pagination to filtered results — 对过滤结果重新分页
-        let has_next = filtered_json.len() > params.size;
+        let has_next = if params.filters.is_empty() {
+            next_offset.is_some()
+        } else {
+            filtered_json.len() > params.size
+        };
         let page_data = if has_next {
             &filtered_json[..params.size]
         } else {
@@ -408,12 +416,15 @@ impl<T: Entity> Dao<T> for DblessDao<T> {
         }
 
         // Compute next offset from the last item in the filtered page — 从过滤后页面的最后一项计算下一页偏移量
-        let filtered_next = if has_next {
-            data.last()
-                .and_then(|e| {
-                    let v = serde_json::to_value(e).unwrap_or_default();
-                    v.get("id").and_then(|id| id.as_str()).and_then(|s| Uuid::parse_str(s).ok())
-                })
+        let filtered_next = if params.filters.is_empty() {
+            next_offset
+        } else if has_next {
+            data.last().and_then(|e| {
+                let v = serde_json::to_value(e).unwrap_or_default();
+                v.get("id")
+                    .and_then(|id| id.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+            })
         } else {
             None
         };
@@ -519,6 +530,8 @@ fn build_fk_index(
         "plugins" => vec!["route", "service", "consumer"],
         "snis" => vec!["certificate"],
         "keys" => vec!["set"],
+        "ai_models" => vec!["provider_id"],
+        "ai_virtual_keys" => vec!["consumer_id"],
         _ => vec![],
     };
 
@@ -583,6 +596,74 @@ fn decode_offset(token: &str) -> Result<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestAiProvider {
+        id: Uuid,
+        name: String,
+        enabled: bool,
+    }
+
+    impl Entity for TestAiProvider {
+        fn table_name() -> &'static str {
+            "ai_providers"
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestAiModel {
+        id: Uuid,
+        name: String,
+        provider_id: Uuid,
+        model_name: String,
+        enabled: bool,
+    }
+
+    impl Entity for TestAiModel {
+        fn table_name() -> &'static str {
+            "ai_models"
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestAiVirtualKey {
+        id: Uuid,
+        name: String,
+    }
+
+    impl Entity for TestAiVirtualKey {
+        fn table_name() -> &'static str {
+            "ai_virtual_keys"
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TestUnknownEntity {
+        id: Uuid,
+    }
+
+    impl Entity for TestUnknownEntity {
+        fn table_name() -> &'static str {
+            "unknown_entities"
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+    }
 
     #[test]
     fn test_load_declarative_config() {
@@ -641,6 +722,111 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(dao.insert(&kong_core::models::Service::default()));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ai_entities_load_and_resolve_through_dbless_dao() {
+        let provider_id = Uuid::parse_str("01000000-0000-0000-0000-000000000001").unwrap();
+        let first_model_id = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
+        let second_model_id = Uuid::parse_str("20000000-0000-0000-0000-000000000001").unwrap();
+        let virtual_key_id = Uuid::parse_str("30000000-0000-0000-0000-000000000001").unwrap();
+        let unknown_id = Uuid::parse_str("40000000-0000-0000-0000-000000000001").unwrap();
+        let store = std::sync::Arc::new(DblessStore::new());
+        store
+            .load_from_json(&serde_json::json!({
+                "_format_version": "3.0",
+                "ai_providers": [{
+                    "id": provider_id,
+                    "name": "openai-primary",
+                    "enabled": true
+                }],
+                "ai_models": [
+                    {
+                        "id": first_model_id,
+                        "name": "chat",
+                        "provider_id": provider_id,
+                        "model_name": "gpt-first",
+                        "enabled": true
+                    },
+                    {
+                        "id": second_model_id,
+                        "name": "chat",
+                        "provider_id": provider_id,
+                        "model_name": "gpt-second",
+                        "enabled": true
+                    }
+                ],
+                "ai_virtual_keys": [{
+                    "id": virtual_key_id,
+                    "name": "integration-key"
+                }],
+                "unknown_entities": [{
+                    "id": unknown_id
+                }]
+            }))
+            .unwrap();
+
+        let providers = DblessDao::<TestAiProvider>::new(std::sync::Arc::clone(&store));
+        let models = DblessDao::<TestAiModel>::new(std::sync::Arc::clone(&store));
+        let virtual_keys = DblessDao::<TestAiVirtualKey>::new(std::sync::Arc::clone(&store));
+        let unknown = DblessDao::<TestUnknownEntity>::new(store);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let provider = providers
+                .select(&PrimaryKey::EndpointKey("openai-primary".to_string()))
+                .await
+                .unwrap()
+                .expect("provider should resolve by endpoint name");
+            assert_eq!(provider.id, provider_id);
+
+            let first_page = models
+                .page(&PageParams {
+                    size: 1,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(first_page.data.len(), 1);
+            assert_eq!(first_page.data[0].id, first_model_id);
+            assert!(first_page.offset.is_some());
+
+            let second_page = models
+                .page(&PageParams {
+                    size: 1,
+                    offset: first_page.offset,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(second_page.data.len(), 1);
+            assert_eq!(second_page.data[0].id, second_model_id);
+            assert!(second_page.offset.is_none());
+
+            let provider_models = models
+                .select_by_foreign_key("provider_id", &provider.id, &PageParams::default())
+                .await
+                .unwrap();
+            assert_eq!(provider_models.data.len(), 2);
+            assert!(provider_models
+                .data
+                .iter()
+                .all(|model| model.provider_id == provider.id && model.name == "chat"));
+
+            let virtual_key = virtual_keys
+                .select(&PrimaryKey::EndpointKey("integration-key".to_string()))
+                .await
+                .unwrap()
+                .expect("virtual key should resolve by endpoint name");
+            assert_eq!(virtual_key.id, virtual_key_id);
+
+            assert!(unknown
+                .page(&PageParams::default())
+                .await
+                .unwrap()
+                .data
+                .is_empty());
+        });
     }
 
     #[test]

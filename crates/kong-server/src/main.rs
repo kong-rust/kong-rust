@@ -231,7 +231,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Load and register available Lua plugins for the current runtime. — 为当前运行时加载并注册可用的 Lua 插件。
-fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system::PluginRegistry {
+fn build_plugin_registry(
+    config: &kong_config::KongConfig,
+    ai_models: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiModel>>,
+    ai_providers: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiProviderConfig>>,
+) -> kong_plugin_system::PluginRegistry {
     let mut registry = kong_plugin_system::PluginRegistry::new();
     let plugin_names = config.loaded_plugins();
     let plugin_dirs = kong_lua_bridge::loader::resolve_plugin_dirs(&config.prefix);
@@ -259,7 +263,16 @@ fn build_plugin_registry(config: &kong_config::KongConfig) -> kong_plugin_system
     }
 
     // 注册 Rust 原生 AI 插件
-    registry.register("ai-proxy", Arc::new(kong_ai::plugins::AiProxyPlugin::new()));
+    let model_resolver = Arc::new(kong_ai::provider::ModelGroupResolver::new(
+        ai_models,
+        ai_providers,
+    ));
+    registry.register(
+        "ai-proxy",
+        Arc::new(kong_ai::plugins::AiProxyPlugin::with_model_resolver(
+            model_resolver,
+        )),
+    );
     registry.register("ai-rate-limit", Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()));
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
     registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
@@ -700,7 +713,6 @@ async fn init_proxy_and_admin(
     use kong_core::traits::{Dao, PageParams};
     use kong_db::*;
 
-    let plugin_registry = build_plugin_registry(config);
     // Use configured node_id if provided, otherwise generate a new one — 如果配置了 node_id 则使用，否则生成新的
     let node_id = match &config.node_id {
         Some(id) => uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
@@ -723,6 +735,13 @@ async fn init_proxy_and_admin(
             tracing::info!("加载声明式配置: {}", path);
             store.load_from_file(path)?;
         }
+
+        let ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>> =
+            Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(Arc::clone(&store)));
+        let ai_models: Arc<dyn Dao<kong_ai::models::AiModel>> =
+            Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(&store)));
+        let plugin_registry =
+            build_plugin_registry(config, Arc::clone(&ai_models), Arc::clone(&ai_providers));
 
         let kong_proxy = kong_proxy::KongProxy::new(
             &[],
@@ -747,8 +766,8 @@ async fn init_proxy_and_admin(
             vaults: Arc::new(DblessDao::<Vault>::new(Arc::clone(&store))),
             key_sets: Arc::new(DblessDao::<KeySet>::new(Arc::clone(&store))),
             keys: Arc::new(DblessDao::<Key>::new(Arc::clone(&store))),
-            ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(Arc::clone(&store))),
-            ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(&store))),
+            ai_providers,
+            ai_models,
             ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(&store))),
             node_id,
             config: Arc::clone(config),
@@ -814,6 +833,18 @@ async fn init_proxy_and_admin(
         let certificates_dao = PgDao::<Certificate>::new(db.clone(), certificate_schema());
         let snis_dao = PgDao::<Sni>::new(db.clone(), sni_schema());
         let ca_certificates_dao = PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema());
+        let ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>> =
+            Arc::new(PgDao::<kong_ai::models::AiProviderConfig>::new(
+                db.clone(),
+                ai_provider_schema(),
+            ));
+        let ai_models: Arc<dyn Dao<kong_ai::models::AiModel>> =
+            Arc::new(PgDao::<kong_ai::models::AiModel>::new(
+                db.clone(),
+                ai_model_schema(),
+            ));
+        let plugin_registry =
+            build_plugin_registry(config, Arc::clone(&ai_models), Arc::clone(&ai_providers));
 
         let routes_page = routes_dao.page(&all_params).await?;
         let services_page = services_dao.page(&all_params).await?;
@@ -869,8 +900,8 @@ async fn init_proxy_and_admin(
             vaults: Arc::new(PgDao::<Vault>::new(db.clone(), vault_schema())),
             key_sets: Arc::new(PgDao::<KeySet>::new(db.clone(), key_set_schema())),
             keys: Arc::new(PgDao::<Key>::new(db.clone(), key_schema())),
-            ai_providers: Arc::new(PgDao::<kong_ai::models::AiProviderConfig>::new(db.clone(), ai_provider_schema())),
-            ai_models: Arc::new(PgDao::<kong_ai::models::AiModel>::new(db.clone(), ai_model_schema())),
+            ai_providers,
+            ai_models,
             ai_virtual_keys: Arc::new(PgDao::<kong_ai::models::AiVirtualKey>::new(db.clone(), ai_virtual_key_schema())),
             node_id,
             config: Arc::clone(config),
