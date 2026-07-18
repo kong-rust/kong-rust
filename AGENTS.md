@@ -17,6 +17,20 @@ instructions.
 - Treat references to Anthropic or Claude models in AI Gateway code and docs as
   product compatibility, not as legacy Claude Code configuration.
 
+## Task Execution Policy
+
+- For review, explanation, diagnosis, status, or planning requests, inspect the
+  relevant materials and report evidence-backed conclusions. Do not implement
+  changes unless the request also asks for them.
+- For change, build, or fix requests, make the requested in-scope local edits
+  and run relevant non-destructive checks without pausing for confirmation.
+- Ask before external writes, destructive operations, purchases, credential or
+  permission changes, or a material expansion of scope.
+- Resolve safe, discoverable details from the repository instead of asking the
+  user. Ask only when a missing choice would materially change the result.
+- Lead handoffs with the outcome. Include supporting evidence, material caveats,
+  validation performed, and the next action when one remains.
+
 ## Project Map
 
 Kong-Rust is a Rust 2021 rewrite of Kong Gateway built on Pingora. The workspace
@@ -174,6 +188,32 @@ edits.
 - Personal model, approval, sandbox, and MCP preferences belong in
   `~/.codex/config.toml`; add project `.codex/config.toml` only for settings the
   whole team intentionally shares.
+
+## AI Prompt and Model Changes
+
+- Keep agent instructions lean: state each rule once, prefer repository facts
+  and success criteria over procedural narration, and avoid generic directives
+  such as “think harder” or “reason step by step.”
+- For a prompt template, define the goal, relevant context, hard constraints,
+  approval boundary, required evidence, success criteria, and output contract.
+  Keep examples only when they encode a product requirement or fix a measured
+  failure.
+- Treat model, reasoning effort, endpoint, tools, caching, and multimodal detail
+  as separate compatibility decisions. Never replace model names globally.
+- Preserve the workload role when migrating models: flagship, balanced, and
+  high-volume routes can require different targets. Keep historical examples,
+  fixtures, tokenizer mappings, provider compatibility cases, and intentional
+  fallbacks unchanged unless the task explicitly includes them.
+- Prefer the Responses API for new OpenAI reasoning, tool-calling, and
+  multi-turn behavior. When retaining Chat Completions, verify its model/tool
+  compatibility rather than silently changing reasoning or removing tools.
+- Change one prompt concern at a time and validate it against representative
+  tasks. Compare task success and required evidence first, then tokens, latency,
+  and cost; do not accept a shorter or cheaper result that fails the output
+  contract.
+- Keep stable reusable prompt prefixes free of request-specific values. Measure
+  cache behavior before adopting explicit cache controls or model-specific
+  request fields.
 
 ## Definition of Done
 

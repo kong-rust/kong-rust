@@ -53,6 +53,31 @@ into broader repository permissions.
 6. Put new repeatable agent workflows in `.agents/skills`, following the Agent
    Skills format.
 
+## GPT-5.6-Sol Prompting Posture
+
+The root `AGENTS.md` is intentionally model-aware but not model-pinned. Model
+selection and reasoning effort remain personal or task-level settings rather
+than committed project defaults. This avoids forcing a flagship model onto
+latency-sensitive work and keeps the repository usable across Codex surfaces.
+
+Project guidance follows the GPT-5.6 prompting recommendations:
+
+- instructions are stated once and organized around repository facts,
+  constraints, authorization boundaries, verification, and completion;
+- change requests authorize safe in-scope edits and non-destructive checks,
+  while review and diagnosis requests remain read-only;
+- prompts should specify outcomes, evidence, success criteria, and output
+  contracts instead of asking the model to “think harder”;
+- prompt and model migrations must preserve endpoint, tool, reasoning, caching,
+  multimodal, latency, and cost behavior until representative tests justify a
+  deliberate change;
+- optional GPT-5.6 features are adopted independently, not bundled into a model
+  string upgrade.
+
+For AI Gateway examples, older model names may remain intentionally as
+compatibility demonstrations, fixtures, tokenizer mappings, or routing cases.
+Do not bulk-replace them with `gpt-5.6-sol`.
+
 ## Retired Legacy Tooling
 
 The repository-local `.spec-workflow/`, `.claude/`, `.gstack/`, and `.omc/`
