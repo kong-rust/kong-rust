@@ -13,7 +13,6 @@ instructions are in [`AGENTS.md`](../AGENTS.md).
 | gstack planning commands | Codex Plan mode | Use Plan mode for ambiguous or high-risk work. |
 | gstack review/QA commands | Codex review plus repository tests | Follow the verification matrix in `AGENTS.md`. |
 | gstack reusable workflows | `.agents/skills/<name>/SKILL.md` | Rewrite only workflows the project repeatedly needs. Do not copy generated gstack files. |
-| `docs/superpowers` specs and plans | `docs/design.md`, `docs/requirements.md`, `docs/tasks.md`, and implementation logs | Unique architecture and status were migrated; superseded plans were removed. |
 | `.claude/worktrees/*` | Normal Git/Codex worktrees | Removed as generated legacy state, not retained as project source. |
 
 ## Why gstack Was Not Copied
@@ -80,14 +79,12 @@ Do not bulk-replace them with `gpt-5.6-sol`.
 
 ## Retired Legacy Tooling
 
-The repository-local `.spec-workflow/`, `.claude/`, `.gstack/`, and `.omc/`
-trees, together with the superseded `docs/superpowers/` plan tree, were removed
-after their relevant guidance was migrated. They are no longer treated as
-active tooling, compatibility surfaces, or ignored local state.
+The repository-local `.spec-workflow/`, `.claude/`, and `.gstack/` trees were
+removed after their relevant guidance was migrated. They are no longer treated
+as active tooling, compatibility surfaces, or ignored local state.
 
-Current `.omx/` runtime state remains ignored and excluded from the Docker build
-context. `.codex/` and `.agents/` are deliberately not ignored because they may
-contain reviewable team configuration and repository skills.
+`.codex/` and `.agents/` are deliberately not ignored because they may contain
+reviewable team configuration and repository skills.
 
 ## Intentionally Retained Claude References
 

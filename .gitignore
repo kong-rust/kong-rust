@@ -56,14 +56,7 @@ kong-manager/node_modules/
 kong-manager/dist/
 kong-manager/bundle-analyzer/
 
-# ========================
-# AI 工具
-# ========================
-.omx/
-
 # 已迁移到 Codex，禁止重新提交旧智能体工作流状态
 .spec-workflow/
 .claude/
-.omc/
 .gstack/
-docs/superpowers/

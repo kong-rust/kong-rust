@@ -11,9 +11,6 @@ target/
 *.swp
 *.swo
 
-# AI 工具运行时
-.omx/
-
 # Kong Manager 前端：排除构建产物和依赖，源码在 Docker 内构建
 kong-manager/node_modules/
 kong-manager/dist/
