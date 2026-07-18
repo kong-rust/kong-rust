@@ -15,6 +15,7 @@ import {
   endpointModelGroup,
   endpointPath,
   endpointTags,
+  maxModelWeight,
   normalizeSlug,
   providerAuthConfig,
   providerEndpointOrigin,
@@ -178,12 +179,16 @@ const validateDraft = (draft: EndpointDraft) => {
 
   const totalWeight = draft.models.reduce((sum, model) => sum + Number(model.weight), 0)
 
-  if (draft.models.some(model => !Number.isInteger(Number(model.weight)) || Number(model.weight) < 0)) {
-    throw new Error('Traffic percentages must be whole numbers of zero or greater')
+  if (draft.models.some(model => (
+    !Number.isInteger(Number(model.weight))
+    || Number(model.weight) < 0
+    || Number(model.weight) > maxModelWeight
+  ))) {
+    throw new Error(`Model weights must be whole numbers between 0 and ${maxModelWeight}`)
   }
 
-  if (totalWeight !== 100) {
-    throw new Error('Traffic percentages must add up to 100%')
+  if (totalWeight <= 0) {
+    throw new Error('At least one model weight must be greater than zero')
   }
 
   return slug

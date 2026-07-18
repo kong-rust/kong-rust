@@ -191,7 +191,7 @@
         >
           <span>{{ providerName(endpoint, model.provider_id) }}</span>
           <strong>{{ model.model_name }}</strong>
-          <em>{{ model.weight }}%</em>
+          <em>{{ t('Weight') }} {{ model.weight }} · {{ trafficShare(endpoint, model.weight) }}%</em>
         </div>
         <p v-if="endpoint.models.length === 0">
           {{ t('No models are attached. Repair this endpoint in Advanced Models.') }}
@@ -298,6 +298,12 @@ const modelCountLabel = computed(() => (
     ? `${draft.models.length} 个模型`
     : `${draft.models.length} model${draft.models.length === 1 ? '' : 's'}`
 ))
+
+const trafficShare = (endpoint: AiEndpoint, weight: number) => {
+  const totalWeight = endpoint.models.reduce((sum, model) => sum + model.weight, 0)
+
+  return totalWeight > 0 ? Math.round(weight / totalWeight * 100) : 0
+}
 
 const replaceDraft = (value: EndpointDraft) => {
   draft.id = value.id

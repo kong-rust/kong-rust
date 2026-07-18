@@ -238,6 +238,7 @@ fn validate_integer_fields_ext(table_name: &str, body: &Value, check_required: b
         "services" => &["port", "retries", "connect_timeout", "write_timeout", "read_timeout", "tls_verify_depth"],
         "upstreams" => &["slots"],
         "targets" => &["weight"],
+        "ai_models" => &["priority", "weight", "max_tokens", "max_input_tokens"],
         _ => return None,
     };
     if let Some(obj) = body.as_object() {
@@ -245,6 +246,31 @@ fn validate_integer_fields_ext(table_name: &str, body: &Value, check_required: b
         let mut fields = serde_json::Map::new();
         for &field in int_fields {
             if let Some(val) = obj.get(field) {
+                if table_name == "ai_models" && field == "weight" {
+                    match val.as_i64() {
+                        Some(weight)
+                            if (0..=i64::from(kong_ai::models::MAX_MODEL_WEIGHT))
+                                .contains(&weight) => {}
+                        Some(_) => {
+                            violations.push(format!(
+                                "weight: value should be between 0 and {}",
+                                kong_ai::models::MAX_MODEL_WEIGHT
+                            ));
+                            fields.insert(
+                                field.to_string(),
+                                json!(format!(
+                                    "value should be between 0 and {}",
+                                    kong_ai::models::MAX_MODEL_WEIGHT
+                                )),
+                            );
+                        }
+                        None => {
+                            violations.push("weight: expected an integer".to_string());
+                            fields.insert(field.to_string(), json!("expected an integer"));
+                        }
+                    }
+                    continue;
+                }
                 if val.is_string() {
                     violations.push(format!("{}: expected an integer", field));
                     fields.insert(field.to_string(), json!("expected an integer"));

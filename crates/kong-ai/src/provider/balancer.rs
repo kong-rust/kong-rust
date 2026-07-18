@@ -1,7 +1,7 @@
-//! Model Group 负载均衡器 — 加权 round-robin + 优先级 fallback + 冷却机制
-//! Weighted round-robin load balancer with priority-based fallback and cooldown
+//! Model Group 负载均衡器 — 交错加权轮转 + 优先级 fallback + 冷却机制
 
 use crate::models::{AiModel, AiProviderConfig};
+use crate::provider::weighted::weighted_round_robin_index;
 use kong_core::error::{KongError, Result};
 use uuid::Uuid;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -61,7 +61,7 @@ struct ModelEntry {
 ///
 /// Model Group load balancer.
 /// Models sharing the same name form a group.
-/// Within a priority tier: weighted round-robin.
+/// Within a priority tier: interleaved weighted round-robin.
 /// Across priority tiers: highest priority first, fallback on exhaustion.
 pub struct ModelGroupBalancer {
     /// 所有模型条目，按 priority 降序排列以方便分组
@@ -111,7 +111,7 @@ impl ModelGroupBalancer {
     /// 2. 从最高 priority 组开始，过滤:
     ///    - enabled 且未冷却
     ///    - prompt_tokens 未指定 OR model.max_input_tokens 未指定 OR prompt_tokens <= max_input_tokens
-    /// 3. 在可用组内按 weight 加权 round-robin
+    /// 3. 在可用组内按 weight 交错加权轮转
     /// 4. 该组全不可用（含被 token 阈值过滤）→ fallback 到下一 priority 组
     /// 5. 全组不可用 → 返回 Err
     ///
@@ -151,29 +151,23 @@ impl ModelGroupBalancer {
                 continue;
             }
 
-            // 计算加权总量 — compute total weight for this tier
-            let total_weight: i32 = candidates.iter().map(|e| e.model.weight).sum();
-            if total_weight <= 0 {
+            let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+            let weights: Vec<u32> = candidates
+                .iter()
+                .map(|entry| entry.model.weight.max(0) as u32)
+                .collect();
+
+            if weights.iter().all(|weight| *weight == 0) {
                 // 权重全为 0 时退化为简单轮转 — degenerate to simple round-robin on zero weights
-                let idx = self.counter.fetch_add(1, Ordering::Relaxed) as usize % candidates.len();
+                let idx = sequence as usize % candidates.len();
                 let entry = candidates[idx];
                 return Ok((&entry.model, &entry.provider_config));
             }
 
-            // 加权 round-robin — weighted round-robin
-            // 在 u64 域取模后转 i32，避免 u64 → i32 截断导致溢出 panic
-            let position = (self.counter.fetch_add(1, Ordering::Relaxed)
-                % total_weight as u64) as i32;
-            let mut cumulative: i32 = 0;
-            for entry in &candidates {
-                cumulative += entry.model.weight;
-                if position < cumulative {
-                    return Ok((&entry.model, &entry.provider_config));
-                }
-            }
-
-            // 理论上不会到这里（浮点/整数溢出保险）— should never reach here
-            let entry = candidates.last().unwrap();
+            // 交错加权轮转使短请求窗口也能体现比例，例如 50:50 会直接交替。
+            let index = weighted_round_robin_index(&weights, sequence)
+                .expect("positive model weights must produce a selection");
+            let entry = candidates[index];
             return Ok((&entry.model, &entry.provider_config));
         }
 

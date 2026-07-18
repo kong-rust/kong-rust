@@ -393,7 +393,7 @@
   - Provider 凭据、模型参数和插件选项全部使用结构化控件；常规创建、编辑流程不提供可编辑 JSON
   - 复用现有 Provider、Model、Service、Route 和 Plugin Admin API，不新增承担运行时代理职责的 Endpoint 实体
   - 发布器负责受控 tag、资源所有权、顺序创建和逆序回滚；不得删除复用或存在共享歧义的资源
-  - 首版支持 OpenAI-compatible Chat、单模型和百分比分流；跨 Provider 故障切换待运行时失败回报、重试和健康 fallback 完成后开放
+  - 首版支持 OpenAI-compatible Chat、单模型和相对权重分流；单模型权重最大 10000、总权重不限，运行时使用交错加权轮转；跨 Provider 故障切换待运行时失败回报、重试和健康 fallback 完成后开放
   - 发布成功后提供完整调用地址、真实代理请求测试台和 curl 示例
   - AI Gateway 是左侧第一个菜单，Overview 紧随其后；Manager 所有路由页面共用顶部中英文切换，首次访问按浏览器语言选择，用户选择持久化
   - 品牌更新为 Kong Rust Manager，GitHub 入口指向本项目，移除 Manager 中的 Kong Konnect 推广组件、文案和素材

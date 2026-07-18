@@ -220,8 +220,8 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 1. 当启用 `ai-proxy` 时，系统应支持 `openai`、`anthropic`、`gemini` 和 `openai_compat` Provider，并完成非流式响应、SSE 流式响应及 tool call 的协议转换
 2. 当客户端使用 OpenAI Chat Completions 或 Anthropic Messages 格式时，系统应将请求转换为目标 Provider 格式，并将响应转换回客户端所选协议
 3. 当 `route_type=llm/v1/responses` 时，OpenAI Provider 应透传 Responses API；其他已支持 Provider 应通过内部 Chat 格式完成降级转换，并返回兼容的非流式或流式 Responses 结果
-4. 当多个同名 AI Model 组成模型组时，系统应按优先级选择、在同优先级内按权重轮转，并在模型被禁用或超过 `max_input_tokens` 时回退到下一优先级
-5. 当配置 `model_routes` 时，系统应按声明顺序匹配模型名正则，并在命中的目标间按权重选择 Provider 和实际模型
+4. 当多个同名 AI Model 组成模型组时，系统应按优先级选择、在同优先级内交错加权轮转，并在模型被禁用或超过 `max_input_tokens` 时回退到下一优先级；单模型权重范围为 `0..=10000`，模型组总权重不要求等于 100
+5. 当配置 `model_routes` 时，系统应按声明顺序匹配模型名正则，并在命中的目标间交错加权轮转选择 Provider 和实际模型；单目标权重最大为 10000，目标总权重不设固定上限
 6. 当调用 `/ai-providers`、`/ai-models`、`/ai-model-groups` 和 `/ai-virtual-keys` 端点时，系统应提供当前定义的管理操作；Provider 凭据不得在读取响应中明文返回，Virtual Key 原文仅在创建或轮换成功时返回一次
 7. 当启用 AI Tokenizer Registry 时，系统应按 Provider/模型选择远端计数、Hugging Face tokenizer、tiktoken 或字符估算策略，并在远端失败、超时或本地 tokenizer 尚不可用时安全降级
 8. 当启用 `ai-rate-limit` 时，系统应支持进程内固定窗口的 RPM/TPM 限流，并可按 global 或 route 维度计数；TPM 应先预扣估算值，再在日志阶段按 Provider 返回的实际用量修正

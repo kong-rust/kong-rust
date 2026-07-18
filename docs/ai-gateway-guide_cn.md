@@ -465,7 +465,7 @@ curl -X POST http://localhost:8001/ai-models \
     \"weight\": 90
   }"
 
-# AI Model B — 备份（priority=2，低权重）
+# AI Model B — 同优先级分流目标（priority=1，低权重）
 ANTHROPIC_ID="<anthropic provider id>"
 curl -X POST http://localhost:8001/ai-models \
   -H 'Content-Type: application/json' \
@@ -473,7 +473,7 @@ curl -X POST http://localhost:8001/ai-models \
     \"name\": \"gpt4-tier\",
     \"provider_id\": \"${ANTHROPIC_ID}\",
     \"model_name\": \"claude-3-5-sonnet-20241022\",
-    \"priority\": 2,
+    \"priority\": 1,
     \"weight\": 10
   }"
 ```
@@ -487,7 +487,9 @@ curl -X POST http://localhost:8001/ai-models \
 }
 ```
 
-网关将按 `priority` 选择最优 Provider，同 priority 内按 `weight` 加权路由。
+网关将按 `priority` 选择最优 Provider，同 priority 内按 `weight` 交错加权轮转。
+`weight` 范围为 `0..=10000`，各模型权重总和无需等于 100；权重只表示相对比例。
+如果需要主备而非分流，请为备份模型设置更低的 `priority`。
 
 ### 查看 Model Group
 
@@ -711,8 +713,8 @@ ai-proxy 支持通过 `model_routes` 配置实现 AI 网关级别的智能路由
 ```
 
 - **`pattern`**：正则表达式，匹配客户端请求体中的 `model` 字段。按规则顺序匹配，第一条命中即生效。
-- **`targets`**：匹配后的候选目标列表。多个 target 时按 `weight` 加权轮询选择。
-- **`weight`**：加权值，默认 `1`。同规则内多个 target 的 weight 决定流量分配比例。
+- **`targets`**：匹配后的候选目标列表。多个 target 时按 `weight` 交错加权轮转。
+- **`weight`**：加权值，默认 `1`，单项最大 `10000`。同规则内多个 target 的 weight 决定相对流量比例，总和无需等于 100。
 
 > **注意**：配置了 `model_routes` 后，`provider` 字段可省略。路由结果直接决定使用哪个 provider。
 

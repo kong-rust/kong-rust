@@ -18,6 +18,53 @@ fn make_chat_body() -> String {
     .to_string()
 }
 
+#[tokio::test]
+async fn test_model_routes_weighted_counter_is_retained_across_requests() {
+    let plugin = AiProxyPlugin::new();
+    let route_id = uuid::Uuid::new_v4();
+    let config = PluginConfig {
+        name: "ai-proxy".to_string(),
+        config: json!({
+            "model_source": "request",
+            "model_routes": [{
+                "pattern": "^gpt-4",
+                "targets": [
+                    {
+                        "provider_type": "openai_compat",
+                        "model_name": "model-a",
+                        "endpoint_url": "http://127.0.0.1:31001",
+                        "weight": 1
+                    },
+                    {
+                        "provider_type": "openai_compat",
+                        "model_name": "model-b",
+                        "endpoint_url": "http://127.0.0.1:31002",
+                        "weight": 1
+                    }
+                ]
+            }]
+        }),
+    };
+
+    let mut selected = Vec::new();
+    for _ in 0..2 {
+        let mut ctx = RequestCtx::new();
+        ctx.route_id = Some(route_id);
+        ctx.request_body = Some(make_chat_body());
+        plugin.access(&config, &mut ctx).await.unwrap();
+        selected.push(
+            ctx.extensions
+                .get::<AiRequestState>()
+                .unwrap()
+                .model
+                .model_name
+                .clone(),
+        );
+    }
+
+    assert_eq!(selected, vec!["model-a", "model-b"]);
+}
+
 // ============ 全字段配置 ============
 
 #[tokio::test]

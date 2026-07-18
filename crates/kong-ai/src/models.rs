@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use kong_core::traits::Entity;
 
+/// 单个 AI 模型允许配置的最大权重。
+pub const MAX_MODEL_WEIGHT: i32 = 10_000;
+
 /// AI Provider 配置（对应 ai_providers 表）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]

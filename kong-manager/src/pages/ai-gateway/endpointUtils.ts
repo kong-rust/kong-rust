@@ -8,6 +8,7 @@ import type {
 export const endpointManagedTag = 'kr-ai-endpoint-v1'
 export const endpointIdTagPrefix = 'kr-ai-endpoint:'
 export const endpointNameTagPrefix = 'kr-ai-name:'
+export const maxModelWeight = 10_000
 
 export const providerLabels: Record<ProviderType, string> = {
   openai: 'OpenAI',

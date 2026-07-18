@@ -45,7 +45,7 @@ fn make_balancer(specs: Vec<(Uuid, i32, i32, bool)>) -> ModelGroupBalancer {
 
 // ============ 测试用例 — test cases ============
 
-/// 加权 round-robin 分布验证
+/// 交错加权轮转分布验证
 /// 3 个 model，权重 80/10/10，1000 次 select，统计分布 ±5%
 #[test]
 fn test_balancer_weighted_round_robin() {
@@ -87,6 +87,46 @@ fn test_balancer_weighted_round_robin() {
         "model_c should be ~10%, got {}/{} (tolerance ±{})",
         count_c, n, tolerance
     );
+}
+
+/// 等权重模型应从第一个请求开始交替，而不是连续分块。
+#[test]
+fn test_balancer_equal_weights_interleave_immediately() {
+    let id_a = Uuid::from_u128(1);
+    let id_b = Uuid::from_u128(2);
+    let balancer = make_balancer(vec![
+        (id_a, 10, 50, true),
+        (id_b, 10, 50, true),
+    ]);
+
+    let selected: Vec<_> = (0..6)
+        .map(|_| balancer.select().unwrap().0.id)
+        .collect();
+
+    assert_eq!(selected, vec![id_a, id_b, id_a, id_b, id_a, id_b]);
+}
+
+/// 总权重不要求等于 100，单项大权重仍按比例精确轮转。
+#[test]
+fn test_balancer_weight_total_is_unrestricted() {
+    let id_a = Uuid::from_u128(1);
+    let id_b = Uuid::from_u128(2);
+    let balancer = make_balancer(vec![
+        (id_a, 10, 10_000, true),
+        (id_b, 10, 5_000, true),
+    ]);
+
+    let mut count_a = 0;
+    let mut count_b = 0;
+    for _ in 0..6 {
+        match balancer.select().unwrap().0.id {
+            id if id == id_a => count_a += 1,
+            id if id == id_b => count_b += 1,
+            _ => unreachable!(),
+        }
+    }
+
+    assert_eq!((count_a, count_b), (4, 2));
 }
 
 /// 优先级 fallback：高优先级全部不可用时自动选低优先级

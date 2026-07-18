@@ -345,6 +345,42 @@ fn create_test_app_with_data() -> axum::Router {
 // ========== Special endpoint tests — 特殊端点测试 ==========
 
 #[tokio::test]
+async fn test_ai_model_weight_must_be_between_zero_and_10000() {
+    for invalid_weight in [json!(-1), json!(10_001), json!(1.5)] {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/ai-models")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "weighted-group",
+                            "provider_id": Uuid::new_v4(),
+                            "model_name": "test-model",
+                            "priority": 0,
+                            "weight": invalid_weight,
+                            "config": {},
+                            "enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let response_body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(response_body["fields"]["weight"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn test_root_info() {
     let app = create_test_app();
 

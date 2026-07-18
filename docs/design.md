@@ -1062,10 +1062,10 @@ Provider 删除会级联删除其模型；Consumer 删除只会清空 virtual ke
 
 `ai-proxy` 按以下顺序解析上游，命中后不再继续：
 
-1. `model_routes`：第一条匹配请求模型名的正则规则生效，在规则的 targets 内按权重轮转。
+1. `model_routes`：第一条匹配请求模型名的正则规则生效，在规则的 targets 内交错加权轮转。
 2. 显式数据库 model group：非空 `config.model_group` 会跳过所有内联 provider 字段，强制由服务端 AI Model / AI Provider 实体解析。
 3. 插件内联 provider：支持旧版 kong-rust 的 `config.provider`，也支持 Kong 风格的 `config.model.provider` + `config.auth`。
-4. 数据库回退：没有内联 provider 时，从旧字符串 `config.model` 或 `model_source=request` 的请求 `model` 读取 group name。`ModelGroupResolver` 按 group name 加载启用的 model/provider，缓存 2 秒；先选较高 `priority`，同一档按 `weight` 轮转，并用 provider 无关的预路由 prompt 估值与 `max_input_tokens` 过滤无法容纳请求的候选。Admin schema 将 `config.model` 保留为 Kong 官方 record，页面和新配置统一使用 `model_group`。
+4. 数据库回退：没有内联 provider 时，从旧字符串 `config.model` 或 `model_source=request` 的请求 `model` 读取 group name。`ModelGroupResolver` 按 group name 加载启用的 model/provider，缓存 2 秒；先选较高 `priority`，同一档按 `weight` 交错轮转，并用 provider 无关的预路由 prompt 估值与 `max_input_tokens` 过滤无法容纳请求的候选。单模型权重范围为 `0..=10000`，总权重不要求等于 100。Admin schema 将 `config.model` 保留为 Kong 官方 record，页面和新配置统一使用 `model_group`。
 
 数据库 resolver 当前只读取 `ws_id IS NULL` 的全局 AI 实体。`AiDriver` 是 provider 与代理生命周期的稳定边界：
 
@@ -1205,7 +1205,7 @@ Endpoint 列表卡片只突出用户决策所需的信息：名称、方法和�
    - 可以添加多个模型，并清楚显示每个模型对应的 Provider 和真实模型名。
 3. **流量策略**
    - 单模型为默认模式，无额外配置。
-   - 多模型首版支持同一优先级内的百分比分流；百分比控件自动保证合计为 100%。
+   - 多模型首版支持同一优先级内按相对权重分流；单项最大 10000，总权重不设固定值。
    - “故障时切换备用模型”必须等 `ai-proxy` 的跨 Provider 失败回报、重试和健康 fallback 完整接通后才能开放，不能仅通过设置 `priority` 在 UI 中制造已支持的假象。
 4. **发布与验证**
    - 发布前以人类可读摘要展示入口、模型和流量比例。
@@ -1213,7 +1213,7 @@ Endpoint 列表卡片只突出用户决策所需的信息：名称、方法和�
    - 发布成功后直接显示完整 Endpoint、复制按钮和内置请求测试台。
 
 页面保持单页，将接口信息、模型选择、流量策略和发布摘要连续呈现。单模型时流量
-策略退化为只读的 100%，多模型时才要求调整比例；用户无需在步骤间维护临时资源。
+策略退化为只读的 100% 流量，多模型时才要求调整相对权重；用户无需在步骤间维护临时资源。
 
 ###### 页面零 JSON 原则
 
@@ -1227,7 +1227,7 @@ Endpoint 列表卡片只突出用户决策所需的信息：名称、方法和�
 | `endpoint_url` | 仅自定义兼容服务展示的 URL 输入框 |
 | `model_name` | 可搜索选择；无法发现模型时允许文本输入 |
 | `priority` | 在运行时支持后映射为主备模型拖动顺序 |
-| `weight` | 百分比分配控件，自动归一化为 100% |
+| `weight` | 相对权重数字控件，范围 `0..=10000`，总和不限 |
 | `response_streaming` | “允许流式响应”开关 |
 | `timeout` / `retries` | 带单位、范围和默认值的数字控件 |
 | `max_input_tokens` | “最大输入 Token”数字控件 |
@@ -1250,7 +1250,7 @@ Provider 凭据遵循以下规则：
 |------|----------|
 | `EndpointIdentityForm` | 名称、路径和最终调用地址预览 |
 | `ModelPoolBuilder` | 模型成员的增加、删除、Provider 绑定及原位新建连接 |
-| `TrafficPolicyEditor` | 单模型或百分比分流配置与总和约束 |
+| `TrafficPolicyEditor` | 单模型或相对权重分流配置与单项范围约束 |
 | `Endpoints` | 列表、编辑器和发布摘要的页面组合，不直接实现持久化 |
 | `useEndpointPublisher` | Endpoint 投影以及 Provider、Model、Service、Route、Plugin 的写入、更新、删除与失败回滚 |
 | `endpointUtils` | tag、名称编码、路径、Provider 认证和表单映射 |
@@ -1289,7 +1289,7 @@ Provider 凭据遵循以下规则：
 - 新用户无需预先进入 Providers、Models、Routes 或 Plugins 页面即可发布一个可调用的 OpenAI-compatible Chat Endpoint。
 - 创建主流程和服务商连接页面不存在可编辑 JSON。
 - 单 Provider、单模型的必填输入不超过名称、路径、服务商、API Key 和模型名。
-- 多模型百分比始终合计 100%，并正确映射为同名 model group 的权重。
+- 多模型使用 `0..=10000` 的相对权重，总和无需等于 100，并正确映射为同名 model group 的交错加权轮转。
 - 发布失败不会遗留本次新建的孤立资源，也不会删除复用资源。
 - Endpoint 列表能够区分正常、禁用和配置不完整状态。
 - 发布后可以在同一页面复制地址并完成一次真实代理请求。

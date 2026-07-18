@@ -8,6 +8,7 @@ pub mod openai;
 pub mod openai_compat;
 pub mod resolver;
 pub mod router;
+mod weighted;
 
 pub use balancer::ModelGroupBalancer;
 pub use resolver::ModelGroupResolver;

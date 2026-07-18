@@ -176,7 +176,7 @@ fn test_case_insensitive_with_flag() {
 #[test]
 fn test_weighted_routing_80_20_distribution() {
     // 同一 pattern 下两个 target：80% OpenAI / 20% Azure
-    // 加权轮询是确定性的，1000 次应精确 800/200
+    // 交错加权轮转是确定性的，1000 次应精确 800/200
     let router = ModelRouter::from_configs(&[rule(
         "^gpt-4",
         vec![
@@ -198,6 +198,48 @@ fn test_weighted_routing_80_20_distribution() {
     }
     assert_eq!(openai_count, 800, "OpenAI should get exactly 800/1000");
     assert_eq!(azure_count, 200, "Azure should get exactly 200/1000");
+}
+
+#[test]
+fn test_weighted_routing_interleaves_small_request_windows() {
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target("openai", "model-a", 80),
+            target("openai_compat", "model-b", 20),
+        ],
+    )])
+    .unwrap();
+
+    let selected: Vec<_> = (0..5)
+        .map(|_| router.resolve("gpt-4o").unwrap().model.model_name)
+        .collect();
+
+    assert_eq!(
+        selected,
+        vec!["model-a", "model-b", "model-a", "model-a", "model-a"]
+    );
+}
+
+#[test]
+fn test_weighted_routing_allows_total_above_100() {
+    let router = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![
+            target("openai", "model-a", 10_000),
+            target("openai_compat", "model-b", 5_000),
+        ],
+    )])
+    .unwrap();
+
+    let mut counts = std::collections::HashMap::new();
+    for _ in 0..6 {
+        let model = router.resolve("gpt-4o").unwrap().model.model_name;
+        *counts.entry(model).or_insert(0) += 1;
+    }
+
+    assert_eq!(counts["model-a"], 4);
+    assert_eq!(counts["model-b"], 2);
 }
 
 #[test]
@@ -314,6 +356,17 @@ fn test_empty_targets_returns_error() {
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(err_msg.contains("has no targets"));
+}
+
+#[test]
+fn test_target_weight_above_10000_returns_error() {
+    let result = ModelRouter::from_configs(&[rule(
+        "^gpt-4",
+        vec![target("openai", "gpt-4", 10_001)],
+    )]);
+
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(err_msg.contains("target weight above 10000"));
 }
 
 #[test]

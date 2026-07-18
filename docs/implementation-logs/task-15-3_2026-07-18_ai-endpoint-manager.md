@@ -12,7 +12,7 @@ OpenAI-compatible Chat Endpoint，无需理解 Service、Route、Plugin、Model 
   AI Endpoint 聚合列表。Endpoint 是现有 Provider、Model、Service、Route 和
   route-scoped `ai-proxy` Plugin 的投影，不新增运行时实体或第二份配置。
 - 单页表单分为接口信息、模型池、流量策略和发布摘要。Provider 类型、API Key、
-  自定义服务地址、真实模型名和流量百分比均使用结构化控件；Providers 和 Advanced
+  自定义服务地址、真实模型名和流量权重均使用结构化控件；Providers 和 Advanced
   Models 的常规 CRUD 也移除了 JSON 编辑器。
 - `useEndpointPublisher` 使用版本化 tag 识别资源所有权，按 Provider → Model →
   Service → Route → Plugin 的顺序创建，并在失败时逆序回滚。更新会替换受管 Model
@@ -32,6 +32,10 @@ OpenAI-compatible Chat Endpoint，无需理解 Service、Route、Plugin、Model 
   `/v1/chat/completions`；完整自定义路径保持不变。这样向导中填写
   `https://api.deepseek.com` 或本地 Ollama 根地址即可直接转发，不会请求上游 `/`
   而得到 404。
+- 模型流量策略不再要求权重总和等于 100。单模型权重限制为 `0..=10000`，
+  Model Group 和 `model_routes` 均使用交错加权轮转，避免 50:50 等配置在低流量时
+  先连续命中同一模型；`model_routes` 路由器按 Route 和配置缓存，使轮转状态跨请求
+  保留。Admin API 与 PostgreSQL 约束同步拒绝越界权重。
 
 ## 验证
 

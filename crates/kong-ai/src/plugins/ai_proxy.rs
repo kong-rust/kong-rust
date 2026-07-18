@@ -4,7 +4,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, warn};
 
@@ -292,6 +294,8 @@ impl AiProxyConfig {
 pub struct AiProxyPlugin {
     driver_registry: DriverRegistry,
     model_resolver: Option<Arc<ModelGroupResolver>>,
+    /// 按 Route 和配置缓存路由器，使加权轮转计数器跨请求保留。
+    model_routers: Mutex<HashMap<[u8; 32], Arc<ModelRouter>>>,
 }
 
 impl AiProxyPlugin {
@@ -300,6 +304,7 @@ impl AiProxyPlugin {
         Self {
             driver_registry: DriverRegistry::new(),
             model_resolver: None,
+            model_routers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -308,7 +313,43 @@ impl AiProxyPlugin {
         Self {
             driver_registry: DriverRegistry::new(),
             model_resolver: Some(model_resolver),
+            model_routers: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn model_router(
+        &self,
+        route_id: Option<uuid::Uuid>,
+        raw_config: &serde_json::Value,
+        routes: &[ModelRouteConfig],
+    ) -> Result<Arc<ModelRouter>> {
+        let mut hasher = Sha256::new();
+        if let Some(route_id) = route_id {
+            hasher.update(route_id.as_bytes());
+        }
+        hasher.update(
+            serde_json::to_vec(raw_config.get("model_routes").unwrap_or(&serde_json::Value::Null))
+                .map_err(|error| {
+                    KongError::InternalError(format!(
+                        "failed to fingerprint AI model routes: {error}"
+                    ))
+                })?,
+        );
+        let key: [u8; 32] = hasher.finalize().into();
+
+        let mut cache = self.model_routers.lock().unwrap();
+        if let Some(router) = cache.get(&key) {
+            return Ok(Arc::clone(router));
+        }
+
+        // 配置种类异常增多时清空旧项，避免长期运行下无界增长。
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+
+        let router = Arc::new(ModelRouter::from_configs(routes)?);
+        cache.insert(key, Arc::clone(&router));
+        Ok(router)
     }
 }
 
@@ -500,7 +541,7 @@ impl PluginHandler for AiProxyPlugin {
         let (driver, ai_model, provider_config) = if !cfg.model_routes.is_empty() {
             // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
             // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
-            let router = ModelRouter::from_configs(&cfg.model_routes)?;
+            let router = self.model_router(ctx.route_id, &config.config, &cfg.model_routes)?;
             let resolution = router.resolve(&model_name).ok_or_else(|| KongError::PluginError {
                 plugin_name: "ai-proxy".to_string(),
                 message: format!(

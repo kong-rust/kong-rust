@@ -464,7 +464,7 @@ curl -X POST http://localhost:8001/ai-models \
     \"weight\": 90
   }"
 
-# AI Model B — Backup (priority=2, low weight)
+# AI Model B — Same-tier traffic target (priority=1, low weight)
 ANTHROPIC_ID="<anthropic provider id>"
 curl -X POST http://localhost:8001/ai-models \
   -H 'Content-Type: application/json' \
@@ -472,7 +472,7 @@ curl -X POST http://localhost:8001/ai-models \
     \"name\": \"gpt4-tier\",
     \"provider_id\": \"${ANTHROPIC_ID}\",
     \"model_name\": \"claude-3-5-sonnet-20241022\",
-    \"priority\": 2,
+    \"priority\": 1,
     \"weight\": 10
   }"
 ```
@@ -486,7 +486,11 @@ Reference the logical name `gpt4-tier` in the ai-proxy plugin:
 }
 ```
 
-The gateway selects the best Provider by `priority`; within the same priority, traffic is distributed by `weight`.
+The gateway selects the best Provider by `priority`; within the same priority,
+traffic uses interleaved weighted round-robin. Each `weight` must be between
+`0` and `10000`, and the total does not need to equal 100 because weights are
+relative. For primary/backup behavior instead of traffic splitting, give the
+backup model a lower `priority`.
 
 ### View Model Groups
 
@@ -710,8 +714,8 @@ ai-proxy supports gateway-level intelligent routing via the `model_routes` confi
 ```
 
 - **`pattern`**: Regex that matches the `model` field in the client request body. Rules are matched in order; the first match wins.
-- **`targets`**: List of candidate targets after a match. When multiple targets are present, one is selected by weighted round-robin based on `weight`.
-- **`weight`**: Weight value, default `1`. The weights of multiple targets within the same rule determine the traffic distribution ratio.
+- **`targets`**: List of candidate targets after a match. Multiple targets use interleaved weighted round-robin based on `weight`.
+- **`weight`**: Weight value, default `1`, maximum `10000`. Target weights determine the relative traffic ratio and do not need to add up to 100.
 
 > **Note**: When `model_routes` is configured, the `provider` field may be omitted. The routing result directly determines which provider to use.
 

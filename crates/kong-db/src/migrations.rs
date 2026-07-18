@@ -36,6 +36,10 @@ const CORE_MIGRATIONS: &[Migration] = &[
         name: "004_ai_model_max_input_tokens",
         sql: include_str!("../migrations/core/004_ai_model_max_input_tokens.sql"),
     },
+    Migration {
+        name: "005_ai_model_weight_limit",
+        sql: include_str!("../migrations/core/005_ai_model_weight_limit.sql"),
+    },
 ];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
@@ -344,6 +348,17 @@ mod tests {
         assert!(migration
             .sql
             .contains("ADD COLUMN max_input_tokens INTEGER"));
+        assert!(!migration.sql.contains("IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn ai_model_weight_limit_has_a_forward_migration() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "005_ai_model_weight_limit")
+            .expect("weight limit migration must be registered");
+
+        assert!(migration.sql.contains("CHECK (weight BETWEEN 0 AND 10000)"));
         assert!(!migration.sql.contains("IF NOT EXISTS"));
     }
 }

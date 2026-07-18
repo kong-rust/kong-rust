@@ -113,8 +113,10 @@
           <input
             id="ai-model-weight"
             v-model="form.weight"
+            max="10000"
             required
             min="0"
+            step="1"
             type="number"
           >
         </div>
@@ -638,6 +640,9 @@ const submitModel = async () => {
 
     if (priority === undefined || weight === undefined) {
       throw new Error('Priority and weight are required')
+    }
+    if (weight < 0 || weight > 10_000) {
+      throw new Error('Weight must be between 0 and 10000')
     }
 
     const body = omitUndefined({

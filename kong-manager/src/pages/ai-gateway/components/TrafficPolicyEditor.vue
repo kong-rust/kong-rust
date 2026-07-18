@@ -8,7 +8,7 @@
           {{ t('All requests go to this model. Add another model to split traffic.') }}
         </p>
         <p v-else>
-          {{ t('Choose the percentage sent to each model. The total must equal 100%.') }}
+          {{ t('Set a relative weight for each model. Each weight can be up to 10000.') }}
         </p>
       </div>
     </div>
@@ -33,17 +33,19 @@
         <span>{{ model.modelName || `Model ${index + 1}` }}</span>
         <input
           :aria-label="`Traffic for ${model.modelName || `Model ${index + 1}`}`"
-          max="100"
+          :max="maxModelWeight"
           min="0"
+          required
+          step="1"
           :value="model.weight"
           type="number"
           @input="updateWeight(index, $event)"
         >
-        <span>%</span>
+        <span>{{ t('Weight') }}</span>
       </label>
 
-      <div :class="['ai-endpoint-traffic-total', { invalid: total !== 100 }]">
-        {{ t('Total') }}: <strong>{{ total }}%</strong>
+      <div :class="['ai-endpoint-traffic-total', { invalid: invalidWeights }]">
+        {{ t('Total weight') }}: <strong>{{ total }}</strong>
       </div>
     </div>
   </section>
@@ -52,6 +54,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import type { EndpointModelDraft } from '../endpointTypes'
+import { maxModelWeight } from '../endpointUtils'
 import { useAiGatewayI18n } from '../useAiGatewayI18n'
 
 const props = defineProps<{
@@ -64,6 +67,14 @@ const emit = defineEmits<{
 const { t } = useAiGatewayI18n()
 
 const total = computed(() => props.models.reduce((sum, model) => sum + Number(model.weight), 0))
+const invalidWeights = computed(() => (
+  total.value <= 0
+  || props.models.some(model => (
+    !Number.isInteger(Number(model.weight))
+    || Number(model.weight) < 0
+    || Number(model.weight) > maxModelWeight
+  ))
+))
 
 watch(
   () => props.models.length,

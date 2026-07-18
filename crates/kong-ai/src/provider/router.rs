@@ -1,5 +1,4 @@
-//! Model Router — AI 网关智能模型路由（正则匹配 + 加权选择）
-//! AI Gateway intelligent model routing with regex pattern matching and weighted selection
+//! Model Router — AI 网关智能模型路由（正则匹配 + 交错加权轮转）
 //!
 //! 与 API 网关路由不同，这里路由的是「模型请求 → 具体 provider + model」：
 //! Unlike API gateway routing (URL → Service), this routes "model request → provider + model":
@@ -15,7 +14,8 @@ use uuid::Uuid;
 
 use kong_core::error::{KongError, Result};
 
-use crate::models::{AiModel, AiProviderConfig};
+use crate::models::{AiModel, AiProviderConfig, MAX_MODEL_WEIGHT};
+use crate::provider::weighted::weighted_round_robin_index;
 
 /// 路由规则中的单个模型目标 — a single model target within a routing rule
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -30,7 +30,7 @@ pub struct ModelTargetConfig {
     /// 认证配置 — authentication config (header_name, header_value, etc.)
     #[serde(default)]
     pub auth_config: serde_json::Value,
-    /// 权重（加权轮询）— weight for weighted round-robin
+    /// 权重（交错加权轮转）
     #[serde(default = "default_weight")]
     pub weight: u32,
 }
@@ -85,7 +85,7 @@ pub struct RouteResolution {
 /// 4. 返回 RouteResolution，直接决定上游连接目标
 pub struct ModelRouter {
     rules: Vec<CompiledRoute>,
-    /// 原子计数器（用于加权轮询）— atomic counter for weighted round-robin
+    /// 原子计数器（用于交错加权轮转）
     counter: AtomicU64,
 }
 
@@ -112,6 +112,19 @@ impl ModelRouter {
                     ),
                 });
             }
+            if cfg
+                .targets
+                .iter()
+                .any(|target| target.weight > MAX_MODEL_WEIGHT as u32)
+            {
+                return Err(KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!(
+                        "model route pattern '{}' has a target weight above {}",
+                        cfg.pattern, MAX_MODEL_WEIGHT
+                    ),
+                });
+            }
             let pattern = Regex::new(&cfg.pattern).map_err(|e| KongError::PluginError {
                 plugin_name: "ai-proxy".to_string(),
                 message: format!("invalid model route regex '{}': {}", cfg.pattern, e),
@@ -133,7 +146,7 @@ impl ModelRouter {
     ///
     /// 匹配逻辑 — matching logic:
     /// 1. 按顺序遍历规则，找到第一条 pattern 匹配的规则（first-match wins）
-    /// 2. 在该规则的 targets 中按权重加权轮询选择一个目标
+    /// 2. 在该规则的 targets 中按权重交错轮转选择一个目标
     /// 3. 构建 RouteResolution 返回
     /// 4. 无匹配 → 返回 None（fallback 到 inline provider 配置）
     pub fn resolve(&self, model_name: &str) -> Option<RouteResolution> {
@@ -144,25 +157,15 @@ impl ModelRouter {
             return Some(self.build_resolution(model_name, &rule.targets[0]));
         }
 
-        // 加权轮询选择 — weighted round-robin among targets
-        let total_weight: u64 = rule.targets.iter().map(|t| t.weight as u64).sum();
-        if total_weight == 0 {
+        let weights: Vec<u32> = rule.targets.iter().map(|target| target.weight).collect();
+        if weights.iter().all(|weight| *weight == 0) {
             return Some(self.build_resolution(model_name, &rule.targets[0]));
         }
 
-        let tick = self.counter.fetch_add(1, Ordering::Relaxed);
-        let slot = tick % total_weight;
-
-        let mut cumulative: u64 = 0;
-        for target in &rule.targets {
-            cumulative += target.weight as u64;
-            if slot < cumulative {
-                return Some(self.build_resolution(model_name, target));
-            }
-        }
-
-        // 理论上不会到这里 — should never reach here
-        Some(self.build_resolution(model_name, &rule.targets[0]))
+        let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+        let index = weighted_round_robin_index(&weights, sequence)
+            .expect("positive model route weights must produce a selection");
+        Some(self.build_resolution(model_name, &rule.targets[index]))
     }
 
     /// 从 target config 构建 RouteResolution — build resolution from target config
