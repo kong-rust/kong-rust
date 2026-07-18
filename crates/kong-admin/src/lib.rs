@@ -259,6 +259,7 @@ fn is_known_route(path: &str) -> bool {
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
         "/key-sets", "/keys",
         "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
+        "/ai-endpoint-test",
         "/clustering/data-planes", "/clustering/status",
         "/cache", "/debug/node/log-level", "/timers",
     ];
@@ -625,6 +626,8 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(handlers::ai_virtual_keys::delete_one),
         )
         .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
+        // Manager-only relay for testing a published, tag-managed AI Endpoint through the Proxy.
+        .route("/ai-endpoint-test", axum::routing::post(handlers::ai_endpoint_test::test_endpoint))
         // Clustering — 集群端点
         .route("/clustering/data-planes", get(handlers::clustering::list_data_planes))
         .route("/clustering/status", get(handlers::clustering::clustering_status))

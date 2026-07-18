@@ -1,18 +1,18 @@
 <template>
   <section class="not-found">
     <h2>404</h2>
-    <i18n-t
-      tag="p"
-      keypath="not-found.description"
-    >
-      <template #overview>
-        <router-link :to="{ name: 'overview' }">
-          return home
-        </router-link>
-      </template>
-    </i18n-t>
+    <p>{{ t('not-found.description') }}</p>
+    <router-link :to="{ name: 'overview' }">
+      {{ t('not-found.return-home') }}
+    </router-link>
   </section>
 </template>
+
+<script setup lang="ts">
+import { useI18n } from '@/composables/useI18n'
+
+const { t } = useI18n()
+</script>
 
 <style lang="scss" scoped>
 .not-found {

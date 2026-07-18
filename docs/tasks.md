@@ -18,13 +18,13 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| 15 | AI Gateway — 协议与管理面 | 2 | 2 | 0 |
+| 15 | AI Gateway — 协议与管理面 | 3 | 3 | 0 |
 | 16 | Admin API 补全 | 5 | 5 | 0 |
 | 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **86** | **81** | **5** |
+| **合计** | | **87** | **82** | **5** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -387,6 +387,21 @@
   - 修复 Pingora ResponseHeader 直接修改导致 preserved-case map 失配、代理响应序列化 panic 的问题
   - Playwright 覆盖页面 CRUD、Provider 依赖保护、密钥一次性展示/轮换，以及真实请求经 kong-rust 转发到本地 OpenAI-compatible mock
   - 文件：`crates/kong-ai/src/provider/resolver.rs`、`crates/kong-proxy/src/lib.rs`、`crates/kong-server/src/main.rs`、`kong-manager/src/pages/ai-gateway/`
+
+- [x] **15.3** 面向 AI Endpoint 的无 JSON 管理交互 `[R10]`
+  - 将默认入口从底层资源 CRUD 调整为 AI Endpoint 聚合视图，以单页渐进式表单完成接口信息、模型选择、流量策略、发布和验证
+  - Provider 凭据、模型参数和插件选项全部使用结构化控件；常规创建、编辑流程不提供可编辑 JSON
+  - 复用现有 Provider、Model、Service、Route 和 Plugin Admin API，不新增承担运行时代理职责的 Endpoint 实体
+  - 发布器负责受控 tag、资源所有权、顺序创建和逆序回滚；不得删除复用或存在共享歧义的资源
+  - 首版支持 OpenAI-compatible Chat、单模型和百分比分流；跨 Provider 故障切换待运行时失败回报、重试和健康 fallback 完成后开放
+  - 发布成功后提供完整调用地址、真实代理请求测试台和 curl 示例
+  - AI Gateway 是左侧第一个菜单，Overview 紧随其后；Manager 所有路由页面共用顶部中英文切换，首次访问按浏览器语言选择，用户选择持久化
+  - 品牌更新为 Kong Rust Manager，GitHub 入口指向本项目，移除 Manager 中的 Kong Konnect 推广组件、文案和素材
+  - 测试台通过受限 Admin relay 调用本机 Proxy，只接受带受控 tag 的 AI Endpoint 路径，避免浏览器跨端口 CORS 和任意 URL 转发
+  - OpenAI-compatible Provider 的服务根地址自动补齐 `/v1/chat/completions`，避免向导配置 DeepSeek、Ollama 等服务时把请求错误转发到 `/`
+  - Playwright 覆盖 Endpoint、Provider、Advanced Model、Virtual Key CRUD，真实代理与内置测试台、一次性密钥轮换、菜单顺序、双语默认/切换及页面零 JSON
+  - 设计：`docs/design.md` 10.6.1；实现记录：`docs/implementation-logs/task-15-3_2026-07-18_ai-endpoint-manager.md`
+  - 文件：`kong-manager/src/pages/ai-gateway/`、`crates/kong-admin/src/handlers/ai_endpoint_test.rs`
 
 ## 阶段 16：Admin API 补全
 

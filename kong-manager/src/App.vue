@@ -3,7 +3,18 @@
     :sidebar-top-items="sidebarItems"
   >
     <template #navbar-right>
-      <GithubStar url="https://github.com/kong/kong" />
+      <div class="navbar-actions">
+        <LanguageSwitcher />
+        <a
+          class="github-link"
+          href="https://github.com/kong-rust/kong-rust"
+          rel="noopener noreferrer"
+          target="_blank"
+        >
+          <GithubIcon :size="18" />
+          GitHub
+        </a>
+      </div>
     </template>
     <template #sidebar-header>
       <NavbarLogo />
@@ -18,90 +29,93 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { AppLayout, type SidebarPrimaryItem } from '@kong-ui-public/app-layout'
-import { GithubStar } from '@kong-ui-public/misc-widgets'
+import { GithubIcon } from '@kong/icons'
 import { useInfoStore } from '@/stores/info'
 import NavbarLogo from '@/components/NavbarLogo.vue'
+import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import MakeAWish from '@/components/MakeAWish.vue'
+import { useI18n } from '@/composables/useI18n'
 
 const route = useRoute()
 const infoStore = useInfoStore()
 const { isHybridMode } = storeToRefs(infoStore)
+const { t } = useI18n()
 
 const sidebarItems = computed<SidebarPrimaryItem[]>(() => [
   {
-    name: 'Overview',
+    name: t('navigation.ai-gateway'),
+    to: { name: 'ai-endpoint-list' },
+    key: 'AI Gateway',
+    active: route.meta?.entity === 'ai-gateway',
+  },
+  {
+    name: t('navigation.overview'),
     to: { name: 'overview' },
     key: 'Overview',
     active: route.name === 'overview',
   },
   {
-    name: 'Gateway Services',
+    name: t('navigation.services'),
     to: { name: 'service-list' },
     key: 'Gateway Services',
     active: route.meta?.entity === 'service',
   },
   {
-    name: 'Routes',
+    name: t('navigation.routes'),
     to: { name: 'route-list' },
     key: 'Routes',
     active: route.meta?.entity === 'route',
   },
   {
-    name: 'Consumers',
+    name: t('navigation.consumers'),
     to: { name: 'consumer-list' },
     key: 'Consumers',
     active: route.meta?.entity === 'consumer',
   },
   {
-    name: 'Plugins',
+    name: t('navigation.plugins'),
     to: { name: 'plugin-list' },
     key: 'Plugins',
     active: route.meta?.entity === 'plugin',
   },
   {
-    name: 'AI Gateway',
-    to: { name: 'ai-gateway-overview' },
-    key: 'AI Gateway',
-    active: route.meta?.entity === 'ai-gateway',
-  },
-  {
-    name: 'Upstreams',
+    name: t('navigation.upstreams'),
     to: { name: 'upstream-list' },
     key: 'Upstreams',
     active: route.meta?.entity === 'upstream',
   },
   {
-    name: 'Certificates',
+    name: t('navigation.certificates'),
     to: { name: 'certificate-list' },
     key: 'Certificates',
     active: route.meta?.entity === 'certificate',
   },
   {
-    name: 'CA Certificates',
+    name: t('navigation.ca-certificates'),
     to: { name: 'ca-certificate-list' },
     key: 'CA Certificates',
     active: route.meta?.entity === 'ca-certificate',
   },
   {
-    name: 'SNIs',
+    name: t('navigation.snis'),
     to: { name: 'sni-list' },
     key: 'SNIs',
     active: route.meta?.entity === 'sni',
   },
   {
-    name: 'Vaults',
+    name: t('navigation.vaults'),
     to: { name: 'vault-list' },
     key: 'Vaults',
     active: route.meta?.entity === 'vault',
   },
   {
-    name: 'Keys',
+    name: t('navigation.keys'),
     to: { name: 'key-list' },
     key: 'Keys',
     active: route.meta?.entity === 'key',
   },
   {
-    name: 'Key Sets',
+    name: t('navigation.key-sets'),
     to: { name: 'key-set-list' },
     key: 'Key Sets',
     active: route.meta?.entity === 'key-set',
@@ -122,10 +136,23 @@ const sidebarItems = computed<SidebarPrimaryItem[]>(() => [
 </script>
 
 <style scoped lang="scss">
-.app-title {
-  color: #fff;
-  margin: 0;
-  font-size: 20px;
+.navbar-actions {
+  align-items: center;
+  display: flex;
+}
+
+.github-link {
+  align-items: center;
+  color: $kui-color-text-inverse;
+  display: inline-flex;
+  font-size: $kui-font-size-30;
+  font-weight: $kui-font-weight-semibold;
+  gap: $kui-space-30;
+  text-decoration: none;
+
+  &:hover {
+    color: $kui-color-text-primary-weakest;
+  }
 }
 
 :deep(.kong-ui-app-layout-content-inner) {

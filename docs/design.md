@@ -1088,6 +1088,7 @@ OpenAI Chat Completions 是跨 provider 的内部规范格式：
 
 - OpenAI 客户端请求直接解析为 `ChatRequest`；Anthropic Messages 先由 `AnthropicCodec` 转为 `ChatRequest`。
 - OpenAI、Anthropic、Gemini 和 OpenAI-compatible driver 将规范请求转成各自上游格式，并将响应还原成规范 `ChatResponse`。
+- OpenAI-compatible Provider 可以填写完整 Chat Completions URL，也可以只填写服务根地址；根地址会按 OpenAI 兼容约定补齐 `/v1/chat/completions`，显式路径保持不变。
 - `route_type=llm/v1/responses` 且上游为 OpenAI 时，请求和响应走 `/v1/responses` pass-through；其他 provider 先降级到 Chat Completions，再把响应升级为 Responses API 形态。
 - Responses 翻译路径拒绝 `background=true`，只保留 function tools；被剥离的内置 tool 类型通过非流式响应的 `metadata.warnings.unsupported_tools` 返回。
 
@@ -1140,14 +1141,159 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 
 #### 10.6 Kong Manager 管理页面
 
-Kong Manager 在 `/ai-gateway` 下提供 Overview、Providers、Models 和 Virtual Keys 页面：
+Kong Manager 主菜单将 **AI Gateway** 作为左侧第一个入口，Overview 紧随其后。
+`/ai-gateway` 默认展示
+AI Endpoint 聚合视图，二级导航提供 AI 接口、服务商连接、高级模型和虚拟密钥：
 
-- Provider 页面管理类型、端点、认证 JSON、默认模型、启用状态和标签；编辑时不会把 Admin API 返回的遮蔽凭据写回，除非用户明确提供新的认证 JSON。
-- Model 页面管理 model group、provider 绑定、真实上游模型名、优先级、权重、成本和 token 上限。
-- “Create Route” 会按顺序创建 Service、Route 和 route-scoped `ai-proxy` 插件；插件只保存 model group name，运行时再通过共享 DAO 读取 provider 和凭据。中途失败会逆序清理本次已创建的资源。
-- Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并明确标注它当前只是管理元数据，尚未接入代理认证和配额执行。
+- AI 接口页面以单页表单编排 Provider、Model、Service、Route 和 route-scoped
+  `ai-proxy` Plugin，提供完整地址、状态、模型流量摘要、配置、删除和测试操作。
+- Provider 和 Model 页面使用结构化字段管理类型、地址、凭据、模型、权重、成本和
+  token 上限；常规创建和编辑页面不显示可编辑 JSON。
+- Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并明确标注
+  它当前只是管理元数据，尚未接入代理认证和配额执行。
+- Manager 顶部提供全局 English / 简体中文切换，侧栏、Overview、实体页面标题、
+  提示、详情页签和 AI Gateway 共用同一语言状态。没有保存过选择时，
+  `navigator.language` 以 `zh` 开头则默认中文，否则默认英文；用户选择以
+  `kong-rust-manager-locale` 保存在 local storage，并同步更新文档 `lang`。
+- 左上角品牌统一为 **Kong Rust Manager**，右上角 GitHub 入口指向
+  `https://github.com/kong-rust/kong-rust`。独立 Manager 不展示 Kong Konnect
+  推广卡片、文案或素材。
 
-页面创建的代理路由只覆盖 `llm/v1/chat`。Responses、Anthropic 客户端协议、全局/Service 级插件及高级策略仍通过 Admin API 配置。删除 Model 不会自动删除由页面创建的 Service、Route 或 Plugin；这些是独立的 Kong 资源。
+页面创建的代理路由只覆盖 `llm/v1/chat`。Responses、Anthropic 客户端协议、
+全局/Service 级插件及高级策略仍通过 Admin API 配置。
+
+##### 10.6.1 AI Endpoint 交互
+
+默认交互以用户任务为中心，只回答“从哪里调用、转发到哪个模型、如何验证”，底层
+资源仍保持独立。
+
+页面引入 **AI Endpoint** 作为只读聚合视图和交互概念，不新增承担代理职责的运行时实体：
+
+```
+AI Endpoint
+├── 入口身份与路径 ───────────────► Service + Route
+├── 模型池 ──────────────────────► 同名 AI Model（model group）
+├── 服务商连接与凭据 ────────────► AI Provider
+└── 协议转换与转发策略 ──────────► route-scoped ai-proxy Plugin
+```
+
+AI Endpoint 页面通过现有 Admin API 识别和编排这些资源。底层资源继续作为事实来源，用户仍可在“高级资源”中单独管理；聚合视图不得复制 Provider 凭据、模型配置或 Route 配置。
+
+###### 信息架构
+
+AI Gateway 默认导航调整为：
+
+1. **AI 接口**：默认入口，列出已发布 Endpoint，并提供创建、测试、复制地址和查看配置操作。
+2. **服务商连接**：管理可复用的 Provider 连接和凭据，使用结构化表单。
+3. **调用统计**：在 AI analytics 能力交付后展示；未接入前不展示空壳入口。
+4. **高级资源**：容纳 Models、Virtual Keys 及相关 Routes/Plugins 的专家视图。
+
+Endpoint 列表卡片只突出用户决策所需的信息：名称、方法和完整调用路径、运行状态、模型池摘要以及测试/复制/配置操作。Provider ID、Plugin ID、`model_group` 等实现字段不出现在默认视图。
+
+###### 单页创建流程
+
+创建 Endpoint 使用一个页面内的渐进式表单，不在多个资源页面之间跳转：
+
+1. **接口信息**
+   - 用户填写接口名称和路径短名。
+   - 页面实时预览最终 `POST /ai/{slug}/v1/chat/completions` 地址。
+   - 客户端协议首版固定为 OpenAI Chat Completions；支持更多协议后再显示协议选择。
+2. **选择模型**
+   - 用户选择已有服务商连接，或在原位创建连接。
+   - 内置 Provider 只要求 API Key 和模型名；服务端点使用 driver 默认值。
+   - 只有 OpenAI-compatible Provider 展示必填的自定义服务地址；允许填写服务根地址，运行时会在未提供路径时补齐 `/v1/chat/completions`。
+   - 可以添加多个模型，并清楚显示每个模型对应的 Provider 和真实模型名。
+3. **流量策略**
+   - 单模型为默认模式，无额外配置。
+   - 多模型首版支持同一优先级内的百分比分流；百分比控件自动保证合计为 100%。
+   - “故障时切换备用模型”必须等 `ai-proxy` 的跨 Provider 失败回报、重试和健康 fallback 完整接通后才能开放，不能仅通过设置 `priority` 在 UI 中制造已支持的假象。
+4. **发布与验证**
+   - 发布前以人类可读摘要展示入口、模型和流量比例。
+   - 明确列出将创建或复用的底层资源，但不要求用户编辑它们。
+   - 发布成功后直接显示完整 Endpoint、复制按钮和内置请求测试台。
+
+页面保持单页，将接口信息、模型选择、流量策略和发布摘要连续呈现。单模型时流量
+策略退化为只读的 100%，多模型时才要求调整比例；用户无需在步骤间维护临时资源。
+
+###### 页面零 JSON 原则
+
+面向任务的 AI Gateway 页面不得要求用户输入、修改或理解 JSON。所有配置必须映射为带验证和帮助文本的结构化控件：
+
+| 底层配置 | 页面交互 |
+|----------|----------|
+| `provider_type` | 带服务商名称的下拉选择 |
+| `auth_config.header_value` | 密码型 API Key 输入框 |
+| `auth_config.param_value` | Gemini API Key 输入框 |
+| `endpoint_url` | 仅自定义兼容服务展示的 URL 输入框 |
+| `model_name` | 可搜索选择；无法发现模型时允许文本输入 |
+| `priority` | 在运行时支持后映射为主备模型拖动顺序 |
+| `weight` | 百分比分配控件，自动归一化为 100% |
+| `response_streaming` | “允许流式响应”开关 |
+| `timeout` / `retries` | 带单位、范围和默认值的数字控件 |
+| `max_input_tokens` | “最大输入 Token”数字控件 |
+
+`auth_config`、Model `config` 和 Plugin `config` 只由前端适配层生成，不提供原始 JSON 编辑器。高级资源页也应优先使用 schema 驱动表单；诊断场景可以显示脱敏后的只读配置，但不能把 JSON 作为完成常规任务的必填入口。
+
+Provider 凭据遵循以下规则：
+
+- 复用已有 Provider 时不回填已经遮蔽的密钥。
+- 新建连接时只提交当前 Provider 类型需要的认证字段。
+- 编辑连接时，空白密钥表示保留原值；新密钥必须由用户显式输入。
+- 页面不缓存、复制或写入 Plugin 的 Provider 密钥。
+- 保存连接前提供“测试连接”；若后端尚无安全的连接测试端点，按钮不进入首版，不能通过创建临时代理资源模拟。
+
+###### 前端模块边界
+
+页面拆成职责单一的组件和 composable：
+
+| 模块 | 唯一职责 |
+|------|----------|
+| `EndpointIdentityForm` | 名称、路径和最终调用地址预览 |
+| `ModelPoolBuilder` | 模型成员的增加、删除、Provider 绑定及原位新建连接 |
+| `TrafficPolicyEditor` | 单模型或百分比分流配置与总和约束 |
+| `Endpoints` | 列表、编辑器和发布摘要的页面组合，不直接实现持久化 |
+| `useEndpointPublisher` | Endpoint 投影以及 Provider、Model、Service、Route、Plugin 的写入、更新、删除与失败回滚 |
+| `endpointUtils` | tag、名称编码、路径、Provider 认证和表单映射 |
+| `EndpointPlayground` | 调用已发布 Endpoint 并生成 curl 示例 |
+| `useLocale` | 全局浏览器语言检测、选择持久化和文档 `lang` 同步 |
+| `useI18n` | Manager 公共页面词典解析、参数插值与英文回退 |
+| `useAiGatewayI18n` | 复用全局 locale，并提供 AI Gateway 文案映射 |
+
+表单组件不直接调用 Admin API；API 请求和实体到视图模型的转换集中在 composable/service 层。`useEndpointPublisher` 只负责编排，不实现运行时路由，也不持久化第二份配置。
+
+###### 发布事务与资源所有权
+
+发布顺序为 Provider（需要时）→ AI Model → Service → Route → `ai-proxy` Plugin。已有 Provider 只复用不修改。任何写入失败时，发布器按逆序删除本次创建的资源；复用资源不得进入回滚集合。
+
+为了可靠识别由向导创建的资源，向导为 Service、Route、Plugin 和 AI Model 添加一致的受控 tag，包括版本化的 Endpoint 标识。聚合视图根据这些 tag 和实体关系重建，不依赖名称猜测。缺失或被专家页面修改的成员显示为“配置不完整”，不得静默创建替代资源。
+
+删除 Endpoint 必须先展示将删除和保留的资源：
+
+- 删除该 Endpoint 独占的 Service、Route 和 Plugin。
+- 只在 AI Model 带有同一 Endpoint 所有权 tag 且未被其他 Endpoint 引用时删除。
+- Provider 默认保留，因为连接和凭据可以复用。
+- 任何存在歧义的共享资源都保留并提示用户前往高级资源处理。
+
+###### 内置测试台
+
+发布成功后，测试台允许输入消息、切换流式响应并发送真实请求。浏览器将请求交给
+`POST /ai-endpoint-test`；该 Admin helper 只接受
+`/ai/{slug}/v1/chat/completions` 形态且带 `kr-ai-endpoint-v1` tag 的现有 Route，
+再转发到本机配置的 Proxy listener，因此不会绕过 Route 或直接调用 Provider，也
+不能被用作任意 URL 转发器。结果显示 HTTP 状态、实际模型、总耗时和响应正文；
+页面同时生成直接调用公开 Proxy Endpoint 的 curl 示例。首版 helper 会缓冲流式
+响应后再交给页面展示。
+
+###### 首版验收边界
+
+- 新用户无需预先进入 Providers、Models、Routes 或 Plugins 页面即可发布一个可调用的 OpenAI-compatible Chat Endpoint。
+- 创建主流程和服务商连接页面不存在可编辑 JSON。
+- 单 Provider、单模型的必填输入不超过名称、路径、服务商、API Key 和模型名。
+- 多模型百分比始终合计 100%，并正确映射为同名 model group 的权重。
+- 发布失败不会遗留本次新建的孤立资源，也不会删除复用资源。
+- Endpoint 列表能够区分正常、禁用和配置不完整状态。
+- 发布后可以在同一页面复制地址并完成一次真实代理请求。
+- Providers、Models、Routes、Plugins 和 AI 运行时职责保持不变；Endpoint 层只提供投影、表单适配和发布编排。
 
 #### 10.7 可观测性
 

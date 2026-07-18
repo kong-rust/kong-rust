@@ -73,8 +73,16 @@ impl AiDriver for OpenAiCompatDriver {
                 "openai_compat provider requires endpoint_url".to_string(),
             ));
         }
-        // 委托给 OpenAI driver（它已支持 endpoint_url 解析）
-        self.inner.configure_upstream(model, provider_config, stream)
+        // 委托给 OpenAI driver（它已支持 endpoint_url 解析）。管理界面允许用户填写
+        // 服务根地址；OpenAI-compatible Chat 的标准路径在未显式提供时自动补齐。
+        let mut upstream = self
+            .inner
+            .configure_upstream(model, provider_config, stream)?;
+        if upstream.path == "/" {
+            upstream.path = "/v1/chat/completions".to_string();
+        }
+
+        Ok(upstream)
     }
 
     fn extract_usage(&self, body: &str) -> Option<TokenUsage> {

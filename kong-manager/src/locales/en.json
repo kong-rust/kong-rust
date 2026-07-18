@@ -2,15 +2,40 @@
   "global": {
     "copied": "Successfully copied to clipboard",
     "error": "An error has occurred, please try again",
+    "language": "Language",
     "buttons": {
       "back": "Back",
       "edit": "Edit",
       "save": "Save",
       "create": "Create"
     },
+    "tabs": {
+      "configuration": "Configuration",
+      "routes": "Routes",
+      "plugins": "Plugins",
+      "credentials": "Credentials",
+      "targets": "Targets",
+      "keys": "Keys"
+    },
     "learn.more": "Learn more"
   },
+  "navigation": {
+    "ai-gateway": "AI Gateway",
+    "overview": "Overview",
+    "services": "Gateway Services",
+    "routes": "Routes",
+    "consumers": "Consumers",
+    "plugins": "Plugins",
+    "upstreams": "Upstreams",
+    "certificates": "Certificates",
+    "ca-certificates": "CA Certificates",
+    "snis": "SNIs",
+    "vaults": "Vaults",
+    "keys": "Keys",
+    "key-sets": "Key Sets"
+  },
   "overview": {
+    "resources": "Resources",
     "info": {
       "gateway": {
         "title": "Gateway",
@@ -58,18 +83,8 @@
     }
   },
   "not-found": {
-    "description": "We cannot find the page you were looking for. Go back to the previous page or {overview}."
-  },
-  "konnect-cta": {
-    "name": "Konnect",
-    "description": "The easiest way to get started with Kong Gateway.",
-    "get.started": "Get Started",
-    "footer.description": "No credit card required & free plan available",
-    "feature.1": "Simplify Gateway operations with Konnect's SaaS control plane",
-    "feature.2": "Test drive enterprise-grade plugins like OpenID Connect, mTLS, and OPA",
-    "feature.3": "Out of the box API Analytics",
-    "feature.4": "Streamline Kong Gateway upgrades",
-    "feature.5": "Deploy an API Dev Portal with registration management"
+    "description": "We cannot find the page you were looking for. Go back to the previous page or return home.",
+    "return-home": "Return home"
   },
   "entities": {
     "service": {
@@ -123,7 +138,10 @@
       "disabled": "Plugin \"{name}\" successfully disabled!",
       "list.title": "Plugins",
       "create.form.title": "New Plugin",
-      "edit.form.title": "Edit Plugin"
+      "edit.form.title": "Edit Plugin",
+      "create.form.named.title": "New Plugin: {name}",
+      "edit.form.named.title": "Edit Plugin: {name}",
+      "view.documentation": "View documentation"
     },
     "upstream": {
       "description": "An Upstream represents a virtual hostname and can be used to load balance incoming requests over multiple Services.",

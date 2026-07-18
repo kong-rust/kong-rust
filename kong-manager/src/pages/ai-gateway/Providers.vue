@@ -1,7 +1,7 @@
 <template>
-  <PageHeader title="AI Providers">
+  <PageHeader :title="t('AI Providers')">
     <KButton @click="startCreate">
-      Create Provider
+      {{ t('Create Provider') }}
     </KButton>
   </PageHeader>
   <AiGatewayNav />
@@ -17,7 +17,7 @@
   <KCard
     v-if="formVisible"
     class="ai-gateway-form-card"
-    :title="editingId ? 'Edit Provider' : 'Create Provider'"
+    :title="editingId ? t('Edit Provider') : t('Create Provider')"
   >
     <form
       class="ai-gateway-form"
@@ -25,7 +25,7 @@
     >
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-provider-name">Name</label>
+          <label for="ai-provider-name">{{ t('Name') }}</label>
           <input
             id="ai-provider-name"
             v-model.trim="form.name"
@@ -34,7 +34,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-provider-type">Provider Type</label>
+          <label for="ai-provider-type">{{ t('Provider Type') }}</label>
           <select
             id="ai-provider-type"
             v-model="form.providerType"
@@ -56,7 +56,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-provider-endpoint">Endpoint URL</label>
+          <label for="ai-provider-endpoint">{{ t('Endpoint URL') }}</label>
           <input
             id="ai-provider-endpoint"
             v-model.trim="form.endpointUrl"
@@ -67,7 +67,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-provider-default-model">Default Model</label>
+          <label for="ai-provider-default-model">{{ t('Default Model') }}</label>
           <input
             id="ai-provider-default-model"
             v-model.trim="form.defaultModel"
@@ -79,41 +79,35 @@
             v-model="form.enabled"
             type="checkbox"
           >
-          Enabled
+          {{ t('Enabled') }}
         </label>
       </div>
 
-      <div class="ai-gateway-form-grid">
-        <div class="ai-gateway-form-field">
-          <label for="ai-provider-auth-config">Auth Config JSON</label>
-          <textarea
-            id="ai-provider-auth-config"
-            v-model="form.authConfigJson"
-            :placeholder="form.providerType === 'openai_compat' ? deepSeekAuthExample : ''"
-            spellcheck="false"
-          />
-          <span class="ai-gateway-muted">
-            <template v-if="form.providerType === 'openai_compat'">
-              For DeepSeek, use an Authorization header; the Bearer prefix is optional.
-            </template>
-            Credentials are masked after saving.
-            <template v-if="editingId">
-              Leave this blank to keep the existing credentials.
-            </template>
-          </span>
-        </div>
-
-        <div class="ai-gateway-form-field">
-          <label for="ai-provider-config">Runtime Config JSON</label>
-          <textarea
-            id="ai-provider-config"
-            v-model="form.configJson"
-          />
-        </div>
+      <div class="ai-gateway-form-field">
+        <label for="ai-provider-api-key">
+          {{ t('API key') }}
+          <span v-if="form.providerType === 'openai_compat'">{{ locale === 'zh-CN' ? '（可选）' : '(optional)' }}</span>
+        </label>
+        <input
+          id="ai-provider-api-key"
+          v-model="form.apiKey"
+          autocomplete="new-password"
+          :required="!editingId && form.providerType !== 'openai_compat'"
+          type="password"
+        >
+        <span class="ai-gateway-muted">
+          {{ t('Credentials are masked after saving.') }}
+          <template v-if="editingId">
+            {{ t('Leave this blank to keep the existing key.') }}
+          </template>
+          <template v-else-if="form.providerType === 'openai_compat'">
+            {{ t('Local services such as Ollama may not require a key.') }}
+          </template>
+        </span>
       </div>
 
       <div class="ai-gateway-form-field">
-        <label for="ai-provider-tags">Tags</label>
+        <label for="ai-provider-tags">{{ t('Tags') }}</label>
         <input
           id="ai-provider-tags"
           v-model="form.tags"
@@ -125,14 +119,14 @@
           type="submit"
           :disabled="saving"
         >
-          {{ saving ? 'Saving...' : 'Save Provider' }}
+          {{ saving ? t('Saving...') : t('Save Provider') }}
         </KButton>
         <KButton
           appearance="secondary"
           type="button"
           @click="cancelForm"
         >
-          Cancel
+          {{ t('Cancel') }}
         </KButton>
       </div>
     </form>
@@ -145,8 +139,8 @@
       :fetcher="fetchProviders"
       :error="!!tableErrorMessage"
       :error-state-message="tableErrorMessage"
-      empty-state-title="No AI providers"
-      empty-state-message="Create a provider to connect AI models."
+      :empty-state-title="t('No AI providers')"
+      :empty-state-message="t('Create a provider to connect AI models.')"
       pagination-offset
     >
       <template #name="{ rowValue }">
@@ -155,7 +149,7 @@
 
       <template #enabled="{ rowValue }">
         <KBadge :appearance="rowValue ? 'success' : 'neutral'">
-          {{ rowValue ? 'Enabled' : 'Disabled' }}
+          {{ rowValue ? t('Enabled') : t('Disabled') }}
         </KBadge>
       </template>
 
@@ -194,14 +188,14 @@
             size="small"
             @click="startEdit(row)"
           >
-            Edit
+            {{ t('Edit') }}
           </KButton>
           <KButton
             appearance="danger"
             size="small"
             @click="deleteProvider(row)"
           >
-            Delete
+            {{ t('Delete') }}
           </KButton>
         </div>
       </template>
@@ -211,20 +205,20 @@
 
 <script setup lang="ts">
 import type { TableDataFetcherParams } from '@kong/kongponents'
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import AiGatewayNav from './AiGatewayNav.vue'
 import { apiService } from '@/services/apiService'
 import { useToaster } from '@/composables/useToaster'
 import type { AiProvider, KongPageResponse } from './types'
+import type { ProviderType } from './endpointTypes'
+import { providerAuthConfig } from './endpointUtils'
+import { useAiGatewayI18n } from './useAiGatewayI18n'
 import {
-  emptyJsonObject,
   formatOptionalDate,
   formatTags,
   getErrorMessage,
   omitUndefined,
-  parseJsonObject,
   parseTags,
-  stringifyJson,
 } from './utils'
 
 interface ProviderFormState {
@@ -232,8 +226,7 @@ interface ProviderFormState {
   providerType: string
   endpointUrl: string
   defaultModel: string
-  authConfigJson: string
-  configJson: string
+  apiKey: string
   enabled: boolean
   tags: string
 }
@@ -243,6 +236,7 @@ defineOptions({
 })
 
 const toaster = useToaster()
+const { l, locale, t } = useAiGatewayI18n()
 const tableKey = ref(0)
 const formVisible = ref(false)
 const saving = ref(false)
@@ -250,26 +244,24 @@ const editingId = ref('')
 const errorMessage = ref('')
 const tableErrorMessage = ref('')
 const deepSeekEndpoint = 'https://api.deepseek.com/v1/chat/completions'
-const deepSeekAuthExample = '{"header_name":"Authorization","header_value":"<API_TOKEN>"}'
 
-const headers = [
-  { label: 'Name', key: 'name' },
-  { label: 'Type', key: 'provider_type' },
-  { label: 'Endpoint', key: 'endpoint_url' },
-  { label: 'Default Model', key: 'default_model' },
-  { label: 'Status', key: 'enabled' },
-  { label: 'Created', key: 'created_at' },
-  { label: 'Tags', key: 'tags' },
+const headers = computed(() => [
+  { label: t('Name'), key: 'name' },
+  { label: t('Type'), key: 'provider_type' },
+  { label: t('Endpoint'), key: 'endpoint_url' },
+  { label: t('Default Model'), key: 'default_model' },
+  { label: t('Status'), key: 'enabled' },
+  { label: t('Created'), key: 'created_at' },
+  { label: t('Tags'), key: 'tags' },
   { hideLabel: true, key: 'actions' },
-]
+])
 
 const form = reactive<ProviderFormState>({
   name: '',
   providerType: 'openai',
   endpointUrl: '',
   defaultModel: '',
-  authConfigJson: emptyJsonObject,
-  configJson: emptyJsonObject,
+  apiKey: '',
   enabled: true,
   tags: '',
 })
@@ -279,8 +271,7 @@ const resetForm = () => {
   form.providerType = 'openai'
   form.endpointUrl = ''
   form.defaultModel = ''
-  form.authConfigJson = emptyJsonObject
-  form.configJson = emptyJsonObject
+  form.apiKey = ''
   form.enabled = true
   form.tags = ''
 }
@@ -299,7 +290,10 @@ const fetchProviders = async (props: TableDataFetcherParams) => {
       ...(data.offset ? { pagination: { offset: data.offset } } : null),
     }
   } catch (err) {
-    tableErrorMessage.value = getErrorMessage(err, 'Unable to load AI providers')
+    tableErrorMessage.value = getErrorMessage(
+      err,
+      l('Unable to load AI providers', '无法加载 AI 服务商'),
+    )
   }
 }
 
@@ -317,8 +311,7 @@ const startEdit = (provider: AiProvider) => {
   form.providerType = provider.provider_type
   form.endpointUrl = provider.endpoint_url ?? ''
   form.defaultModel = provider.default_model ?? ''
-  form.authConfigJson = ''
-  form.configJson = stringifyJson(provider.config)
+  form.apiKey = ''
   form.enabled = provider.enabled
   form.tags = formatTags(provider.tags)
   formVisible.value = true
@@ -341,26 +334,40 @@ const submitProvider = async () => {
       provider_type: form.providerType,
       endpoint_url: form.endpointUrl || null,
       default_model: form.defaultModel || null,
-      config: parseJsonObject(form.configJson, 'Runtime config'),
+      ...(!editingId.value ? { config: {} } : {}),
       enabled: form.enabled,
       tags: parseTags(form.tags) ?? (editingId.value ? null : undefined),
-      ...(!editingId.value || form.authConfigJson.trim()
-        ? { auth_config: parseJsonObject(form.authConfigJson, 'Auth config') }
+      ...(!editingId.value || form.apiKey.trim()
+        ? {
+          auth_config: providerAuthConfig(
+            form.providerType as ProviderType,
+            form.apiKey.trim(),
+          ),
+        }
         : {}),
     })
 
     if (editingId.value) {
       await apiService.patch(`ai-providers/${editingId.value}`, body)
-      toaster.open({ appearance: 'success', message: `Updated provider ${form.name}` })
+      toaster.open({
+        appearance: 'success',
+        message: l(`Updated provider ${form.name}`, `已更新服务商 ${form.name}`),
+      })
     } else {
       await apiService.post('ai-providers', body)
-      toaster.open({ appearance: 'success', message: `Created provider ${form.name}` })
+      toaster.open({
+        appearance: 'success',
+        message: l(`Created provider ${form.name}`, `已创建服务商 ${form.name}`),
+      })
     }
 
     cancelForm()
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to save AI provider')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to save AI provider', '无法保存 AI 服务商'),
+    )
   } finally {
     saving.value = false
   }
@@ -402,19 +409,31 @@ const deleteProvider = async (provider: AiProvider) => {
 
     if (modelCount > 0) {
       const modelLabel = modelCount === 1 ? 'model' : 'models'
-      errorMessage.value = `Cannot delete provider "${provider.name}" while ${modelCount} dependent AI ${modelLabel} remain. Delete or reassign them first.`
+      errorMessage.value = l(
+        `Cannot delete provider "${provider.name}" while ${modelCount} dependent AI ${modelLabel} remain. Delete or reassign them first.`,
+        `服务商“${provider.name}”仍被 ${modelCount} 个 AI 模型使用，请先删除模型或更换服务商。`,
+      )
       return
     }
 
-    if (!window.confirm(`Delete AI provider "${provider.name}"?`)) {
+    if (!window.confirm(l(
+      `Delete AI provider "${provider.name}"?`,
+      `删除 AI 服务商“${provider.name}”？`,
+    ))) {
       return
     }
 
     await apiService.delete(`ai-providers/${provider.id}`)
-    toaster.open({ appearance: 'success', message: `Deleted provider ${provider.name}` })
+    toaster.open({
+      appearance: 'success',
+      message: l(`Deleted provider ${provider.name}`, `已删除服务商 ${provider.name}`),
+    })
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to delete AI provider')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to delete AI provider', '无法删除 AI 服务商'),
+    )
   }
 }
 </script>

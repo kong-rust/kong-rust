@@ -24,7 +24,7 @@
     </KCard>
   </section>
   <KCard
-    title="Resources"
+    :title="t('overview.resources')"
     class="resource-card"
   >
     <ul class="resource-list">
@@ -51,7 +51,6 @@
       </li>
     </ul>
   </KCard>
-  <KonnectCTA />
 </template>
 
 <script setup lang="ts">
@@ -62,7 +61,6 @@ import {
   PlugIcon,
   KongIcon,
 } from '@kong/icons'
-import KonnectCTA from '@/components/KonnectCTA.vue'
 import { useI18n } from '@/composables/useI18n'
 import { useInfoStore } from '@/stores/info'
 import { formatVersion } from '@/utils'

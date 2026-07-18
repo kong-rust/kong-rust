@@ -38,11 +38,11 @@ defineOptions({
 
 const { kongponentTabs: tabs, initialHash, onTabChange } = useTabs([
   {
-    title: 'Configuration',
+    titleKey: 'global.tabs.configuration',
     route: { name: 'key-set-detail' },
   },
   {
-    title: 'Keys',
+    titleKey: 'global.tabs.keys',
     route: { name: 'key-set-detail-keys' },
   },
 ])

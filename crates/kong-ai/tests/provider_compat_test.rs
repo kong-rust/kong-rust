@@ -76,6 +76,22 @@ fn test_compat_configure_upstream_uses_custom_endpoint() {
 }
 
 #[test]
+fn test_compat_configure_upstream_appends_chat_path_to_base_url() {
+    let driver = OpenAiCompatDriver::new();
+    let model = make_model();
+
+    for endpoint in ["https://api.deepseek.com", "https://api.deepseek.com/"] {
+        let config = make_provider_config_with_endpoint("sk-deepseek-key", endpoint);
+        let upstream = driver.configure_upstream(&model, &config, false).unwrap();
+
+        assert_eq!(upstream.scheme, "https");
+        assert_eq!(upstream.host, "api.deepseek.com");
+        assert_eq!(upstream.port, 443);
+        assert_eq!(upstream.path, "/v1/chat/completions");
+    }
+}
+
+#[test]
 fn test_compat_configure_upstream_requires_endpoint() {
     // 未设置 endpoint_url 应报错
     let driver = OpenAiCompatDriver::new();

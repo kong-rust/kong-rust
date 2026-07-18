@@ -37,11 +37,11 @@ defineOptions({
 
 const { kongponentTabs: tabs, initialHash, onTabChange } = useTabs([
   {
-    title: 'Configuration',
+    titleKey: 'global.tabs.configuration',
     route: { name: 'upstream-detail' },
   },
   {
-    title: 'Targets',
+    titleKey: 'global.tabs.targets',
     route: { name: 'upstream-detail-targets' },
   },
 ])

@@ -1,7 +1,11 @@
 <template>
   <footer class="make-wish-wrapper">
     <KTooltip :text="t('wish.tooltip')">
-      <a :href="mailToUrl">
+      <a
+        :href="feedbackUrl"
+        rel="noopener noreferrer"
+        target="_blank"
+      >
         <img
           src="@/assets/icon-stardust.svg?external"
           alt=""
@@ -22,7 +26,13 @@ const route = useRoute()
 const { t } = useI18n()
 const infoStore = useInfoStore()
 
-const mailToUrl = computed(() => `mailto:wish@konghq.com?subject=${t('wish.subject', { title: `${route.meta.title} | Kong Manager OSS@${infoStore.kongVersion}` })}`)
+const feedbackUrl = computed(() => {
+  const title = t('wish.subject', {
+    title: `${route.meta.title} | Kong Rust Manager@${infoStore.kongVersion}`,
+  })
+
+  return `https://github.com/kong-rust/kong-rust/issues/new?title=${encodeURIComponent(title)}`
+})
 </script>
 
 <style scoped lang="scss">

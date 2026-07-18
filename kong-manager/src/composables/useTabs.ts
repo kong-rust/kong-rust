@@ -1,36 +1,37 @@
 import { computed } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw, type RouteLocationNamedRaw } from 'vue-router'
+import { useI18n } from '@/composables/useI18n'
 
 interface Tab {
-  title: string
+  titleKey: string
   route: RouteLocationRaw & { name: string }
 }
 
-const convertTitleToHash = (title: string) => `#${title.replace(/\s+/g, '-').toLowerCase()}`
+const titleKeyToHash = (titleKey: string) => {
+  const segments = titleKey.split('.')
 
-// <KTabs> expects an array of hash-based objects (e.g. [{hash: '#tab1', title: 'Tab 1'}, {hash: '#tab2', title: 'Tab 2'}]).
-// But in our app, we expect the tab to switch between paths instead of hashes.
-// This composable takes an array of route-based objects and converts it to an array of hash-based objects,
-// so that the consuming component can pass the returned array to <KTabs>.
+  return `#${segments[segments.length - 1]}`
+}
+
+// <KTabs> expects hash-based objects, while Manager tabs navigate between routes.
+// Translation-key suffixes keep the existing hashes stable when titles change.
 export const useTabs = (tabs: Tab[]) => {
   const route = useRoute()
   const router = useRouter()
+  const { t } = useI18n()
 
   const initialTab = computed(() => tabs.find((tab) => tab.route.name === route.name))
-  const initialHash = computed(() => convertTitleToHash(initialTab.value?.title || ''))
+  const initialHash = computed(() => (
+    initialTab.value ? titleKeyToHash(initialTab.value.titleKey) : ''
+  ))
 
-  const kongponentTabs = tabs.map((tab) => ({
-    title: tab.title,
-    hash: convertTitleToHash(tab.title),
-  }))
+  const kongponentTabs = computed(() => tabs.map((tab) => ({
+    title: t(tab.titleKey),
+    hash: titleKeyToHash(tab.titleKey),
+  })))
 
   const onTabChange = (hash: string) => {
-    const activeKongponentTab = kongponentTabs.find((tab) => tab.hash === hash)
-    if (!activeKongponentTab) {
-      return
-    }
-
-    const activeTab = tabs.find((tab) => tab.title === activeKongponentTab.title)
+    const activeTab = tabs.find((tab) => titleKeyToHash(tab.titleKey) === hash)
     if (!activeTab) {
       return
     }

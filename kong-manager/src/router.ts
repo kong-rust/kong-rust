@@ -18,12 +18,12 @@ const routes: RouteRecordRaw[] = [
 
   // AI Gateway pages
   {
-    name: 'ai-gateway-overview',
+    name: 'ai-endpoint-list',
     path: '/ai-gateway',
-    component: () => import('@/pages/ai-gateway/Overview.vue'),
+    component: () => import('@/pages/ai-gateway/Endpoints.vue'),
     meta: {
       entity: 'ai-gateway',
-      title: 'AI Gateway',
+      title: 'AI Endpoints',
     },
   },
   {

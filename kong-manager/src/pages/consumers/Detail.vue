@@ -41,15 +41,15 @@ defineOptions({
 
 const { kongponentTabs: tabs, initialHash, onTabChange } = useTabs([
   {
-    title: 'Configuration',
+    titleKey: 'global.tabs.configuration',
     route: { name: 'consumer-detail' },
   },
   {
-    title: 'Credentials',
+    titleKey: 'global.tabs.credentials',
     route: { name: 'consumer-detail-credentials' },
   },
   {
-    title: 'Plugins',
+    titleKey: 'global.tabs.plugins',
     route: { name: 'consumer-detail-plugins' },
   },
 ])

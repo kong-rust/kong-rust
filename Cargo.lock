@@ -1732,6 +1732,7 @@ dependencies = [
  "kong-router",
  "mime",
  "openssl",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

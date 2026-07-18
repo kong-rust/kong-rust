@@ -1,5 +1,5 @@
 <template>
-  <PageHeader title="AI Gateway" />
+  <PageHeader :title="l('AI Gateway', 'AI 网关')" />
   <AiGatewayNav />
 
   <section class="ai-gateway-grid">
@@ -7,13 +7,13 @@
       class="ai-gateway-card-link"
       :to="{ name: 'ai-provider-list' }"
     >
-      <KCard title="Providers">
+      <KCard :title="l('Providers', '服务商')">
         <div class="ai-gateway-card-body">
           <strong class="ai-gateway-card-metric">
             {{ loading ? '-' : metrics.providers }}
           </strong>
           <p class="ai-gateway-card-copy">
-            Manage upstream AI providers, endpoints, credentials, and defaults.
+            {{ l('Manage upstream AI providers, endpoints, credentials, and defaults.', '管理上游 AI 服务商、地址、凭据和默认设置。') }}
           </p>
         </div>
       </KCard>
@@ -23,13 +23,13 @@
       class="ai-gateway-card-link"
       :to="{ name: 'ai-model-list' }"
     >
-      <KCard title="Models">
+      <KCard :title="l('Models', '模型')">
         <div class="ai-gateway-card-body">
           <strong class="ai-gateway-card-metric">
             {{ loading ? '-' : metrics.models }}
           </strong>
           <p class="ai-gateway-card-copy">
-            Configure model groups, provider bindings, routing priority, and cost metadata.
+            {{ l('Configure model groups, provider bindings, routing priority, and cost metadata.', '配置模型组、服务商绑定、路由优先级和成本元数据。') }}
           </p>
         </div>
       </KCard>
@@ -39,13 +39,13 @@
       class="ai-gateway-card-link"
       :to="{ name: 'ai-model-list' }"
     >
-      <KCard title="Model Groups">
+      <KCard :title="l('Model Groups', '模型组')">
         <div class="ai-gateway-card-body">
           <strong class="ai-gateway-card-metric">
             {{ loading ? '-' : metrics.modelGroups }}
           </strong>
           <p class="ai-gateway-card-copy">
-            Models with the same group name are available for load balancing.
+            {{ l('Models with the same group name are available for load balancing.', '同名模型组中的模型可用于负载均衡。') }}
           </p>
         </div>
       </KCard>
@@ -55,14 +55,16 @@
       class="ai-gateway-card-link"
       :to="{ name: 'ai-virtual-key-list' }"
     >
-      <KCard title="Virtual Keys">
+      <KCard :title="l('Virtual Keys', '虚拟密钥')">
         <div class="ai-gateway-card-body">
           <strong class="ai-gateway-card-metric">
             {{ loading ? '-' : metrics.virtualKeys }}
           </strong>
           <p class="ai-gateway-card-copy">
-            Store virtual-key management metadata. Proxy authentication, rate limits, and budget
-            enforcement are not wired yet.
+            {{ l(
+              'Store virtual-key management metadata. Proxy authentication, rate limits, and budget enforcement are not wired yet.',
+              '保存虚拟密钥管理元数据；代理认证、限流和预算控制尚未接入。',
+            ) }}
           </p>
         </div>
       </KCard>
@@ -90,11 +92,13 @@ import type {
   KongPageResponse,
 } from './types'
 import { getErrorMessage } from './utils'
+import { useAiGatewayI18n } from './useAiGatewayI18n'
 
 defineOptions({
   name: 'AiGatewayOverview',
 })
 
+const { l } = useAiGatewayI18n()
 const loading = ref(false)
 const errorMessage = ref('')
 const metrics = reactive({
@@ -154,7 +158,10 @@ const loadMetrics = async () => {
     metrics.modelGroups = modelGroups
     metrics.virtualKeys = virtualKeys
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to load AI Gateway metrics')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to load AI Gateway metrics', '无法加载 AI 网关指标'),
+    )
   } finally {
     loading.value = false
   }

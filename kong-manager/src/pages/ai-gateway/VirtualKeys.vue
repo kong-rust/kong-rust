@@ -1,10 +1,10 @@
 <template>
-  <PageHeader title="AI Virtual Keys">
+  <PageHeader :title="t('AI Virtual Keys')">
     <KButton
       :disabled="mutationPending || !!latestKey"
       @click="startCreate"
     >
-      Create Virtual Key
+      {{ t('Create Virtual Key') }}
     </KButton>
   </PageHeader>
   <AiGatewayNav />
@@ -13,8 +13,7 @@
     appearance="warning"
     class="ai-gateway-alert"
   >
-    Virtual keys currently store management metadata only. They are not wired into proxy
-    authentication, rate-limit, or budget enforcement.
+    {{ t('Virtual keys currently store management metadata only. They are not wired into proxy authentication, rate-limit, or budget enforcement.') }}
   </KAlert>
 
   <KAlert
@@ -31,7 +30,7 @@
   >
     <strong>{{ latestKeyTitle }}</strong>
     <p>
-      This secret is shown once. Copy it, then dismiss it before creating or rotating another key.
+      {{ t('This secret is shown once. Copy it, then dismiss it before creating or rotating another key.') }}
     </p>
     <input
       class="ai-gateway-mono"
@@ -44,14 +43,14 @@
         type="button"
         @click="copyLatestKey"
       >
-        Copy Key
+        {{ t('Copy Key') }}
       </KButton>
       <KButton
         appearance="tertiary"
         type="button"
         @click="clearLatestKey"
       >
-        Dismiss
+        {{ t('Dismiss') }}
       </KButton>
     </div>
   </section>
@@ -59,7 +58,7 @@
   <KCard
     v-if="formVisible"
     class="ai-gateway-form-card"
-    :title="editingId ? 'Edit Virtual Key' : 'Create Virtual Key'"
+    :title="editingId ? t('Edit Virtual Key') : t('Create Virtual Key')"
   >
     <form
       class="ai-gateway-form"
@@ -67,7 +66,7 @@
     >
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-key-name">Name</label>
+          <label for="ai-key-name">{{ t('Name') }}</label>
           <input
             id="ai-key-name"
             v-model.trim="form.name"
@@ -76,7 +75,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-key-consumer">Consumer ID</label>
+          <label for="ai-key-consumer">{{ t('Consumer ID') }}</label>
           <input
             id="ai-key-consumer"
             v-model.trim="form.consumerId"
@@ -84,7 +83,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-key-models">Allowed Models</label>
+          <label for="ai-key-models">{{ t('Allowed Models') }}</label>
           <input
             id="ai-key-models"
             v-model="form.allowedModels"
@@ -96,13 +95,13 @@
             v-model="form.enabled"
             type="checkbox"
           >
-          Enabled
+          {{ t('Enabled') }}
         </label>
       </div>
 
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-key-tpm">TPM Limit</label>
+          <label for="ai-key-tpm">{{ t('TPM Limit') }}</label>
           <input
             id="ai-key-tpm"
             v-model="form.tpmLimit"
@@ -112,7 +111,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-key-rpm">RPM Limit</label>
+          <label for="ai-key-rpm">{{ t('RPM Limit') }}</label>
           <input
             id="ai-key-rpm"
             v-model="form.rpmLimit"
@@ -122,7 +121,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-key-budget">Budget Limit</label>
+          <label for="ai-key-budget">{{ t('Budget Limit') }}</label>
           <input
             id="ai-key-budget"
             v-model="form.budgetLimit"
@@ -133,7 +132,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-key-expires">Expires At</label>
+          <label for="ai-key-expires">{{ t('Expires At') }}</label>
           <input
             id="ai-key-expires"
             v-model="form.expiresAt"
@@ -143,7 +142,7 @@
       </div>
 
       <div class="ai-gateway-form-field">
-        <label for="ai-key-tags">Tags</label>
+        <label for="ai-key-tags">{{ t('Tags') }}</label>
         <input
           id="ai-key-tags"
           v-model="form.tags"
@@ -155,14 +154,14 @@
           type="submit"
           :disabled="mutationPending"
         >
-          {{ mutationPending ? 'Saving...' : 'Save Virtual Key' }}
+          {{ mutationPending ? t('Saving...') : t('Save Virtual Key') }}
         </KButton>
         <KButton
           appearance="secondary"
           type="button"
           @click="cancelForm"
         >
-          Cancel
+          {{ t('Cancel') }}
         </KButton>
       </div>
     </form>
@@ -175,8 +174,8 @@
       :fetcher="fetchVirtualKeys"
       :error="!!tableErrorMessage"
       :error-state-message="tableErrorMessage"
-      empty-state-title="No AI virtual keys"
-      empty-state-message="Create virtual-key management metadata."
+      :empty-state-title="t('No AI virtual keys')"
+      :empty-state-message="t('Create virtual-key management metadata.')"
       pagination-offset
     >
       <template #name="{ rowValue }">
@@ -217,7 +216,7 @@
 
       <template #enabled="{ rowValue }">
         <KBadge :appearance="rowValue ? 'success' : 'neutral'">
-          {{ rowValue ? 'Enabled' : 'Disabled' }}
+          {{ rowValue ? t('Enabled') : t('Disabled') }}
         </KBadge>
       </template>
 
@@ -229,7 +228,7 @@
             :disabled="mutationPending"
             @click="startEdit(row)"
           >
-            Edit
+            {{ t('Edit') }}
           </KButton>
           <KButton
             appearance="secondary"
@@ -237,7 +236,7 @@
             :disabled="mutationPending || !!latestKey"
             @click="rotateVirtualKey(row)"
           >
-            Rotate
+            {{ t('Rotate') }}
           </KButton>
           <KButton
             appearance="danger"
@@ -245,7 +244,7 @@
             :disabled="mutationPending"
             @click="deleteVirtualKey(row)"
           >
-            Delete
+            {{ t('Delete') }}
           </KButton>
         </div>
       </template>
@@ -255,11 +254,12 @@
 
 <script setup lang="ts">
 import type { TableDataFetcherParams } from '@kong/kongponents'
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import AiGatewayNav from './AiGatewayNav.vue'
 import { apiService } from '@/services/apiService'
 import { useToaster } from '@/composables/useToaster'
 import type { AiVirtualKey, KongPageResponse } from './types'
+import { useAiGatewayI18n } from './useAiGatewayI18n'
 import {
   formatOptionalDate,
   formatTags,
@@ -289,6 +289,7 @@ defineOptions({
 })
 
 const toaster = useToaster()
+const { l, locale, t } = useAiGatewayI18n()
 const tableKey = ref(0)
 const formVisible = ref(false)
 const mutationPending = ref(false)
@@ -298,16 +299,16 @@ const tableErrorMessage = ref('')
 const latestKey = ref('')
 const latestKeyTitle = ref('')
 
-const headers = [
-  { label: 'Name', key: 'name' },
-  { label: 'Prefix', key: 'key_prefix' },
-  { label: 'Allowed Models', key: 'allowed_models' },
-  { label: 'Rate Limits', key: 'limits' },
-  { label: 'Budget Used / Limit', key: 'budget' },
-  { label: 'Expires', key: 'expires_at' },
-  { label: 'Status', key: 'enabled' },
+const headers = computed(() => [
+  { label: t('Name'), key: 'name' },
+  { label: locale.value === 'zh-CN' ? '前缀' : 'Prefix', key: 'key_prefix' },
+  { label: t('Allowed Models'), key: 'allowed_models' },
+  { label: locale.value === 'zh-CN' ? '速率限制' : 'Rate Limits', key: 'limits' },
+  { label: locale.value === 'zh-CN' ? '已用 / 预算上限' : 'Budget Used / Limit', key: 'budget' },
+  { label: locale.value === 'zh-CN' ? '过期时间' : 'Expires', key: 'expires_at' },
+  { label: t('Status'), key: 'enabled' },
   { hideLabel: true, key: 'actions' },
-]
+])
 
 const form = reactive<VirtualKeyFormState>({
   name: '',
@@ -347,7 +348,10 @@ const fetchVirtualKeys = async (props: TableDataFetcherParams) => {
       ...(data.offset ? { pagination: { offset: data.offset } } : null),
     }
   } catch (err) {
-    tableErrorMessage.value = getErrorMessage(err, 'Unable to load AI virtual keys')
+    tableErrorMessage.value = getErrorMessage(
+      err,
+      l('Unable to load AI virtual keys', '无法加载 AI 虚拟密钥'),
+    )
   }
 }
 
@@ -420,7 +424,10 @@ const submitVirtualKey = async () => {
 
     if (editingId.value) {
       await apiService.patch(`ai-virtual-keys/${editingId.value}`, body)
-      toaster.open({ appearance: 'success', message: `Updated virtual key ${form.name}` })
+      toaster.open({
+        appearance: 'success',
+        message: l(`Updated virtual key ${form.name}`, `已更新虚拟密钥 ${form.name}`),
+      })
     } else {
       const { data } = await apiService.post('ai-virtual-keys', body)
       const created = data as AiVirtualKey
@@ -429,14 +436,23 @@ const submitVirtualKey = async () => {
       }
 
       latestKey.value = created.key
-      latestKeyTitle.value = `Created virtual key ${created.name}`
-      toaster.open({ appearance: 'success', message: `Created virtual key ${form.name}` })
+      latestKeyTitle.value = l(
+        `Created virtual key ${created.name}`,
+        `已创建虚拟密钥 ${created.name}`,
+      )
+      toaster.open({
+        appearance: 'success',
+        message: l(`Created virtual key ${form.name}`, `已创建虚拟密钥 ${form.name}`),
+      })
     }
 
     cancelForm()
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to save AI virtual key')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to save AI virtual key', '无法保存 AI 虚拟密钥'),
+    )
   } finally {
     mutationPending.value = false
   }
@@ -447,7 +463,10 @@ const rotateVirtualKey = async (virtualKey: AiVirtualKey) => {
     return
   }
 
-  if (!window.confirm(`Rotate AI virtual key "${virtualKey.name}"?`)) {
+  if (!window.confirm(l(
+    `Rotate AI virtual key "${virtualKey.name}"?`,
+    `轮换 AI 虚拟密钥“${virtualKey.name}”？`,
+  ))) {
     return
   }
 
@@ -463,11 +482,20 @@ const rotateVirtualKey = async (virtualKey: AiVirtualKey) => {
     }
 
     latestKey.value = rotated.key
-    latestKeyTitle.value = `Rotated virtual key ${virtualKey.name}`
-    toaster.open({ appearance: 'success', message: `Rotated virtual key ${virtualKey.name}` })
+    latestKeyTitle.value = l(
+      `Rotated virtual key ${virtualKey.name}`,
+      `已轮换虚拟密钥 ${virtualKey.name}`,
+    )
+    toaster.open({
+      appearance: 'success',
+      message: l(`Rotated virtual key ${virtualKey.name}`, `已轮换虚拟密钥 ${virtualKey.name}`),
+    })
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to rotate AI virtual key')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to rotate AI virtual key', '无法轮换 AI 虚拟密钥'),
+    )
   } finally {
     mutationPending.value = false
   }
@@ -478,7 +506,10 @@ const deleteVirtualKey = async (virtualKey: AiVirtualKey) => {
     return
   }
 
-  if (!window.confirm(`Delete AI virtual key "${virtualKey.name}"?`)) {
+  if (!window.confirm(l(
+    `Delete AI virtual key "${virtualKey.name}"?`,
+    `删除 AI 虚拟密钥“${virtualKey.name}”？`,
+  ))) {
     return
   }
 
@@ -487,10 +518,16 @@ const deleteVirtualKey = async (virtualKey: AiVirtualKey) => {
 
   try {
     await apiService.delete(`ai-virtual-keys/${virtualKey.id}`)
-    toaster.open({ appearance: 'success', message: `Deleted virtual key ${virtualKey.name}` })
+    toaster.open({
+      appearance: 'success',
+      message: l(`Deleted virtual key ${virtualKey.name}`, `已删除虚拟密钥 ${virtualKey.name}`),
+    })
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to delete AI virtual key')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to delete AI virtual key', '无法删除 AI 虚拟密钥'),
+    )
   } finally {
     mutationPending.value = false
   }
@@ -498,7 +535,7 @@ const deleteVirtualKey = async (virtualKey: AiVirtualKey) => {
 
 const copyLatestKey = async () => {
   await navigator.clipboard.writeText(latestKey.value)
-  toaster.open({ appearance: 'success', message: 'Copied virtual key' })
+  toaster.open({ appearance: 'success', message: l('Copied virtual key', '已复制虚拟密钥') })
 }
 
 const clearLatestKey = () => {

@@ -1,10 +1,10 @@
 <template>
-  <PageHeader title="AI Models">
+  <PageHeader :title="t('AI Models')">
     <KButton
       :disabled="gatewaySaving || providerLoading || providers.length === 0"
       @click="startCreate"
     >
-      Create Model
+      {{ t('Create Model') }}
     </KButton>
   </PageHeader>
   <AiGatewayNav />
@@ -14,7 +14,7 @@
     appearance="info"
     class="ai-gateway-alert"
   >
-    Create an AI provider before adding models.
+    {{ locale === 'zh-CN' ? '请先创建 AI 服务商，再添加模型。' : 'Create an AI provider before adding models.' }}
   </KAlert>
 
   <KAlert
@@ -29,7 +29,7 @@
     v-if="gatewayEndpoint"
     class="ai-gateway-secret"
   >
-    <strong>AI proxy route is ready</strong>
+    <strong>{{ l('AI proxy route is ready', 'AI 代理路由已就绪') }}</strong>
     <input
       class="ai-gateway-mono"
       readonly
@@ -41,14 +41,14 @@
         type="button"
         @click="copyGatewayEndpoint"
       >
-        Copy Endpoint
+        {{ l('Copy Endpoint', '复制接口') }}
       </KButton>
       <KButton
         appearance="tertiary"
         type="button"
         @click="gatewayEndpoint = ''"
       >
-        Dismiss
+        {{ t('Dismiss') }}
       </KButton>
     </div>
   </section>
@@ -56,7 +56,7 @@
   <KCard
     v-if="formVisible"
     class="ai-gateway-form-card"
-    :title="editingId ? 'Edit Model' : 'Create Model'"
+    :title="editingId ? t('Edit Model') : t('Create Model')"
   >
     <form
       class="ai-gateway-form"
@@ -64,7 +64,7 @@
     >
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-model-name">Group Name</label>
+          <label for="ai-model-name">{{ t('Group Name') }}</label>
           <input
             id="ai-model-name"
             v-model.trim="form.name"
@@ -73,7 +73,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-provider">Provider</label>
+          <label for="ai-model-provider">{{ t('Provider') }}</label>
           <select
             id="ai-model-provider"
             v-model="form.providerId"
@@ -90,7 +90,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-provider-name">Provider Model Name</label>
+          <label for="ai-model-provider-name">{{ t('Provider Model Name') }}</label>
           <input
             id="ai-model-provider-name"
             v-model.trim="form.modelName"
@@ -99,7 +99,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-priority">Priority</label>
+          <label for="ai-model-priority">{{ t('Priority') }}</label>
           <input
             id="ai-model-priority"
             v-model="form.priority"
@@ -109,7 +109,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-weight">Weight</label>
+          <label for="ai-model-weight">{{ t('Weight') }}</label>
           <input
             id="ai-model-weight"
             v-model="form.weight"
@@ -124,13 +124,13 @@
             v-model="form.enabled"
             type="checkbox"
           >
-          Enabled
+          {{ t('Enabled') }}
         </label>
       </div>
 
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-model-input-cost">Input Cost</label>
+          <label for="ai-model-input-cost">{{ t('Input Cost') }}</label>
           <input
             id="ai-model-input-cost"
             v-model="form.inputCost"
@@ -141,7 +141,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-output-cost">Output Cost</label>
+          <label for="ai-model-output-cost">{{ t('Output Cost') }}</label>
           <input
             id="ai-model-output-cost"
             v-model="form.outputCost"
@@ -152,7 +152,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-max-tokens">Max Tokens</label>
+          <label for="ai-model-max-tokens">{{ t('Max Tokens') }}</label>
           <input
             id="ai-model-max-tokens"
             v-model="form.maxTokens"
@@ -162,7 +162,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-max-input-tokens">Max Input Tokens</label>
+          <label for="ai-model-max-input-tokens">{{ t('Max Input Tokens') }}</label>
           <input
             id="ai-model-max-input-tokens"
             v-model="form.maxInputTokens"
@@ -173,15 +173,7 @@
       </div>
 
       <div class="ai-gateway-form-field">
-        <label for="ai-model-config">Config JSON</label>
-        <textarea
-          id="ai-model-config"
-          v-model="form.configJson"
-        />
-      </div>
-
-      <div class="ai-gateway-form-field">
-        <label for="ai-model-tags">Tags</label>
+        <label for="ai-model-tags">{{ t('Tags') }}</label>
         <input
           id="ai-model-tags"
           v-model="form.tags"
@@ -193,14 +185,14 @@
           type="submit"
           :disabled="saving"
         >
-          {{ saving ? 'Saving...' : 'Save Model' }}
+          {{ saving ? t('Saving...') : t('Save Model') }}
         </KButton>
         <KButton
           appearance="secondary"
           type="button"
           @click="cancelForm"
         >
-          Cancel
+          {{ t('Cancel') }}
         </KButton>
       </div>
     </form>
@@ -209,20 +201,24 @@
   <KCard
     v-if="gatewayModel"
     class="ai-gateway-form-card"
-    title="Create AI Proxy Route"
+    :title="l('Create AI Proxy Route', '创建 AI 代理路由')"
   >
     <form
       class="ai-gateway-form"
       @submit.prevent="submitGatewayRoute"
     >
       <p class="ai-gateway-muted">
-        Expose model group <strong>{{ gatewayModel.name }}</strong> through kong-rust.
-        Provider credentials stay in the AI Provider record and are not copied into the plugin.
+        {{
+          l(
+            `Expose model group ${gatewayModel.name} through kong-rust. Provider credentials stay in the AI Provider record and are not copied into the plugin.`,
+            `通过 kong-rust 发布模型组 ${gatewayModel.name}。服务商凭据保留在 AI 服务商记录中，不会复制到插件。`,
+          )
+        }}
       </p>
 
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-gateway-service-name">Service Name</label>
+          <label for="ai-gateway-service-name">{{ l('Service Name', '服务名称') }}</label>
           <input
             id="ai-gateway-service-name"
             v-model.trim="gatewayForm.serviceName"
@@ -232,7 +228,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-gateway-route-name">Route Name</label>
+          <label for="ai-gateway-route-name">{{ l('Route Name', '路由名称') }}</label>
           <input
             id="ai-gateway-route-name"
             v-model.trim="gatewayForm.routeName"
@@ -242,7 +238,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-gateway-route-path">Proxy Path</label>
+          <label for="ai-gateway-route-path">{{ l('Proxy Path', '代理路径') }}</label>
           <input
             id="ai-gateway-route-path"
             v-model.trim="gatewayForm.path"
@@ -252,7 +248,7 @@
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-gateway-proxy-url">Proxy Base URL</label>
+          <label for="ai-gateway-proxy-url">{{ l('Proxy Base URL', '代理基础地址') }}</label>
           <input
             id="ai-gateway-proxy-url"
             v-model.trim="gatewayForm.proxyUrl"
@@ -268,7 +264,7 @@
           type="submit"
           :disabled="gatewaySaving"
         >
-          {{ gatewaySaving ? 'Creating...' : 'Create Proxy Route' }}
+          {{ gatewaySaving ? l('Creating...', '创建中...') : l('Create Proxy Route', '创建代理路由') }}
         </KButton>
         <KButton
           appearance="secondary"
@@ -276,7 +272,7 @@
           type="button"
           @click="cancelGatewayRoute"
         >
-          Cancel
+          {{ t('Cancel') }}
         </KButton>
       </div>
     </form>
@@ -289,8 +285,8 @@
       :fetcher="fetchModels"
       :error="!!tableErrorMessage"
       :error-state-message="tableErrorMessage"
-      empty-state-title="No AI models"
-      empty-state-message="Create a model to expose an AI model group."
+      :empty-state-title="t('No AI models')"
+      :empty-state-message="t('Create a model to expose an AI model group.')"
       pagination-offset
     >
       <template #name="{ rowValue }">
@@ -303,7 +299,7 @@
 
       <template #enabled="{ rowValue }">
         <KBadge :appearance="rowValue ? 'success' : 'neutral'">
-          {{ rowValue ? 'Enabled' : 'Disabled' }}
+          {{ rowValue ? t('Enabled') : t('Disabled') }}
         </KBadge>
       </template>
 
@@ -339,7 +335,7 @@
             size="small"
             @click="startGatewayRoute(row)"
           >
-            Create Route
+            {{ t('Create Route') }}
           </KButton>
           <KButton
             appearance="secondary"
@@ -347,7 +343,7 @@
             size="small"
             @click="startEdit(row)"
           >
-            Edit
+            {{ t('Edit') }}
           </KButton>
           <KButton
             appearance="danger"
@@ -355,7 +351,7 @@
             size="small"
             @click="deleteModel(row)"
           >
-            Delete
+            {{ t('Delete') }}
           </KButton>
         </div>
       </template>
@@ -370,16 +366,14 @@ import AiGatewayNav from './AiGatewayNav.vue'
 import { apiService } from '@/services/apiService'
 import { useToaster } from '@/composables/useToaster'
 import type { AiModel, AiProvider, KongPageResponse } from './types'
+import { useAiGatewayI18n } from './useAiGatewayI18n'
 import {
-  emptyJsonObject,
   formatTags,
   getErrorMessage,
   omitUndefined,
-  parseJsonObject,
   parseOptionalFloat,
   parseOptionalInt,
   parseTags,
-  stringifyJson,
 } from './utils'
 
 interface ModelFormState {
@@ -392,7 +386,6 @@ interface ModelFormState {
   outputCost: string | number
   maxTokens: string | number
   maxInputTokens: string | number
-  configJson: string
   enabled: boolean
   tags: string
 }
@@ -415,6 +408,7 @@ defineOptions({
 })
 
 const toaster = useToaster()
+const { l, locale, t } = useAiGatewayI18n()
 const tableKey = ref(0)
 const formVisible = ref(false)
 const saving = ref(false)
@@ -431,18 +425,18 @@ const providerMap = computed(() => {
   return new Map(providers.value.map(provider => [provider.id, provider]))
 })
 
-const headers = [
-  { label: 'Group Name', key: 'name' },
-  { label: 'Provider', key: 'provider_id' },
-  { label: 'Provider Model', key: 'model_name' },
-  { label: 'Priority', key: 'priority' },
-  { label: 'Weight', key: 'weight' },
-  { label: 'Input / Output Cost', key: 'cost' },
-  { label: 'Input / Total Tokens', key: 'tokens' },
-  { label: 'Status', key: 'enabled' },
-  { label: 'Tags', key: 'tags' },
+const headers = computed(() => [
+  { label: t('Group Name'), key: 'name' },
+  { label: t('Provider'), key: 'provider_id' },
+  { label: locale.value === 'zh-CN' ? '服务商模型' : 'Provider Model', key: 'model_name' },
+  { label: t('Priority'), key: 'priority' },
+  { label: t('Weight'), key: 'weight' },
+  { label: locale.value === 'zh-CN' ? '输入 / 输出成本' : 'Input / Output Cost', key: 'cost' },
+  { label: locale.value === 'zh-CN' ? '输入 / 总 Token' : 'Input / Total Tokens', key: 'tokens' },
+  { label: t('Status'), key: 'enabled' },
+  { label: t('Tags'), key: 'tags' },
   { hideLabel: true, key: 'actions' },
-]
+])
 
 const form = reactive<ModelFormState>({
   name: '',
@@ -454,7 +448,6 @@ const form = reactive<ModelFormState>({
   outputCost: '',
   maxTokens: '',
   maxInputTokens: '',
-  configJson: emptyJsonObject,
   enabled: true,
   tags: '',
 })
@@ -476,7 +469,6 @@ const resetForm = () => {
   form.outputCost = ''
   form.maxTokens = ''
   form.maxInputTokens = ''
-  form.configJson = emptyJsonObject
   form.enabled = true
   form.tags = ''
 }
@@ -518,7 +510,10 @@ const loadProviders = async () => {
       form.providerId = providers.value[0]?.id ?? ''
     }
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to load AI providers')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to load AI providers', '无法加载 AI 服务商'),
+    )
   } finally {
     providerLoading.value = false
   }
@@ -538,7 +533,10 @@ const fetchModels = async (props: TableDataFetcherParams) => {
       ...(data.offset ? { pagination: { offset: data.offset } } : null),
     }
   } catch (err) {
-    tableErrorMessage.value = getErrorMessage(err, 'Unable to load AI models')
+    tableErrorMessage.value = getErrorMessage(
+      err,
+      l('Unable to load AI models', '无法加载 AI 模型'),
+    )
   }
 }
 
@@ -588,7 +586,6 @@ const startEdit = (model: AiModel) => {
   form.outputCost = model.output_cost === null || model.output_cost === undefined ? '' : String(model.output_cost)
   form.maxTokens = model.max_tokens === null || model.max_tokens === undefined ? '' : String(model.max_tokens)
   form.maxInputTokens = model.max_input_tokens === null || model.max_input_tokens === undefined ? '' : String(model.max_input_tokens)
-  form.configJson = stringifyJson(model.config)
   form.enabled = model.enabled
   form.tags = formatTags(model.tags)
   formVisible.value = true
@@ -653,23 +650,32 @@ const submitModel = async () => {
       output_cost: parseOptionalFloat(form.outputCost, 'Output cost') ?? (editingId.value ? null : undefined),
       max_tokens: parseOptionalInt(form.maxTokens, 'Max tokens') ?? (editingId.value ? null : undefined),
       max_input_tokens: parseOptionalInt(form.maxInputTokens, 'Max input tokens') ?? (editingId.value ? null : undefined),
-      config: parseJsonObject(form.configJson, 'Config'),
+      ...(!editingId.value ? { config: {} } : {}),
       enabled: form.enabled,
       tags: parseTags(form.tags) ?? (editingId.value ? null : undefined),
     })
 
     if (editingId.value) {
       await apiService.patch(`ai-models/${editingId.value}`, body)
-      toaster.open({ appearance: 'success', message: `Updated model ${form.name}` })
+      toaster.open({
+        appearance: 'success',
+        message: l(`Updated model ${form.name}`, `已更新模型 ${form.name}`),
+      })
     } else {
       await apiService.post('ai-models', body)
-      toaster.open({ appearance: 'success', message: `Created model ${form.name}` })
+      toaster.open({
+        appearance: 'success',
+        message: l(`Created model ${form.name}`, `已创建模型 ${form.name}`),
+      })
     }
 
     cancelForm()
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to save AI model')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to save AI model', '无法保存 AI 模型'),
+    )
   } finally {
     saving.value = false
   }
@@ -835,7 +841,7 @@ const submitGatewayRoute = async () => {
   gatewayEndpoint.value = proxyEndpoint
   toaster.open({
     appearance: 'success',
-    message: `Created proxy route ${routeName}`,
+    message: l(`Created proxy route ${routeName}`, `已创建代理路由 ${routeName}`),
   })
   gatewayModel.value = null
   gatewayForm.serviceName = ''
@@ -847,14 +853,23 @@ const submitGatewayRoute = async () => {
 const copyGatewayEndpoint = async () => {
   try {
     await navigator.clipboard.writeText(gatewayEndpoint.value)
-    toaster.open({ appearance: 'success', message: 'Copied proxy endpoint' })
+    toaster.open({
+      appearance: 'success',
+      message: l('Copied proxy endpoint', '已复制代理接口'),
+    })
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to copy proxy endpoint')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to copy proxy endpoint', '无法复制代理接口'),
+    )
   }
 }
 
 const deleteModel = async (model: AiModel) => {
-  if (!window.confirm(`Delete AI model "${model.name}"?`)) {
+  if (!window.confirm(l(
+    `Delete AI model "${model.name}"?`,
+    `删除 AI 模型“${model.name}”？`,
+  ))) {
     return
   }
 
@@ -862,10 +877,16 @@ const deleteModel = async (model: AiModel) => {
 
   try {
     await apiService.delete(`ai-models/${model.id}`)
-    toaster.open({ appearance: 'success', message: `Deleted model ${model.name}` })
+    toaster.open({
+      appearance: 'success',
+      message: l(`Deleted model ${model.name}`, `已删除模型 ${model.name}`),
+    })
     tableKey.value += 1
   } catch (err) {
-    errorMessage.value = getErrorMessage(err, 'Unable to delete AI model')
+    errorMessage.value = getErrorMessage(
+      err,
+      l('Unable to delete AI model', '无法删除 AI 模型'),
+    )
   }
 }
 

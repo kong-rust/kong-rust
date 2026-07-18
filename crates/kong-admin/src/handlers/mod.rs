@@ -6,6 +6,7 @@
 //! - Special endpoints (/, /status) — 特殊端点（/, /status）
 
 pub mod schemas;
+pub mod ai_endpoint_test;
 pub mod ai_providers;
 pub mod ai_models;
 pub mod ai_virtual_keys;
