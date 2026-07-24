@@ -245,10 +245,10 @@ import {
   normalizeSlug,
 } from './endpointUtils'
 import {
+  buildEndpoints,
   createEndpoint,
   deleteEndpoint,
   loadEndpointResources,
-  loadEndpoints,
   updateEndpoint,
 } from './useEndpointPublisher'
 import { getErrorMessage } from './utils'
@@ -318,11 +318,9 @@ const refresh = async () => {
   errorMessage.value = ''
 
   try {
-    const [loadedEndpoints, resources] = await Promise.all([
-      loadEndpoints(),
-      loadEndpointResources(),
-    ])
-    endpoints.value = loadedEndpoints
+    // Fetch resources once and derive endpoints from them — 只拉取一次资源，再据此派生接口列表
+    const resources = await loadEndpointResources()
+    endpoints.value = buildEndpoints(resources)
     providers.value = resources.providers
   } catch (error) {
     errorMessage.value = getErrorMessage(error, 'Unable to load AI endpoints')
