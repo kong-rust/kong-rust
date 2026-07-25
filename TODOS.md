@@ -2,6 +2,8 @@
 
 > 执行路径：三轨并行。轨道 A（传统网关加固）、轨道 B（AI 网关引擎）、轨道 C（AI 网关控制台）。A/B 无技术依赖，C 依赖 B 的 Admin API。
 > 详细战略文档见 [docs/designs/ai-gateway-strategy.md](docs/designs/ai-gateway-strategy.md)
+>
+> **⚠️ 2026-07-25 起，新功能需求统一在 [docs/pm/backlog.md](docs/pm/backlog.md) 以需求单（REQ）维度管理**（需求分析 → 方案设计 → 编码实现，前端控制台与功能同步交付，流程规范见 AGENTS.md）。本文件保留历史阶段记录，轨道 B/C 的后续待办已细化迁移至需求单列表。
 
 ---
 
