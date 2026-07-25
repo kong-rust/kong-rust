@@ -10,10 +10,25 @@ use crate::AdminState;
 
 const MANAGED_ENDPOINT_TAG: &str = "kr-ai-endpoint-v1";
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct TestEndpointRequest {
     path: String,
     request: Value,
+    /// Virtual key forwarded as a bearer credential — never logged
+    /// 作为 bearer 凭证转发的虚拟密钥 — 不记录日志
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+// Hand-written to keep the credential out of debug output — 手写实现以避免凭证进入调试输出
+impl std::fmt::Debug for TestEndpointRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestEndpointRequest")
+            .field("path", &self.path)
+            .field("request", &self.request)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -118,18 +133,26 @@ pub async fn test_endpoint(
                 Json(json!({ "message": "unable to create endpoint test client" })),
             )
         })?;
-    let response = client
+    let mut request = client
         .post(format!("{base_url}{}", payload.path))
-        .json(&payload.request)
-        .send()
-        .await
-        .map_err(|error| {
-            tracing::warn!("Managed AI endpoint test request failed: {error}");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": format!("endpoint request failed: {error}") })),
-            )
-        })?;
+        .json(&payload.request);
+
+    // Forward the virtual key so endpoints with ai-key-auth can be exercised
+    // 转发虚拟密钥，使挂载了 ai-key-auth 的接口可被调试
+    if let Some(api_key) = payload.api_key.as_deref() {
+        let api_key = api_key.trim();
+        if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {api_key}"));
+        }
+    }
+
+    let response = request.send().await.map_err(|error| {
+        tracing::warn!("Managed AI endpoint test request failed: {error}");
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "message": format!("endpoint request failed: {error}") })),
+        )
+    })?;
     let status = response.status().as_u16();
     let model = response
         .headers()

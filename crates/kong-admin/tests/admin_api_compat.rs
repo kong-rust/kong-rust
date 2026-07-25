@@ -49,6 +49,9 @@ fn create_test_app() -> axum::Router {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config: Arc::clone(&config),
         proxy,
@@ -102,6 +105,9 @@ fn create_test_status_app() -> axum::Router {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config: Arc::clone(&config),
         proxy,
@@ -176,6 +182,9 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config: Arc::clone(&config),
         proxy,
@@ -325,6 +334,9 @@ fn create_test_app_with_data() -> axum::Router {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config: Arc::clone(&config),
         proxy,
@@ -989,6 +1001,9 @@ fn create_test_app_with_cache() -> (axum::Router, Arc<kong_db::KongCache>) {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config,
         proxy,
@@ -1255,6 +1270,9 @@ fn create_test_app_with_keys() -> (axum::Router, String, String) {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
+            DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
+        ))),
         node_id: Uuid::new_v4(),
         config,
         proxy,

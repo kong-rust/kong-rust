@@ -646,7 +646,8 @@ impl<T: Entity> Dao<T> for PgDao<T> {
         };
 
         // Whitelist of filterable columns to prevent SQL injection — 可过滤列白名单，防止 SQL 注入
-        const ALLOWED_FILTER_COLUMNS: &[&str] = &["custom_id", "username", "name", "host"];
+        const ALLOWED_FILTER_COLUMNS: &[&str] =
+            &["custom_id", "username", "name", "host", "key_hash"];
 
         // Validate filter field names — 验证过滤字段名
         let valid_filters: Vec<&(String, String)> = params.filters.iter()

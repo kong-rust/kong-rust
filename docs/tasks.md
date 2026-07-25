@@ -18,13 +18,13 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| 15 | AI Gateway — 协议与管理面 | 3 | 3 | 0 |
+| 15 | AI Gateway — 协议与管理面 | 4 | 4 | 0 |
 | 16 | Admin API 补全 | 5 | 5 | 0 |
 | 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **87** | **82** | **5** |
+| **合计** | | **88** | **83** | **5** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -402,6 +402,20 @@
   - Playwright 覆盖 Endpoint、Provider、Advanced Model、Virtual Key CRUD，真实代理与内置测试台、一次性密钥轮换、菜单顺序、双语默认/切换及页面零 JSON
   - 设计：`docs/design.md` 10.6.1；实现记录：`docs/implementation-logs/task-15-3_2026-07-18_ai-endpoint-manager.md`
   - 文件：`kong-manager/src/pages/ai-gateway/`、`crates/kong-admin/src/handlers/ai_endpoint_test.rs`
+
+- [x] **15.4** Virtual Key 运行时认证（REQ-AI-001）`[R10]`
+  - 新增 `ai-key-auth` 插件（priority 774，先于全部 AI 插件）：按 `Authorization: Bearer` → `x-api-key` → 自定义头（默认 `X-AI-Key`）提取凭证，兼容 OpenAI 与 Anthropic SDK 默认携带方式
+  - 新增 `VirtualKeyAuthenticator`（kong-ai `auth.rs`）：SHA-256 查表走通用 `Dao::page` filters（PG 与 DB-less 同一路径），moka 缓存 TTL 1s + 负缓存 + 容量上限；返回结果本地复核 hash，避免 DAO 静默丢弃过滤条件时放行无关密钥
+  - 校验 `enabled` / `expires_at` / `allowed_models`（末尾 `*` 前缀通配 + 精确匹配，OR 语义；请求体无 `model` 字段时跳过，兼容 `model_source=config`）
+  - 密钥不存在 / 已禁用 / 已过期返回完全相同的 401，避免密钥状态被探测
+  - 错误体按客户端协议自适应：`x-api-key` 凭证或 `/v1/messages` 路径 → Anthropic 风格，否则 OpenAI 风格；`error_format` 可显式覆盖
+  - 身份注入 `AiAuthContext` + `ctx.consumer_id` + `authenticated_credential`，`ai-rate-limit` 的 `limit_by=consumer` 与 Consumer 哈希由此首次真正可用
+  - Admin API create/update/delete/rotate 与 DB-less `POST /config` 成功后即时失效认证缓存（TTL 仅作带外变更兜底）
+  - `key_hash` 加入 `PgDao` 可过滤列白名单（此前不在白名单会被静默丢弃）；插件登记 `BUNDLED_PLUGINS`、`rust_native_plugin_schema`、`get_known_config_fields`
+  - Kong Manager：发布向导新增「要求虚拟密钥」开关（含创建/更新/删除/回滚全链路）、Virtual Keys 与 Overview 文案更新为已生效能力、Playground 支持带密钥调试（Admin relay 转发 Bearer，凭证不落日志）
+  - 测试：26 单元 + 25 集成（含缓存命中计数、轮换/禁用/删除即时失效、过滤条件被丢弃时的防御性校验）；16 项真实 HTTP E2E 经 PostgreSQL 实例全部通过
+  - 需求分析：`docs/pm/REQ-AI-001/analysis.md`；方案设计：`docs/pm/REQ-AI-001/design.md`
+  - 文件：`crates/kong-ai/src/auth.rs`（新建）、`crates/kong-ai/src/plugins/ai_key_auth.rs`（新建）、`crates/kong-ai/tests/ai_key_auth_test.rs`（新建）、`crates/kong-server/src/main.rs`、`crates/kong-admin/src/{lib.rs,handlers/ai_virtual_keys.rs,handlers/ai_endpoint_test.rs,handlers/schemas.rs,handlers/mod.rs}`、`crates/kong-db/src/dao/postgres.rs`、`crates/kong-config/src/config.rs`、`kong-manager/src/pages/ai-gateway/`
 
 ## 阶段 16：Admin API 补全
 

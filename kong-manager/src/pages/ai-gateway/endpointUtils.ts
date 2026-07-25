@@ -138,6 +138,7 @@ export const endpointToDraft = (endpoint: AiEndpoint): EndpointDraft => ({
   displayName: endpoint.displayName,
   slug: endpoint.slug,
   enabled: endpoint.enabled,
+  requireAuth: endpoint.requireAuth,
   models: endpoint.models.map(model => ({
     clientId: model.id,
     providerMode: 'existing',

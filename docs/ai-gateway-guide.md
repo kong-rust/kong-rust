@@ -148,18 +148,20 @@ An AI Model is a mapping from a "logical model" to a "physical Provider model":
 
 An AI Virtual Key is a virtual API key for users/teams, used for:
 
-- Fine-grained TPM / RPM quota control
-- Budget caps (`budget_limit`) and usage tracking (`budget_used`)
-- Model whitelist (`allowed_models`) restricting which models can be accessed
+- Authenticating proxy traffic (active once the `ai-key-auth` plugin is attached — see [3.5](#35-ai-key-auth))
+- Model allow list (`allowed_models`) restricting which models can be accessed (active)
+- Fine-grained TPM / RPM quota control (`tpm_limit` / `rpm_limit` — stored but not yet enforced)
+- Budget caps (`budget_limit`) and usage tracking (`budget_used` — stored but not yet enforced)
 
 Virtual Keys have the format `sk-kr-<uuid32>`. The raw key is returned once at creation time; only its SHA256 hash is stored thereafter.
 
-### Four Plugins and Their Priorities
+### Five Plugins and Their Priorities
 
 Plugins execute in descending priority order (higher number executes first):
 
 | Plugin | Priority | Responsibility |
 |---|---|---|
+| ai-key-auth | 774 | Authentication: virtual key validation, model allow list, identity injection |
 | ai-prompt-guard | 773 | Security check: deny/allow pattern matching, message length limit |
 | ai-cache | 772 | Semantic cache: compute cache key, short-circuit on hit |
 | ai-rate-limit | 771 | Rate limiting: RPM / TPM counting, pre-deduction correction |
@@ -382,6 +384,122 @@ Performs security review on user input (`role=user` messages), supporting deny p
   "action": "log_only"
 }
 ```
+
+---
+
+### 3.5 ai-key-auth
+
+Authenticates proxy traffic with an AI Virtual Key and enforces the key's model allow list. At priority 774 it runs ahead of every other AI plugin, so downstream plugins (rate limiting, logging, usage) observe an authenticated identity.
+
+Routes without this plugin behave exactly as before — no key required.
+
+#### Configuration Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `key_header` | string | `"X-AI-Key"` | Fallback credential header, tried after `Authorization` and `x-api-key` |
+| `error_format` | string | `"auto"` | Error body dialect: `auto` (adapts to the client protocol) / `openai` / `anthropic` |
+
+#### Credential Carriers
+
+The plugin reads the credential in this order and uses the first one found:
+
+1. `Authorization: Bearer <key>` — the OpenAI SDK default (scheme is case-insensitive; non-Bearer schemes such as Basic are skipped)
+2. `x-api-key: <key>` — the Anthropic SDK default
+3. The header named by `key_header` (default `X-AI-Key`)
+
+Both the official OpenAI and Anthropic SDKs therefore work unmodified.
+
+#### Validation and Responses
+
+| Case | Status | Error code |
+|---|---|---|
+| No credential presented | 401 | `missing_api_key` |
+| Unknown key / `enabled=false` / past `expires_at` | 401 | `invalid_api_key` |
+| Requested `model` not in `allowed_models` | 403 | `model_not_allowed` |
+
+> **Security note**: unknown, disabled, and expired keys return an identical response so that key state cannot be probed.
+
+`error_format=auto` resolution order: credential came from `x-api-key` → Anthropic dialect; request path contains `/v1/messages` → Anthropic dialect; otherwise OpenAI.
+
+OpenAI dialect:
+
+```json
+{"error": {"message": "invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}}
+```
+
+Anthropic dialect:
+
+```json
+{"type": "error", "error": {"type": "authentication_error", "message": "invalid API key"}}
+```
+
+#### Model Allow List (allowed_models)
+
+- Empty array or unset → unrestricted
+- Entries ending in `*` match by prefix: `gpt-4*` matches `gpt-4`, `gpt-4o`, `gpt-4-turbo`, but not `gpt-3.5-turbo`
+- All other entries match exactly (case-sensitive)
+- Entries are OR-combined — any hit allows the request; a bare `*` is equivalent to unrestricted
+- **Only checked when the request body carries a `model` field**: under `model_source=config` clients legitimately omit `model`, and the allow list is skipped in that case
+
+#### Identity Injection
+
+On success the plugin injects into the request context:
+
+- `AiAuthContext { virtual_key_id, key_name, consumer_id }` — the channel downstream AI plugins read
+- `consumer_id` (when the key is bound to a Consumer) — this is what makes `ai-rate-limit`'s `limit_by=consumer` and Consumer hashing take effect
+- `authenticated_credential` — surfaced in the access log
+
+#### Example: Attach to a Route
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-key-auth",
+    "route": {"id": "<ROUTE_ID>"},
+    "config": {}
+  }'
+```
+
+Create a key and call the endpoint:
+
+```bash
+# Create a key (the raw key is returned only once, here)
+curl -X POST http://localhost:8001/ai-virtual-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "team-a", "allowed_models": ["gpt-4*"]}'
+
+# Call with the key
+curl -X POST http://localhost:8000/ai/demo/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-kr-...' \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+#### Caching and Propagation Delay
+
+Key lookups are cached in-process (including negative results for invalid keys) with a 1-second TTL. Creating, updating, rotating, or deleting a key through the Admin API invalidates the cache immediately, so those operations take effect at once; the TTL only bounds out-of-band changes (multi-node deployments, direct database writes).
+
+#### DB-less Mode
+
+`ai_virtual_keys` entries in a declarative config must carry their own `key_hash` — the Admin API generates it server-side, but declarative loading does not:
+
+```bash
+# Compute key_hash from a raw key
+printf 'sk-kr-your-key' | shasum -a 256
+```
+
+```yaml
+ai_virtual_keys:
+  - name: team-a
+    key_hash: <the sha256 hex from above>
+    key_prefix: sk-kr-y
+    enabled: true
+    allowed_models: ["gpt-4*"]
+```
+
+> **Limitation**: in Hybrid (CP/DP) mode, CP→DP config sync currently excludes all AI entities, so DP nodes hold no Virtual Key data.
 
 ---
 

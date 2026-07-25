@@ -53,6 +53,9 @@ pub struct AdminState {
     pub ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>>,
     pub ai_models: Arc<dyn Dao<kong_ai::models::AiModel>>,
     pub ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>>,
+    /// Virtual key authenticator shared with the ai-key-auth plugin — invalidated after key mutations
+    /// 与 ai-key-auth 插件共享的虚拟密钥认证器 — 密钥变更后失效其缓存
+    pub virtual_key_auth: Arc<kong_ai::auth::VirtualKeyAuthenticator>,
     pub node_id: uuid::Uuid,
     pub config: Arc<kong_config::KongConfig>,
     /// Proxy engine reference (Clone semantics, sharing underlying Arc data), used to refresh in-memory cache after write operations — 代理引擎引用（Clone 语义，共享底层 Arc 数据），用于写操作后刷新内存缓存

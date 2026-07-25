@@ -242,6 +242,8 @@ const BUNDLED_PLUGINS: &[&str] = &[
     "rewriter", "dummy", "error-generator", "error-generator-last", "short-circuit",
     "ctx-checker", "ctx-checker-last", "enable-buffering", "enable-buffering-response", "mocking",
     "admin-api-method",
+    // Kong-Rust native AI plugins — Kong-Rust 原生 AI 插件
+    "ai-key-auth",
 ];
 
 /// Return schema for Rust native plugins (no Lua schema.lua needed) — 返回 Rust 原生插件的 schema（无需 Lua schema.lua）
@@ -290,6 +292,17 @@ fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
             ],
             "entity_checks": [],
             "name": "ai-proxy",
+        })),
+        "ai-key-auth" => Some(json!({
+            "fields": [
+                {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
+                {"config": {"type": "record", "required": true, "fields": [
+                    {"key_header": {"type": "string", "default": "X-AI-Key"}},
+                    {"error_format": {"type": "string", "default": "auto", "one_of": ["auto", "openai", "anthropic"]}},
+                ]}},
+            ],
+            "entity_checks": [],
+            "name": "ai-key-auth",
         })),
         "ai-rate-limit" | "ai-cache" | "ai-prompt-guard" => Some(json!({
             "fields": [
@@ -970,6 +983,7 @@ fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
         "enable-buffering" | "enable-buffering-response" => vec!["phase", "mode"],
         "mocking" => vec!["api_specification"],
         "rewriter" => vec!["value"],
+        "ai-key-auth" => vec!["key_header", "error_format"],
         _ => vec![], // Unknown plugin: skip config field validation — 未知插件：跳过 config 字段验证
     }
 }

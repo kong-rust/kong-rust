@@ -90,6 +90,7 @@ pub async fn create(
             obj.remove("key_hash");
             obj.insert("key".to_string(), json!(raw_key));
         }
+        state.virtual_key_auth.invalidate_all();
     }
 
     (status, Json(resp))
@@ -102,6 +103,11 @@ pub async fn update(
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
     let (status, Json(resp)) = do_update::<AiVirtualKey>(&state.ai_virtual_keys, &id_or_name, &body).await;
+    if status.is_success() {
+        // 使认证缓存立即失效（如 enabled / allowed_models 变更）
+        // Invalidate the auth cache immediately (e.g. enabled / allowed_models changed)
+        state.virtual_key_auth.invalidate_all();
+    }
     (status, Json(strip_key_hash(resp)))
 }
 
@@ -110,7 +116,11 @@ pub async fn delete_one(
     State(state): State<AdminState>,
     Path(id_or_name): Path<String>,
 ) -> impl IntoResponse {
-    do_delete::<AiVirtualKey>(&state.ai_virtual_keys, &id_or_name).await
+    let response = do_delete::<AiVirtualKey>(&state.ai_virtual_keys, &id_or_name).await;
+    if response.status().is_success() {
+        state.virtual_key_auth.invalidate_all();
+    }
+    response
 }
 
 /// POST /ai-virtual-keys/:id/rotate — 轮换密钥（生成新密钥，更新哈希）
@@ -159,6 +169,8 @@ pub async fn rotate(
             obj.remove("key_hash");
             obj.insert("key".to_string(), json!(raw_key));
         }
+        // 轮换后旧密钥必须立即失效 — the rotated-out key must stop working immediately
+        state.virtual_key_auth.invalidate_all();
     }
 
     (status, Json(resp)).into_response()

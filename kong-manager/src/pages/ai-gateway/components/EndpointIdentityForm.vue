@@ -49,6 +49,18 @@
       >
       {{ t('Enable this endpoint after publishing') }}
     </label>
+
+    <label class="ai-gateway-checkbox">
+      <input
+        :checked="requireAuth"
+        type="checkbox"
+        @change="updateRequireAuth"
+      >
+      {{ t('Require a virtual key to call this endpoint') }}
+    </label>
+    <p class="ai-endpoint-hint">
+      {{ t('Callers send the key as Authorization: Bearer, x-api-key, or X-AI-Key. Manage keys under Virtual Keys.') }}
+    </p>
   </section>
 </template>
 
@@ -61,12 +73,14 @@ const props = defineProps<{
   displayName: string
   slug: string
   enabled: boolean
+  requireAuth: boolean
 }>()
 
 const emit = defineEmits<{
   'update:displayName': [value: string]
   'update:slug': [value: string]
   'update:enabled': [value: boolean]
+  'update:requireAuth': [value: boolean]
 }>()
 const { l, t } = useAiGatewayI18n()
 
@@ -82,5 +96,9 @@ const updateSlug = (event: Event) => {
 
 const updateEnabled = (event: Event) => {
   emit('update:enabled', (event.target as HTMLInputElement).checked)
+}
+
+const updateRequireAuth = (event: Event) => {
+  emit('update:requireAuth', (event.target as HTMLInputElement).checked)
 }
 </script>

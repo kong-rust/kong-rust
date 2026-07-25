@@ -148,18 +148,20 @@ AI Model 是"逻辑模型"到"物理 Provider 模型"的映射：
 
 AI Virtual Key 是一种面向用户/团队的虚拟 API Key，用于：
 
-- 细粒度的 TPM / RPM 配额控制
-- 预算上限（`budget_limit`）和使用量追踪（`budget_used`）
-- 允许访问的模型白名单（`allowed_models`）
+- 代理流量认证（挂载 `ai-key-auth` 插件后生效，见 [3.5](#35-ai-key-auth)）
+- 允许访问的模型白名单（`allowed_models`，已生效）
+- 细粒度的 TPM / RPM 配额控制（`tpm_limit` / `rpm_limit`，当前仅存储，尚未生效）
+- 预算上限（`budget_limit`）和使用量追踪（`budget_used`，当前仅存储，尚未生效）
 
 Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，此后只存储 SHA256 哈希。
 
-### 四个插件及优先级
+### 五个插件及优先级
 
 插件按优先级从高到低执行（数字大者先执行）：
 
 | 插件 | 优先级 | 职责 |
 |---|---|---|
+| ai-key-auth | 774 | 认证：虚拟密钥校验、模型白名单、身份注入 |
 | ai-prompt-guard | 773 | 安全检查：拒绝/允许模式匹配、消息长度限制 |
 | ai-cache | 772 | 语义缓存：计算缓存键、命中时短路 |
 | ai-rate-limit | 771 | 限流：RPM / TPM 计数、预扣修正 |
@@ -383,6 +385,122 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   "action": "log_only"
 }
 ```
+
+---
+
+### 3.5 ai-key-auth
+
+用 AI Virtual Key 对代理流量做认证，并校验密钥的模型白名单。优先级 774，先于其他所有 AI 插件执行，因此下游插件（限流、日志、用量）可以读到已认证的身份。
+
+未挂载该插件的 Route 行为完全不变（不需要密钥）。
+
+#### 配置字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `key_header` | string | `"X-AI-Key"` | 兜底凭证头名称，在 `Authorization` 与 `x-api-key` 之后尝试 |
+| `error_format` | string | `"auto"` | 错误体风格：`auto`（按客户端协议自适应）/ `openai` / `anthropic` |
+
+#### 凭证携带方式
+
+插件按以下顺序读取凭证，取到第一个即使用：
+
+1. `Authorization: Bearer <key>` — OpenAI SDK 默认方式（scheme 大小写不敏感；非 Bearer 的 Authorization 如 Basic 会被跳过）
+2. `x-api-key: <key>` — Anthropic SDK 默认方式
+3. `key_header` 指定的自定义头（默认 `X-AI-Key`）
+
+因此 OpenAI 与 Anthropic 官方 SDK 都无需改动即可直接使用。
+
+#### 校验规则与响应
+
+| 场景 | 状态码 | 错误 code |
+|---|---|---|
+| 未携带凭证 | 401 | `missing_api_key` |
+| 密钥不存在 / `enabled=false` / 已过 `expires_at` | 401 | `invalid_api_key` |
+| 请求 `model` 不在 `allowed_models` 内 | 403 | `model_not_allowed` |
+
+> **安全设计**：密钥不存在、已禁用、已过期三种情况返回完全相同的响应，避免密钥状态被探测。
+
+`error_format=auto` 的判定顺序：凭证来自 `x-api-key` → Anthropic 风格；请求路径含 `/v1/messages` → Anthropic 风格；否则 OpenAI 风格。
+
+OpenAI 风格错误体：
+
+```json
+{"error": {"message": "invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}}
+```
+
+Anthropic 风格错误体：
+
+```json
+{"type": "error", "error": {"type": "authentication_error", "message": "invalid API key"}}
+```
+
+#### 模型白名单（allowed_models）
+
+- 为空数组或未设置 → 不限制
+- 以 `*` 结尾的项按前缀匹配：`gpt-4*` 匹配 `gpt-4`、`gpt-4o`、`gpt-4-turbo`，但不匹配 `gpt-3.5-turbo`
+- 其余项精确匹配（大小写敏感）
+- 多项为 OR 语义，命中任意一项即放行；单独一个 `*` 等同不限制
+- **仅当请求体含 `model` 字段时校验**：`model_source=config` 部署下客户端不传 `model` 属于正常用法，此时跳过白名单检查
+
+#### 身份注入
+
+认证通过后，插件向请求上下文注入：
+
+- `AiAuthContext { virtual_key_id, key_name, consumer_id }` — 供下游 AI 插件读取
+- `consumer_id`（密钥绑定 Consumer 时）— 使 `ai-rate-limit` 的 `limit_by=consumer` 与 Consumer 一致性哈希开始生效
+- `authenticated_credential` — 进入 access log
+
+#### 示例：挂载到 Route
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-key-auth",
+    "route": {"id": "<ROUTE_ID>"},
+    "config": {}
+  }'
+```
+
+创建密钥并调用：
+
+```bash
+# 创建密钥（原始密钥只在此刻返回一次）
+curl -X POST http://localhost:8001/ai-virtual-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "team-a", "allowed_models": ["gpt-4*"]}'
+
+# 携带密钥调用
+curl -X POST http://localhost:8000/ai/demo/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-kr-...' \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+#### 缓存与生效延迟
+
+认证查找带进程内缓存（含无效密钥的负缓存），TTL 1 秒。通过 Admin API 创建、更新、轮换、删除密钥时缓存立即失效，因此这些操作**即时生效**；TTL 只是带外变更（多节点、直接写库）的兜底窗口。
+
+#### DB-less 模式
+
+声明式配置中的 `ai_virtual_keys` 需要自行提供 `key_hash`（Admin API 的 `key_hash` 是服务端生成的，声明式加载不会生成）：
+
+```bash
+# 由原始密钥计算 key_hash
+printf 'sk-kr-your-key' | shasum -a 256
+```
+
+```yaml
+ai_virtual_keys:
+  - name: team-a
+    key_hash: <上面算出的 sha256 十六进制>
+    key_prefix: sk-kr-y
+    enabled: true
+    allowed_models: ["gpt-4*"]
+```
+
+> **限制**：Hybrid（CP/DP）模式下 CP→DP 的配置同步当前不包含任何 AI 实体，因此 DP 节点上没有 Virtual Key 数据。
 
 ---
 

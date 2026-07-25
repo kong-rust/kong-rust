@@ -235,6 +235,7 @@ fn build_plugin_registry(
     config: &kong_config::KongConfig,
     ai_models: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiModel>>,
     ai_providers: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiProviderConfig>>,
+    virtual_key_auth: Arc<kong_ai::auth::VirtualKeyAuthenticator>,
 ) -> kong_plugin_system::PluginRegistry {
     let mut registry = kong_plugin_system::PluginRegistry::new();
     let plugin_names = config.loaded_plugins();
@@ -276,6 +277,10 @@ fn build_plugin_registry(
     registry.register("ai-rate-limit", Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()));
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
     registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
+    registry.register(
+        "ai-key-auth",
+        Arc::new(kong_ai::plugins::AiKeyAuthPlugin::new(virtual_key_auth)),
+    );
 
     // 注入全局 TokenizerRegistry — ai-rate-limit / ai-proxy 通过 OnceLock 单例访问
     // Install global TokenizerRegistry — ai-rate-limit and ai-proxy reach it via OnceLock
@@ -740,8 +745,19 @@ async fn init_proxy_and_admin(
             Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(Arc::clone(&store)));
         let ai_models: Arc<dyn Dao<kong_ai::models::AiModel>> =
             Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(&store)));
-        let plugin_registry =
-            build_plugin_registry(config, Arc::clone(&ai_models), Arc::clone(&ai_providers));
+        let ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>> =
+            Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(&store)));
+        // Shared by the ai-key-auth plugin and the Admin API (cache invalidation)
+        // 由 ai-key-auth 插件与 Admin API（缓存失效）共用
+        let virtual_key_auth = Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::clone(
+            &ai_virtual_keys,
+        )));
+        let plugin_registry = build_plugin_registry(
+            config,
+            Arc::clone(&ai_models),
+            Arc::clone(&ai_providers),
+            Arc::clone(&virtual_key_auth),
+        );
 
         let kong_proxy = kong_proxy::KongProxy::new(
             &[],
@@ -768,7 +784,8 @@ async fn init_proxy_and_admin(
             keys: Arc::new(DblessDao::<Key>::new(Arc::clone(&store))),
             ai_providers,
             ai_models,
-            ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(&store))),
+            ai_virtual_keys,
+            virtual_key_auth,
             node_id,
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),
@@ -843,8 +860,22 @@ async fn init_proxy_and_admin(
                 db.clone(),
                 ai_model_schema(),
             ));
-        let plugin_registry =
-            build_plugin_registry(config, Arc::clone(&ai_models), Arc::clone(&ai_providers));
+        let ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>> =
+            Arc::new(PgDao::<kong_ai::models::AiVirtualKey>::new(
+                db.clone(),
+                ai_virtual_key_schema(),
+            ));
+        // Shared by the ai-key-auth plugin and the Admin API (cache invalidation)
+        // 由 ai-key-auth 插件与 Admin API（缓存失效）共用
+        let virtual_key_auth = Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::clone(
+            &ai_virtual_keys,
+        )));
+        let plugin_registry = build_plugin_registry(
+            config,
+            Arc::clone(&ai_models),
+            Arc::clone(&ai_providers),
+            Arc::clone(&virtual_key_auth),
+        );
 
         let routes_page = routes_dao.page(&all_params).await?;
         let services_page = services_dao.page(&all_params).await?;
@@ -902,7 +933,8 @@ async fn init_proxy_and_admin(
             keys: Arc::new(PgDao::<Key>::new(db.clone(), key_schema())),
             ai_providers,
             ai_models,
-            ai_virtual_keys: Arc::new(PgDao::<kong_ai::models::AiVirtualKey>::new(db.clone(), ai_virtual_key_schema())),
+            ai_virtual_keys,
+            virtual_key_auth,
             node_id,
             config: Arc::clone(config),
             proxy: kong_proxy.clone(),

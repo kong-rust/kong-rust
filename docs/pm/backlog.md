@@ -7,7 +7,7 @@
 ## 使用说明
 
 - **状态流转**：`📋 待启动` → `📝 需求分析` → `🎨 方案设计` → `🔨 编码实现` → `✅ 已完成`（阶段完成即更新本表）
-- **方案设计产出**：小需求直接写在需求单的「方案设计」小节；涉及新 crate / 新表 / 跨模块架构的写入 `docs/designs/REQ-XXX-*.md` 并在需求单中链接
+- **文档结构**：每个需求一个文件夹 `docs/pm/REQ-XXX/`——需求分析定稿写入 `REQ-XXX/analysis.md`，方案设计写入 `REQ-XXX/design.md`；本文件中需求单只保留摘要与链接。未启动的需求以范围草案形式留在本文件内，进入需求分析阶段时抽取为独立文档
 - **前端同步原则**：功能需求的 Kong Manager 支持与后端能力**同一需求单内交付**；纯后端需求必须在「前端范围」显式标注 `无（豁免：<原因>）`
 - **Effort 口径**：沿用 TODOS.md 惯例，S=几小时 / M=1-3 天 / L=1-2 周 / XL=2-4 周（AI 辅助开发时间）
 - 实现层任务状态同步到 `docs/tasks.md`，实现完成后按 AGENTS.md 要求补 implementation log
@@ -16,7 +16,7 @@
 
 | ID | 需求 | 优先级 | 状态 | Effort | 依赖 |
 |----|------|--------|------|--------|------|
-| [REQ-AI-001](#req-ai-001) | Virtual Key 运行时认证 | P0 | 📋 待启动 | M | 无 |
+| [REQ-AI-001](#req-ai-001) | Virtual Key 运行时认证 | P0 | ✅ 已完成 | M | 无 |
 | [REQ-AI-002](#req-ai-002) | Token 成本核算与用量事实表 | P0 | 📋 待启动 | M | 无 |
 | [REQ-AI-003](#req-ai-003) | Virtual Key 配额与预算控制 | P0 | 📋 待启动 | M | 001, 002 |
 | [REQ-AI-004](#req-ai-004) | AI 可观测性对齐（Prometheus + TTFT） | P1 | 📋 待启动 | S | 无 |
@@ -42,30 +42,13 @@
 ### Virtual Key 运行时认证（Virtual Key Runtime Authentication）
 
 - **优先级 / Effort：** P0 / M
-- **状态：** 📋 待启动
+- **状态：** ✅ 已完成（2026-07-25）
 - **依赖：** 无
+- **📄 需求分析：** [REQ-AI-001/analysis.md](REQ-AI-001/analysis.md)（9 条 FR、7 条验收标准、3 项已确认决策）
+- **📄 方案设计：** [REQ-AI-001/design.md](REQ-AI-001/design.md)
+- **📄 实现记录：** [task-15-4](../implementation-logs/task-15-4_2026-07-25_virtual-key-auth.md)（tasks.md 15.4）
 
-**背景与价值**
-
-`ai_virtual_keys` 表字段完整（key_hash/allowed_models/expires_at/enabled 等），Admin CRUD + 轮换 + 脱敏、前端管理页均已交付，但代理运行时**没有任何代码读取 key**——认证、模型白名单全部不生效，前端页面挂着「尚未接入代理认证」警告。Key 治理是 LiteLLM/Portkey 等竞品的核心价值，也是「AI 网关」区别于「LLM 反向代理」的分水岭。本需求激活已有的三层存量投资（DB/Admin/前端）。
-
-**需求范围**
-
-- 后端：
-  1. 实现 `AiVirtualKeyExt` DAO（`get_by_hash` 等，PG + DB-less 双模式）+ moka 缓存（失效跟随实体 CUD 事件）
-  2. 认证接入代理链：读取 `Authorization: Bearer sk-kr-*` / `X-AI-Key` → SHA256 → 查 key（独立 ai-key-auth 插件还是 ai-proxy 内置开关，方案设计阶段定）
-  3. 校验 `enabled` / `expires_at` / `allowed_models`，失败返回 OpenAI 风格错误体（401 / 403）
-  4. ctx 注入 `virtual_key_id` + `consumer_id`，供下游限流、日志、用量插件消费
-- 前端：Endpoint 发布向导增加「启用 Virtual Key 认证」开关；VirtualKeys 页移除「未接入」警告 banner、展示生效状态；Playground 支持携带 key 调试
-- 文档：`ai-gateway-guide.md` / `_cn.md` 认证章节、`design.md` 对应小节
-
-**验收标准**
-
-1. 启用认证的 route 上：缺失 / 无效 / 已禁用 / 已过期的 key 请求被 401 拒绝
-2. 请求 model 不在 `allowed_models`（非空时）返回 403
-3. 合法 key 请求正常代理，下游插件可从 ctx 读到 virtual_key_id
-4. Key 轮换后旧 key 立即失效（缓存失效路径验证）
-5. 集成测试覆盖以上场景，PG 与 DB-less 两种模式均通过
+**摘要**：`ai_virtual_keys` 的 DB / Admin / 前端三层已交付但运行时零接入。新增独立 `ai-key-auth` 插件（priority 774）：凭证提取（Bearer / x-api-key / 自定义 header）→ SHA256 查 key → enabled/expires/allowed_models（支持前缀通配符）校验 → ctx 注入 `AiAuthContext` + `consumer_id`；错误体按客户端协议自适应；CUD/rotate 接入缓存失效通道（≤1s 生效）。前端同单交付：向导认证开关、VirtualKeys 页文案更新、Playground 带 key 调试。
 
 ---
 
@@ -377,6 +360,10 @@
 
 ## 需求单模板（新增需求时复制）
 
+新增需求时先在本文件按下述模板登记草案；进入需求分析阶段后，将详细内容抽取到
+`docs/pm/REQ-XXX/analysis.md`（需求分析）与 `docs/pm/REQ-XXX/design.md`（方案设计），
+本文件缩减为摘要 + 链接（参考 REQ-AI-001 的形式）。
+
 ```markdown
 ## REQ-XX-NNN
 
@@ -385,22 +372,24 @@
 - **优先级 / Effort：** PN / S|M|L|XL
 - **状态：** 📋 待启动
 - **依赖：** REQ-...
+- **📄 需求分析：** REQ-XX-NNN/analysis.md（进入 📝 阶段后创建）
+- **📄 方案设计：** REQ-XX-NNN/design.md（进入 🎨 阶段后创建）
 
 **背景与价值**
 
 为什么做、现状缺口、不做的代价。
 
-**需求范围**
+**需求范围（草案）**
 
 - 后端：...
 - 前端：...（或「无（豁免：<原因>）」）
 - 文档：...
 
-**方案设计**
-
-（🎨 阶段填写；大型设计链接到 docs/designs/REQ-XXX-*.md）
-
-**验收标准**
+**验收标准（草案）**
 
 1. 可验证的行为断言...
 ```
+
+`analysis.md` 的章节结构参考 [REQ-AI-001/analysis.md](REQ-AI-001/analysis.md)：
+背景与价值 / 用户故事 / 现状事实与约束 / 功能需求（FR）/ 非功能需求 / 非目标 /
+关联缺陷 / 决策记录 / 验收标准。

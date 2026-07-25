@@ -62,8 +62,8 @@
           </strong>
           <p class="ai-gateway-card-copy">
             {{ l(
-              'Store virtual-key management metadata. Proxy authentication, rate limits, and budget enforcement are not wired yet.',
-              '保存虚拟密钥管理元数据；代理认证、限流和预算控制尚未接入。',
+              'Issue keys that authenticate proxy traffic and restrict which models a caller may use. Rate limits and budgets are not enforced yet.',
+              '签发用于代理流量认证的密钥，并限制调用方可用的模型；限流和预算控制尚未接入。',
             ) }}
           </p>
         </div>

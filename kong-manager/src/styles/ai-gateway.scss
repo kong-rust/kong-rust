@@ -148,6 +148,13 @@
   }
 }
 
+// Helper text under a field or checkbox — 字段或复选框下方的说明文字
+.ai-endpoint-hint {
+  color: $kui-color-text-neutral;
+  font-size: $kui-font-size-20;
+  margin: 0;
+}
+
 .ai-gateway-form-actions,
 .ai-gateway-row-actions,
 .ai-gateway-key-actions {

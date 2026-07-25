@@ -1120,14 +1120,15 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 
 | Priority | 插件 | 当前阶段与行为 |
 |----------|------|----------------|
+| 774 | `ai-key-auth` | `access`：按 Bearer / `x-api-key` / 自定义头提取虚拟密钥，SHA-256 查表（进程内缓存 TTL 1s + 负缓存，Admin CUD/rotate 即时失效），校验 enabled/expiry/allowed_models，注入 `AiAuthContext` 与 `consumer_id`；失败以 OpenAI 或 Anthropic 风格错误体短路 401/403 |
 | 773 | `ai-prompt-guard` | `access`：检查 user 消息长度、deny/allow 正则；可阻断或仅记录 |
 | 772 | `ai-cache` | `access`：处理 skip header，按最后一条或全部 user 消息计算 SHA-256 cache key；`log` 当前不写缓存 |
 | 771 | `ai-rate-limit` | `access`：内存 60 秒窗口的 RPM/TPM 原子预扣；`log`：用实际 usage 修正 TPM |
 | 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
 
-插件间通过 `RequestCtx.extensions` 传递类型化的 `AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
+插件间通过 `RequestCtx.extensions` 传递类型化的 `AiAuthContext`、`AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
 
-`kong-plugin-system` 的解析器支持 Global / Service / Route / Consumer 关联，同名配置由更具体关联覆盖；但是当前代理链在 Consumer 身份可用前以 `consumer_id=None` 构建，因此运行时实际生效的是 Global / Service / Route 配置，Consumer 级 AI 插件配置尚未接入动态重解析。
+`kong-plugin-system` 的解析器支持 Global / Service / Route / Consumer 关联，同名配置由更具体关联覆盖；但是当前代理链在 Consumer 身份可用前以 `consumer_id=None` 构建，因此运行时实际生效的是 Global / Service / Route 配置，Consumer 级 AI 插件配置尚未接入动态重解析。`ai-key-auth` 会在 access 阶段写入 `ctx.consumer_id`，因此同一请求内的下游插件（如 `ai-rate-limit` 的 `limit_by=consumer`）能读到 Consumer 身份，但插件链本身不会因此重新解析。
 
 #### 10.5 Admin API
 
@@ -1305,8 +1306,9 @@ Provider 凭据遵循以下规则：
 #### 10.8 当前限制与延期项
 
 - `ai-cache` 只有 cache key/skip-header 基础设施；Redis 读写、命中短路、回写和语义缓存未实现。
-- `ai-rate-limit` 只有进程内窗口；`limit_by=virtual_key` 当前退化为 global，尚未查询 `ai_virtual_keys`，也未校验 enabled、expiry、allowed models、实体级 TPM/RPM 或 budget。Redis 分布式限流未实现。
-- Virtual Key 的创建、轮换和 CRUD 已实现，但请求认证、预算扣减和成本追踪尚未接入。`calculate_cost` 与扩展 DAO trait 已定义，但未连接代理 log 生命周期。
+- `ai-rate-limit` 只有进程内窗口；`limit_by=virtual_key` 当前退化为 global，尚未查询实体级 TPM/RPM 或 budget。Redis 分布式限流未实现。
+- Virtual Key 的请求认证已由 `ai-key-auth` 插件（priority 774）接入：校验 enabled、expiry 和 allowed models（支持末尾 `*` 前缀通配），并注入 `AiAuthContext`、`consumer_id` 与 `authenticated_credential`。仍未接入的是预算扣减与成本追踪 —— `calculate_cost` 与 `AiVirtualKeyExt` 扩展 DAO trait 已定义，但未连接代理 log 生命周期。
+- Hybrid 模式 CP→DP 配置同步不包含任何 AI 实体，因此 DP 节点上没有 Virtual Key 数据，`ai-key-auth` 在 DP 上无法认证。
 - Prompt Guard 当前只有正则/长度规则；语义 guard、embedding 检测和分类评分未实现。
 - Model balancer 已实现 priority、weight、token-size 过滤和健康冷却结构，但 `ai-proxy` 尚未回报成功/失败，也未使用插件配置中的 `retries`，因此运行时没有跨 provider 失败重试或健康 fallback。
 - 数据库 model group 的 `max_input_tokens` 预路由过滤使用 provider 无关字符估值；选定 provider/model 后才执行 `TokenizerRegistry` 的精细计数。临界阈值附近可能保守或乐观选模。

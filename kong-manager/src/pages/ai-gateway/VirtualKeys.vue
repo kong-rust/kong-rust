@@ -10,10 +10,10 @@
   <AiGatewayNav />
 
   <KAlert
-    appearance="warning"
+    appearance="info"
     class="ai-gateway-alert"
   >
-    {{ t('Virtual keys currently store management metadata only. They are not wired into proxy authentication, rate-limit, or budget enforcement.') }}
+    {{ t('Keys authenticate proxy traffic on endpoints with the ai-key-auth plugin, and the allowed-models list is enforced. TPM, RPM, and budget limits are stored but not enforced yet.') }}
   </KAlert>
 
   <KAlert

@@ -16,6 +16,20 @@
       />
     </div>
 
+    <div class="ai-gateway-form-field">
+      <label for="ai-endpoint-test-key">{{ t('API Key') }}</label>
+      <input
+        id="ai-endpoint-test-key"
+        v-model="apiKey"
+        autocomplete="off"
+        :placeholder="l('sk-kr-...', 'sk-kr-...')"
+        type="password"
+      >
+      <p class="ai-endpoint-hint">
+        {{ t('Optional. Required when the endpoint enforces virtual keys.') }}
+      </p>
+    </div>
+
     <label class="ai-gateway-checkbox">
       <input
         v-model="stream"
@@ -77,6 +91,9 @@ const props = defineProps<{
 const toaster = useToaster()
 const { l, t } = useAiGatewayI18n()
 const message = ref('Hello! Tell me what you can do.')
+// Held only for the duration of the test call — never persisted or logged
+// 仅在本次测试调用期间保留 — 不持久化、不记录日志
+const apiKey = ref('')
 const stream = ref(false)
 const testing = ref(false)
 const errorMessage = ref('')
@@ -96,6 +113,7 @@ const requestBody = computed(() => ({
 const curl = computed(() => (
   `curl ${stream.value ? '-N ' : ''}-X POST '${props.endpointUrl}' \\\n`
   + "  -H 'Content-Type: application/json' \\\n"
+  + (apiKey.value ? `  -H 'Authorization: Bearer ${apiKey.value}' \\\n` : '')
   + `  -d '${JSON.stringify(requestBody.value)}'`
 ))
 
@@ -109,6 +127,7 @@ const sendRequest = async () => {
     const response = await apiService.post('ai-endpoint-test', {
       path: props.endpointPath,
       request: requestBody.value,
+      ...(apiKey.value ? { api_key: apiKey.value } : {}),
     })
     const data = response.data as EndpointTestResponse
 

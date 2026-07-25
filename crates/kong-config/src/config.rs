@@ -851,6 +851,8 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "ai-prompt-template",
     "ai-prompt-decorator",
     "ai-prompt-guard",
+    // Kong-Rust native — virtual key authentication — Kong-Rust 原生 — 虚拟密钥认证
+    "ai-key-auth",
     "ai-request-transformer",
     "ai-response-transformer",
     "proxy-cache",

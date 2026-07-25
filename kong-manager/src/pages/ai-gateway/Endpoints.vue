@@ -46,6 +46,7 @@
       <EndpointIdentityForm
         v-model:display-name="draft.displayName"
         v-model:enabled="draft.enabled"
+        v-model:require-auth="draft.requireAuth"
         v-model:slug="draft.slug"
       />
 
@@ -280,6 +281,7 @@ const initialDraft = (): EndpointDraft => {
     displayName: '',
     slug: '',
     enabled: true,
+    requireAuth: false,
     models: [model],
   }
 }
@@ -310,6 +312,7 @@ const replaceDraft = (value: EndpointDraft) => {
   draft.displayName = value.displayName
   draft.slug = value.slug
   draft.enabled = value.enabled
+  draft.requireAuth = value.requireAuth
   draft.models = value.models
 }
 

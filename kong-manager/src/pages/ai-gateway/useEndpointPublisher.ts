@@ -27,7 +27,11 @@ interface CreatedResources {
   service: string
   route: string
   plugin: string
+  authPlugin: string
 }
+
+// Virtual key authentication plugin — 虚拟密钥认证插件
+const authPluginName = 'ai-key-auth'
 
 const listAll = async <T>(endpoint: string) => {
   const records: T[] = []
@@ -115,6 +119,11 @@ export const buildEndpoints = (resources: EndpointResources) => {
         && item.name === 'ai-proxy'
         && endpointIdFromTags(item.tags) === id
       ))
+      const authPlugin = resources.plugins.find(item => (
+        item.route?.id === route?.id
+        && item.name === authPluginName
+        && endpointIdFromTags(item.tags) === id
+      ))
       const modelGroup = plugin?.config.model_group ?? endpointModelGroup(id)
       const endpointModels = resources.models.filter(model => (
         endpointIdFromTags(model.tags) === id || model.name === modelGroup
@@ -139,9 +148,11 @@ export const buildEndpoints = (resources: EndpointResources) => {
           && plugin.enabled
           && endpointModels.some(model => model.enabled),
         complete,
+        requireAuth: !!authPlugin?.enabled,
         service,
         route,
         plugin,
+        authPlugin,
         models: endpointModels,
         providers: endpointProviders,
       }]
@@ -284,6 +295,7 @@ const serviceFieldsForProvider = (provider: AiProvider) => {
 
 const rollbackCreated = async (created: CreatedResources) => {
   const steps = [
+    ...(created.authPlugin ? [{ endpoint: 'plugins', id: created.authPlugin }] : []),
     ...(created.plugin ? [{ endpoint: 'plugins', id: created.plugin }] : []),
     ...(created.route ? [{ endpoint: 'routes', id: created.route }] : []),
     ...(created.service ? [{ endpoint: 'services', id: created.service }] : []),
@@ -310,7 +322,29 @@ const emptyCreatedResources = (): CreatedResources => ({
   service: '',
   route: '',
   plugin: '',
+  authPlugin: '',
 })
+
+// Attach the virtual key authentication plugin to a route — 为 route 挂载虚拟密钥认证插件
+const createAuthPlugin = async (
+  id: string,
+  routeId: string,
+  enabled: boolean,
+  tags: string[],
+) => {
+  const { data } = await apiService.post('plugins', {
+    name: authPluginName,
+    instance_name: `kr-ai-endpoint-auth-${id}`,
+    route: { id: routeId },
+    enabled,
+    tags,
+    // Defaults cover Bearer / x-api-key / X-AI-Key and protocol-aware errors
+    // 默认配置已覆盖 Bearer / x-api-key / X-AI-Key 与按协议自适应的错误体
+    config: {},
+  })
+
+  return createdId(data, 'auth plugin')
+}
 
 export const createEndpoint = async (draft: EndpointDraft) => {
   const slug = validateDraft(draft)
@@ -362,6 +396,10 @@ export const createEndpoint = async (draft: EndpointDraft) => {
       },
     })
     created.plugin = createdId(pluginResponse.data, 'plugin')
+
+    if (draft.requireAuth) {
+      created.authPlugin = await createAuthPlugin(id, created.route, draft.enabled, tags)
+    }
 
     return id
   } catch (error) {
@@ -424,6 +462,18 @@ export const updateEndpoint = async (endpoint: AiEndpoint, draft: EndpointDraft)
       },
     })
 
+    // Reconcile the authentication plugin with the requested state — 将认证插件对齐到期望状态
+    if (draft.requireAuth && !endpoint.authPlugin) {
+      created.authPlugin = await createAuthPlugin(endpoint.id, endpoint.route.id, draft.enabled, tags)
+    } else if (draft.requireAuth && endpoint.authPlugin) {
+      await apiService.patch(`plugins/${endpoint.authPlugin.id}`, {
+        enabled: draft.enabled,
+        tags,
+      })
+    } else if (!draft.requireAuth && endpoint.authPlugin) {
+      await apiService.delete(`plugins/${endpoint.authPlugin.id}`)
+    }
+
     for (const model of endpoint.models) {
       await apiService.delete(`ai-models/${model.id}`)
     }
@@ -462,6 +512,7 @@ export const updateEndpoint = async (endpoint: AiEndpoint, draft: EndpointDraft)
 
 export const deleteEndpoint = async (endpoint: AiEndpoint) => {
   const steps = [
+    ...(endpoint.authPlugin ? [{ endpoint: 'plugins', id: endpoint.authPlugin.id }] : []),
     ...(endpoint.plugin ? [{ endpoint: 'plugins', id: endpoint.plugin.id }] : []),
     ...(endpoint.route ? [{ endpoint: 'routes', id: endpoint.route.id }] : []),
     ...endpoint.models.map(model => ({ endpoint: 'ai-models', id: model.id })),

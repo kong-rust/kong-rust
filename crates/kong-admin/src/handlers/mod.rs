@@ -948,6 +948,9 @@ pub async fn post_config(
         }
         // Trigger proxy cache refresh — 触发代理缓存刷新
         let _ = state.refresh_tx.send("config");
+        // The store was rebuilt wholesale, so cached virtual keys may no longer exist
+        // 存储已被全量重建，缓存的虚拟密钥可能已不存在
+        state.virtual_key_auth.invalidate_all();
     }
 
     // Compute hash of the config body — 计算配置内容的哈希

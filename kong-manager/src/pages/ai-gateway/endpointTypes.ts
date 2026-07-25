@@ -19,6 +19,8 @@ export interface EndpointDraft {
   displayName: string
   slug: string
   enabled: boolean
+  /** Require a virtual key on this endpoint — 该接口是否要求虚拟密钥 */
+  requireAuth: boolean
   models: EndpointModelDraft[]
 }
 
@@ -55,6 +57,8 @@ export interface GatewayPlugin {
     route_type?: string
     client_protocol?: string
     response_streaming?: string
+    key_header?: string
+    error_format?: string
   }
   tags?: string[] | null
 }
@@ -67,9 +71,13 @@ export interface AiEndpoint {
   modelGroup: string
   enabled: boolean
   complete: boolean
+  /** Virtual key authentication is enforced on this endpoint — 该接口已启用虚拟密钥认证 */
+  requireAuth: boolean
   service: GatewayService
   route?: GatewayRoute
   plugin?: GatewayPlugin
+  /** ai-key-auth plugin, present when authentication is enabled — 启用认证时存在的 ai-key-auth 插件 */
+  authPlugin?: GatewayPlugin
   models: AiModel[]
   providers: AiProvider[]
 }

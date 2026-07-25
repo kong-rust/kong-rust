@@ -4,6 +4,7 @@
 
 pub mod models;
 pub mod dao;
+pub mod auth;
 pub mod provider;
 pub mod codec;
 pub mod token;
