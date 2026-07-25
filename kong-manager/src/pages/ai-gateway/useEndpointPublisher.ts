@@ -92,8 +92,10 @@ export const loadEndpointResources = async () => {
   return { services, routes, plugins, models, providers }
 }
 
-export const loadEndpoints = async () => {
-  const resources = await loadEndpointResources()
+export type EndpointResources = Awaited<ReturnType<typeof loadEndpointResources>>
+
+// Build the endpoint list from already-loaded resources — 基于已加载的资源构建接口列表
+export const buildEndpoints = (resources: EndpointResources) => {
   const providerMap = new Map(resources.providers.map(provider => [provider.id, provider]))
 
   return resources.services
@@ -146,6 +148,8 @@ export const loadEndpoints = async () => {
     })
     .sort((left, right) => left.displayName.localeCompare(right.displayName))
 }
+
+export const loadEndpoints = async () => buildEndpoints(await loadEndpointResources())
 
 const validateDraft = (draft: EndpointDraft) => {
   const slug = normalizeSlug(draft.slug)
