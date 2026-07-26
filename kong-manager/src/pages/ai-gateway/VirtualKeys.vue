@@ -1,6 +1,7 @@
 <template>
   <PageHeader :title="t('AI Virtual Keys')">
     <KButton
+      data-tour="create-virtual-key"
       :disabled="mutationPending || !!latestKey"
       @click="startCreate"
     >

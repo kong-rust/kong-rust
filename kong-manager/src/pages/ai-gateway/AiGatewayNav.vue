@@ -2,6 +2,7 @@
   <nav
     class="ai-gateway-nav"
     :aria-label="l('AI Gateway sections', 'AI 网关分区')"
+    data-tour="ai-gateway-nav"
   >
     <RouterLink :to="{ name: 'ai-endpoint-list' }">
       {{ t('AI Endpoints') }}

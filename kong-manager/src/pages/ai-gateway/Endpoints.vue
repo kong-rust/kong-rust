@@ -1,6 +1,14 @@
 <template>
   <PageHeader :title="t('AI Endpoints')">
     <KButton
+      appearance="secondary"
+      type="button"
+      @click="openTour"
+    >
+      {{ t('Guide') }}
+    </KButton>
+    <KButton
+      data-tour="create-endpoint"
       :disabled="saving"
       @click="startCreate"
     >
@@ -132,9 +140,10 @@
     :aria-label="t('Published AI endpoints')"
   >
     <article
-      v-for="endpoint in endpoints"
+      v-for="(endpoint, endpointIndex) in endpoints"
       :key="endpoint.id"
       class="ai-endpoint-card"
+      :data-tour="endpointIndex === 0 ? 'endpoint-card' : undefined"
     >
       <div class="ai-endpoint-card-header">
         <div>
@@ -237,6 +246,7 @@ import EndpointIdentityForm from './components/EndpointIdentityForm.vue'
 import EndpointPlayground from './components/EndpointPlayground.vue'
 import ModelPoolBuilder from './components/ModelPoolBuilder.vue'
 import TrafficPolicyEditor from './components/TrafficPolicyEditor.vue'
+import { useOnboardingTour } from './useOnboardingTour'
 import type { AiEndpoint, EndpointDraft } from './endpointTypes'
 import type { AiProvider } from './types'
 import {
@@ -269,6 +279,8 @@ const playgroundEndpoint = ref<AiEndpoint | null>(null)
 const formVisible = ref(false)
 const loading = ref(true)
 const saving = ref(false)
+// Onboarding tour lives at app level so it can navigate — 引导挂载在 App 层以便跨页面跳转
+const { open: openTour } = useOnboardingTour()
 const errorMessage = ref('')
 
 const initialDraft = (): EndpointDraft => {

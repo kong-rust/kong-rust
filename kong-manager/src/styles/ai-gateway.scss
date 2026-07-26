@@ -586,6 +586,219 @@
   }
 }
 
+// ---------- Onboarding tour — 使用引导（跨页面锚定高亮） ----------
+
+.ai-tour {
+  inset: 0;
+  pointer-events: none;
+  position: fixed;
+  z-index: 1000;
+}
+
+.ai-tour-backdrop {
+  background: rgba(16, 24, 40, 0.55);
+  inset: 0;
+  pointer-events: auto;
+  position: absolute;
+}
+
+// The ring itself is transparent; the huge spread dims everything around it
+// 环内保持透明，靠超大扩散阴影把周围压暗，形成聚光效果
+.ai-tour-spotlight {
+  border-radius: $kui-border-radius-30;
+  box-shadow:
+    0 0 0 9999px rgba(16, 24, 40, 0.55),
+    0 0 0 3px $kui-color-border-primary;
+  pointer-events: none;
+  position: fixed;
+  transition: top 0.18s ease, left 0.18s ease, width 0.18s ease, height 0.18s ease;
+}
+
+.ai-tour-popover {
+  background: $kui-color-background;
+  border-radius: $kui-border-radius-40;
+  box-shadow: 0 16px 48px rgba(16, 24, 40, 0.24);
+  display: grid;
+  max-width: min(460px, calc(100vw - 32px));
+  pointer-events: auto;
+  position: fixed;
+  width: 460px;
+}
+
+// Steps without an anchor sit in the middle of the screen
+// 没有锚定元素的步骤居中显示
+.ai-tour-popover-centered {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.ai-tour-header {
+  align-items: flex-start;
+  border-bottom: 1px solid $kui-color-border;
+  display: flex;
+  gap: $kui-space-40;
+  justify-content: space-between;
+  padding: $kui-space-60 $kui-space-70;
+
+  h2 {
+    color: $kui-color-text;
+    font-size: $kui-font-size-50;
+    line-height: 1.3;
+    margin: 0;
+  }
+}
+
+.ai-tour-close {
+  background: none;
+  border: 0;
+  color: $kui-color-text-neutral;
+  cursor: pointer;
+  font-size: $kui-font-size-60;
+  line-height: 1;
+  padding: 0;
+
+  &:hover {
+    color: $kui-color-text;
+  }
+}
+
+.ai-tour-body {
+  display: grid;
+  gap: $kui-space-50;
+  max-height: min(50vh, 420px);
+  overflow: auto;
+  padding: $kui-space-60 $kui-space-70;
+}
+
+.ai-tour-lead {
+  color: $kui-color-text;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.ai-tour-actions {
+  color: $kui-color-text;
+  display: grid;
+  gap: $kui-space-30;
+  margin: 0;
+  padding-left: $kui-space-80;
+
+  li {
+    line-height: 1.6;
+  }
+}
+
+.ai-tour-code {
+  border: 1px solid $kui-color-border;
+  border-radius: $kui-border-radius-30;
+  overflow: hidden;
+
+  header {
+    align-items: center;
+    background: $kui-color-background-neutral-weakest;
+    border-bottom: 1px solid $kui-color-border;
+    display: flex;
+    gap: $kui-space-40;
+    justify-content: space-between;
+    padding: $kui-space-30 $kui-space-40;
+  }
+
+  pre {
+    background: #101828;
+    color: #d0d5dd;
+    font-size: $kui-font-size-20;
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    // Wrap long URLs instead of clipping them — 长 URL 换行显示而不是被裁切
+    overflow-wrap: anywhere;
+    padding: $kui-space-50;
+    white-space: pre-wrap;
+  }
+}
+
+.ai-tour-copy {
+  background: none;
+  border: 0;
+  color: $kui-color-text-primary;
+  cursor: pointer;
+  font: inherit;
+  font-weight: $kui-font-weight-semibold;
+  padding: 0;
+}
+
+.ai-tour-note {
+  background: $kui-color-background-neutral-weakest;
+  border-left: 3px solid $kui-color-border-primary;
+  border-radius: 0 $kui-border-radius-20 $kui-border-radius-20 0;
+  color: $kui-color-text-neutral;
+  font-size: $kui-font-size-20;
+  line-height: 1.6;
+  margin: 0;
+  padding: $kui-space-40 $kui-space-50;
+}
+
+.ai-tour-note-warning {
+  border-left-color: $kui-color-text-danger;
+}
+
+.ai-tour-footer {
+  align-items: center;
+  border-top: 1px solid $kui-color-border;
+  display: flex;
+  gap: $kui-space-50;
+  justify-content: space-between;
+  padding: $kui-space-50 $kui-space-70;
+}
+
+.ai-tour-progress {
+  align-items: center;
+  display: flex;
+  gap: $kui-space-30;
+}
+
+.ai-tour-dot {
+  background: $kui-color-border;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 8px;
+  padding: 0;
+  transition: width 0.15s ease;
+  width: 8px;
+}
+
+.ai-tour-dot-done {
+  background: $kui-color-text-primary;
+  opacity: 0.45;
+}
+
+.ai-tour-dot-active {
+  background: $kui-color-text-primary;
+  border-radius: $kui-border-radius-20;
+  opacity: 1;
+  width: 20px;
+}
+
+.ai-tour-count {
+  color: $kui-color-text-neutral;
+  font-size: $kui-font-size-20;
+  margin-left: $kui-space-30;
+}
+
+.ai-tour-buttons {
+  display: flex;
+  gap: $kui-space-30;
+}
+
+@media (max-width: 600px) {
+  .ai-tour-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 @media (max-width: 960px) {
   .ai-endpoint-hero {
     grid-template-columns: 1fr;

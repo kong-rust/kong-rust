@@ -21,6 +21,9 @@
     </template>
     <router-view />
     <MakeAWish />
+    <!-- Mounted at app level so the tour can walk the user across pages
+         挂载在 App 层，使引导能带用户跨页面跳转 -->
+    <OnboardingTour />
   </AppLayout>
 </template>
 
@@ -34,6 +37,7 @@ import { useInfoStore } from '@/stores/info'
 import NavbarLogo from '@/components/NavbarLogo.vue'
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import MakeAWish from '@/components/MakeAWish.vue'
+import OnboardingTour from '@/pages/ai-gateway/components/OnboardingTour.vue'
 import { useI18n } from '@/composables/useI18n'
 
 const route = useRoute()
