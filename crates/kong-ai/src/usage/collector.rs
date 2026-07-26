@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use kong_core::traits::{RequestCtx, RequestTerminationHint, RequestTransportSource};
 use kong_plugin_system::{RequestLifecycleObserver, ResolvedPlugin};
 use uuid::Uuid;
@@ -14,11 +14,13 @@ use crate::models::{AiModel, AiProviderConfig};
 use crate::plugins::context::AiRequestState;
 
 use super::cursor::normalize_millis;
-use super::model::{AiUsageFact, AiUsageOutcome, CacheStatus};
+use super::model::{
+    AiUsageFact, AiUsageOutcome, CacheStatus, FrozenPricingSnapshot, PricingStatus,
+};
 use super::normalizer::{UsageAccumulator, UsageObservation};
 use super::pricing::{
-    calculate_cost, model_override_version, ModelPriceOverrides, PriceCatalog, PriceDirection,
-    PricingFeatures,
+    calculate_cost, model_price_overrides, ModelPriceOverrides, PriceCatalog, PricingFeatures,
+    ResolvedPricing,
 };
 use super::writer::AiUsageWriter;
 
@@ -56,6 +58,7 @@ pub struct AiUsageContext {
     pub pricing_features: PricingFeatures,
     pub input_override: Option<rust_decimal::Decimal>,
     pub output_override: Option<rust_decimal::Decimal>,
+    pub frozen_pricing: Option<FrozenPricingSnapshot>,
     pub finalized: bool,
 }
 
@@ -64,7 +67,6 @@ pub struct AiUsageCollector {
     catalog: Arc<PriceCatalog>,
     node_id: Uuid,
     default_workspace_id: Uuid,
-    loaded_at: chrono::DateTime<Utc>,
     active_contexts: AtomicU64,
     invariant_violations: AtomicU64,
 }
@@ -81,7 +83,6 @@ impl AiUsageCollector {
             catalog,
             node_id,
             default_workspace_id,
-            loaded_at: Utc::now(),
             active_contexts: AtomicU64::new(0),
             invariant_violations: AtomicU64::new(0),
         }
@@ -152,6 +153,7 @@ impl AiUsageCollector {
             pricing_features: PricingFeatures::default(),
             input_override: None,
             output_override: None,
+            frozen_pricing: None,
             finalized: false,
         });
         self.active_contexts.fetch_add(1, Ordering::Relaxed);
@@ -274,64 +276,59 @@ impl AiUsageCollector {
         features.provider_cache_tokens = usage.cache_read_input_tokens.unwrap_or(0) > 0
             || usage.cache_write_input_tokens.unwrap_or(0) > 0;
 
-        let model_overrides = ai_state
-            .map(|state| {
-                let model_id = stable_id(state.model.id).map(|id| id.to_string());
-                let effective_from = state
-                    .model
-                    .updated_at
-                    .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single());
-                let effective_from = effective_from
-                    .or_else(|| {
-                        state
-                            .model
-                            .created_at
-                            .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
-                    })
-                    .unwrap_or(self.loaded_at);
-                let provider_type = provider_type.as_deref().unwrap_or_default();
-                let actual_model = actual_model.as_deref().unwrap_or_default();
-                ModelPriceOverrides {
-                    input: state.model.input_cost,
-                    output: state.model.output_cost,
-                    input_version: state.model.input_cost.map(|rate| {
-                        model_override_version(
-                            model_id.as_deref(),
-                            Some(effective_from),
-                            provider_type,
-                            actual_model,
-                            PriceDirection::Input,
-                            rate,
-                        )
-                    }),
-                    output_version: state.model.output_cost.map(|rate| {
-                        model_override_version(
-                            model_id.as_deref(),
-                            Some(effective_from),
-                            provider_type,
-                            actual_model,
-                            PriceDirection::Output,
-                            rate,
-                        )
-                    }),
-                    version: None,
-                    effective_from: Some(effective_from),
+        let pricing = if let Some(frozen) = draft.frozen_pricing.as_ref() {
+            if ctx.lifecycle.upstream_attempted {
+                let prompt_exceeds_frozen_limit = frozen
+                    .max_prompt_tokens
+                    .zip(usage.prompt_tokens.map(|field| field.value))
+                    .is_some_and(|(maximum, actual)| actual > maximum);
+                ResolvedPricing {
+                    input: frozen.input.clone(),
+                    output: frozen.output.clone(),
+                    status: if prompt_exceeds_frozen_limit {
+                        PricingStatus::Unsupported
+                    } else {
+                        PricingStatus::Matched
+                    },
+                    unsupported_reasons: if prompt_exceeds_frozen_limit {
+                        vec!["long_context_pricing".to_string()]
+                    } else {
+                        Vec::new()
+                    },
                 }
-            })
-            .unwrap_or_else(|| ModelPriceOverrides {
-                input: draft.input_override,
-                output: draft.output_override,
-                ..Default::default()
-            });
-        let pricing = self.catalog.resolve(
-            provider_type.as_deref().unwrap_or_default(),
-            actual_model.as_deref().unwrap_or_default(),
-            ctx.lifecycle.started_at,
-            usage.prompt_tokens.map(|field| field.value),
-            &model_overrides,
-            &features,
-            ctx.lifecycle.upstream_attempted,
-        );
+            } else {
+                ResolvedPricing {
+                    input: None,
+                    output: None,
+                    status: PricingStatus::NotApplicable,
+                    unsupported_reasons: Vec::new(),
+                }
+            }
+        } else {
+            let model_overrides = ai_state
+                .map(|state| {
+                    model_price_overrides(
+                        &state.model,
+                        provider_type.as_deref().unwrap_or_default(),
+                        actual_model.as_deref().unwrap_or_default(),
+                        ctx.lifecycle.started_at,
+                    )
+                })
+                .unwrap_or_else(|| ModelPriceOverrides {
+                    input: draft.input_override,
+                    output: draft.output_override,
+                    ..Default::default()
+                });
+            self.catalog.resolve(
+                provider_type.as_deref().unwrap_or_default(),
+                actual_model.as_deref().unwrap_or_default(),
+                ctx.lifecycle.started_at,
+                usage.prompt_tokens.map(|field| field.value),
+                &model_overrides,
+                &features,
+                ctx.lifecycle.upstream_attempted,
+            )
+        };
         let cost = calculate_cost(
             &pricing,
             usage.prompt_tokens,
@@ -406,6 +403,10 @@ impl AiUsageCollector {
             usage_unavailable_reasons: usage.unavailable_reasons,
             input_price: pricing.input,
             output_price: pricing.output,
+            pricing_fingerprint: draft
+                .frozen_pricing
+                .as_ref()
+                .map(|snapshot| Arc::clone(&snapshot.fingerprint)),
             pricing_status: pricing.status,
             pricing_unsupported_reasons: pricing.unsupported_reasons,
             cost_usd: cost.cost_usd,
@@ -425,6 +426,32 @@ impl AiUsageCollector {
         self.writer.try_enqueue(fact);
         self.active_contexts.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// 将预算 preflight 的计价快照绑定到 usage 上下文。
+///
+/// 重复写入同一快照是幂等的；任何不同快照都说明一个请求发生了二次计价，
+/// 必须在派发上游前失败。
+pub fn freeze_pricing_snapshot(
+    ctx: &mut RequestCtx,
+    snapshot: FrozenPricingSnapshot,
+) -> Result<(), &'static str> {
+    let context = ctx
+        .extensions
+        .get_mut::<AiUsageContext>()
+        .ok_or("usage_context_missing")?;
+    if context.finalized {
+        return Err("usage_context_finalized");
+    }
+    if let Some(existing) = context.frozen_pricing.as_ref() {
+        return if existing == &snapshot {
+            Ok(())
+        } else {
+            Err("pricing_snapshot_already_frozen")
+        };
+    }
+    context.frozen_pricing = Some(snapshot);
+    Ok(())
 }
 
 impl RequestLifecycleObserver for AiUsageCollector {
@@ -717,9 +744,15 @@ fn persisted_status(value: Option<u16>) -> Option<i16> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use kong_core::traits::{Phase, RequestTransportError, RequestTransportErrorKind};
+    use rust_decimal::Decimal;
 
     use super::*;
+    use crate::usage::memory::MemoryAiUsageStore;
+    use crate::usage::model::{CostStatus, PriceSnapshot, TokenFieldSource};
+    use crate::usage::store::AiUsageStore;
 
     #[test]
     fn outcome_priority_is_deterministic() {
@@ -825,5 +858,101 @@ mod tests {
             "service_tier": null
         }));
         assert!(!explicit_null.non_standard_service_tier);
+    }
+
+    #[test]
+    fn frozen_pricing_survives_catalog_and_actual_model_changes() {
+        let workspace_id = Uuid::new_v4();
+        let store: Arc<dyn AiUsageStore> =
+            Arc::new(MemoryAiUsageStore::new(workspace_id, 8).unwrap());
+        let (writer, _runner) =
+            AiUsageWriter::channel(store, 8, 8, Duration::from_secs(1)).unwrap();
+        let collector = AiUsageCollector::new(
+            writer,
+            Arc::new(PriceCatalog::builtin().unwrap()),
+            Uuid::new_v4(),
+            workspace_id,
+        );
+        let mut ctx = RequestCtx::new();
+        let started_at = ctx.lifecycle.started_at;
+        let frozen_input = PriceSnapshot {
+            usd_per_million: Decimal::from(100),
+            source: "frozen-test".to_string(),
+            version: "catalog-before-refresh".to_string(),
+            snapshot_date: started_at.date_naive(),
+            effective_from: started_at,
+            effective_to: None,
+        };
+        let frozen_output = PriceSnapshot {
+            usd_per_million: Decimal::from(200),
+            source: "frozen-test".to_string(),
+            version: "catalog-before-refresh".to_string(),
+            snapshot_date: started_at.date_naive(),
+            effective_from: started_at,
+            effective_to: None,
+        };
+        let frozen_fingerprint: Arc<str> = Arc::from("a".repeat(64));
+        let mut usage = UsageAccumulator::default();
+        usage.observe_provider(UsageObservation {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(20),
+            total_tokens: Some(120),
+            ..Default::default()
+        });
+        ctx.extensions.insert(AiUsageContext {
+            fact_id: Uuid::now_v7(),
+            ai_proxy_config: AiProxyUsageConfigSnapshot {
+                log_statistics: true,
+            },
+            requested_model: Some("requested-alias".to_string()),
+            model_group: Some("model-group".to_string()),
+            model_id: None,
+            model_name: Some("actual-model-returned-by-provider".to_string()),
+            provider_id: None,
+            provider_name: Some("provider".to_string()),
+            provider_type: Some("provider-after-refresh".to_string()),
+            stream: Some(false),
+            valid_stream_event_seen: false,
+            stream_terminal: StreamTerminalState::NotStreaming,
+            first_stream_event_at: None,
+            gateway_cache_status: CacheStatus::NotConfigured,
+            usage,
+            pricing_features: PricingFeatures::default(),
+            input_override: None,
+            output_override: None,
+            frozen_pricing: Some(FrozenPricingSnapshot {
+                fingerprint: Arc::clone(&frozen_fingerprint),
+                provider_type: "provider-before-refresh".to_string(),
+                model: "model-before-refresh".to_string(),
+                input: Some(frozen_input.clone()),
+                output: Some(frozen_output.clone()),
+                max_prompt_tokens: Some(1_000),
+            }),
+            finalized: false,
+        });
+        ctx.lifecycle.mark_upstream_attempted();
+        ctx.lifecycle.mark_upstream_status(200);
+        ctx.lifecycle.final_status = Some(200);
+        ctx.lifecycle.downstream_response_completed = true;
+
+        collector.finalize(&mut ctx);
+
+        let fact = ctx.extensions.get::<Arc<AiUsageFact>>().unwrap();
+        assert_eq!(
+            fact.actual_model.as_deref(),
+            Some("actual-model-returned-by-provider")
+        );
+        assert_eq!(fact.input_price.as_ref(), Some(&frozen_input));
+        assert_eq!(fact.output_price.as_ref(), Some(&frozen_output));
+        assert_eq!(
+            fact.pricing_fingerprint.as_deref(),
+            Some(frozen_fingerprint.as_ref())
+        );
+        assert_eq!(fact.cost_status, CostStatus::Calculated);
+        assert_eq!(fact.cost_usd, Some(Decimal::new(14, 3)));
+        assert_eq!(
+            fact.prompt_tokens.map(|field| field.source),
+            Some(TokenFieldSource::Provider)
+        );
     }
 }

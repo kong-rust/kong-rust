@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -187,6 +188,20 @@ pub struct PriceSnapshot {
     pub effective_to: Option<DateTime<Utc>>,
 }
 
+/// 预算 preflight 固化的计价输入。
+///
+/// 该快照绑定请求开始时选定的 provider/model、价格与长上下文阈值。后续
+/// usage 归一化只能填充实际 token，不能再次从可能已热更新的价目表解析价格。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenPricingSnapshot {
+    pub fingerprint: Arc<str>,
+    pub provider_type: String,
+    pub model: String,
+    pub input: Option<PriceSnapshot>,
+    pub output: Option<PriceSnapshot>,
+    pub max_prompt_tokens: Option<i64>,
+}
+
 /// 一次 AI 网关请求的不可变事实。
 #[derive(Debug, Clone)]
 pub struct AiUsageFact {
@@ -224,6 +239,7 @@ pub struct AiUsageFact {
     pub usage_unavailable_reasons: Vec<String>,
     pub input_price: Option<PriceSnapshot>,
     pub output_price: Option<PriceSnapshot>,
+    pub pricing_fingerprint: Option<Arc<str>>,
     pub pricing_status: PricingStatus,
     pub pricing_unsupported_reasons: Vec<String>,
     pub cost_usd: Option<Decimal>,

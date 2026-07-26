@@ -50,6 +50,14 @@ test-pg:
 	@export KONG_SERVICE_ENV_FILE=$$(mktemp); \
 		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE up && \
 		. $$KONG_SERVICE_ENV_FILE && \
+		KONG_DATABASE=postgres KONG_PG_HOST=$$KONG_TEST_PG_HOST KONG_PG_PORT=$$KONG_TEST_PG_PORT \
+			KONG_PG_USER=$$KONG_TEST_PG_USER KONG_PG_PASSWORD=$$KONG_TEST_PG_PASSWORD \
+			KONG_PG_DATABASE=$$KONG_TEST_PG_DATABASE \
+			cargo run -p kong-server --bin kong -- -c kong.conf.default db bootstrap && \
+		KONG_DATABASE=postgres KONG_PG_HOST=$$KONG_TEST_PG_HOST KONG_PG_PORT=$$KONG_TEST_PG_PORT \
+			KONG_PG_USER=$$KONG_TEST_PG_USER KONG_PG_PASSWORD=$$KONG_TEST_PG_PASSWORD \
+			KONG_PG_DATABASE=$$KONG_TEST_PG_DATABASE \
+			cargo run -p kong-server --bin kong -- -c kong.conf.default db up && \
 		KONG_TEST_DATABASE=postgres $(TEST_RUNNER) --workspace; \
 		status=$$?; \
 		bash $(SERVICES_DIR)/common.sh $$KONG_SERVICE_ENV_FILE down; \

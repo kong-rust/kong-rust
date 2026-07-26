@@ -43,5 +43,6 @@ http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http2"] }
 tower = "0.5"
 futures-util = "0.3"
+sha2 = { workspace = true }
 tokio-tungstenite = { workspace = true }
 native-tls = "0.2"

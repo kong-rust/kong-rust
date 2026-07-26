@@ -7,6 +7,7 @@
 //! - Nested endpoints (e.g. /services/{service}/routes) — 嵌套端点（如 /services/{service}/routes）
 //! - Special endpoints (/, /status, /config) — 特殊端点（/, /status, /config）
 
+pub mod ai_policy_coverage;
 pub mod extractors;
 pub mod handlers;
 
@@ -21,11 +22,11 @@ use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{get, put};
 use axum::{Json, Router};
-use serde_json::{json, Value};
 use kong_core::models::*;
 use kong_core::traits::Dao;
 use kong_db::KongCache;
 use kong_router::stream::StreamRouter;
+use serde_json::{json, Value};
 use tower_http::services::ServeDir;
 
 /// Runtime log level updater — invoked by `/debug/node/log-level` to reload `tracing_subscriber`'s EnvFilter.
@@ -53,6 +54,16 @@ pub struct AdminState {
     pub ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>>,
     pub ai_models: Arc<dyn Dao<kong_ai::models::AiModel>>,
     pub ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>>,
+    /// 与请求热路径共享的实际 AI enforcement 能力，不能根据静态配置推断。
+    pub ai_enforcement: Arc<kong_ai::enforcement::AiEnforcementRuntime>,
+    /// 与当前路由拓扑同代发布的 AI policy 覆盖索引。
+    pub ai_policy_coverage: Arc<RwLock<ai_policy_coverage::AiPolicyCoverageIndex>>,
+    /// 当前 Admin 节点唯一可信的默认 workspace。
+    pub default_workspace_id: uuid::Uuid,
+    /// PostgreSQL 模式的 Virtual Key 原子预算治理；其他模式显式为 None。
+    pub ai_budget_governance: Option<Arc<dyn kong_ai::budget::BudgetAccountGovernance>>,
+    /// PostgreSQL 模式的账本查询与 reconciliation；其他模式显式为 None。
+    pub ai_budget_admin: Option<Arc<dyn kong_ai::budget::BudgetAdminStore>>,
     /// AI usage query store and writer health, or an explicit unsupported Hybrid marker.
     /// AI usage 查询 Store 与 writer 健康状态，或明确的 Hybrid 不支持标记。
     pub ai_usage: kong_ai::usage::AiUsageRuntime,
@@ -102,7 +113,11 @@ async fn push_config_to_dps(
             let mut all_items = Vec::new();
             let mut offset: Option<String> = None;
             loop {
-                let params = PageParams { size: 1000, offset: offset.clone(), ..Default::default() };
+                let params = PageParams {
+                    size: 1000,
+                    offset: offset.clone(),
+                    ..Default::default()
+                };
                 match $dao.page(&params).await {
                     Ok(page) => {
                         all_items.extend(page.data);
@@ -146,9 +161,9 @@ async fn push_config_to_dps(
         "ca_certificates": serde_json::to_value(&ca_certificates)?,
     });
 
-    cp.push_config(&config_table).await.map_err(|e| {
-        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-    })?;
+    cp.push_config(&config_table)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     tracing::info!("Config pushed to DPs after CUD — CUD 后已推送配置给 DP");
     Ok(())
@@ -228,9 +243,9 @@ async fn admin_headers_middleware(
     }
 
     // Check if Server header should be included — 检查是否应包含 Server 头
-    let has_server = headers_config.iter().any(|h| {
-        h.eq_ignore_ascii_case("server_tokens") || h.eq_ignore_ascii_case("server")
-    });
+    let has_server = headers_config
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case("server_tokens") || h.eq_ignore_ascii_case("server"));
     if has_server {
         response.headers_mut().insert(
             axum::http::header::SERVER,
@@ -260,15 +275,35 @@ async fn admin_headers_middleware(
 fn is_known_route(path: &str) -> bool {
     // Static routes — 静态路由
     let static_routes = [
-        "/", "/status", "/config", "/endpoints", "/plugins/enabled", "/plugins",
-        "/services", "/routes", "/consumers", "/upstreams",
-        "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
-        "/key-sets", "/keys",
-        "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
-        "/ai-usage", "/ai-usage/summary",
+        "/",
+        "/status",
+        "/config",
+        "/endpoints",
+        "/plugins/enabled",
+        "/plugins",
+        "/services",
+        "/routes",
+        "/consumers",
+        "/upstreams",
+        "/certificates",
+        "/snis",
+        "/ca_certificates",
+        "/vaults",
+        "/tags",
+        "/key-sets",
+        "/keys",
+        "/ai-providers",
+        "/ai-models",
+        "/ai-model-groups",
+        "/ai-virtual-keys",
+        "/ai-usage",
+        "/ai-usage/summary",
         "/ai-endpoint-test",
-        "/clustering/data-planes", "/clustering/status",
-        "/cache", "/debug/node/log-level", "/timers",
+        "/clustering/data-planes",
+        "/clustering/status",
+        "/cache",
+        "/debug/node/log-level",
+        "/timers",
     ];
     if static_routes.contains(&path) {
         return true;
@@ -278,10 +313,29 @@ fn is_known_route(path: &str) -> bool {
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match segments.as_slice() {
         // /entity/{id}
-        [entity, _id] if matches!(*entity, "services" | "routes" | "consumers" | "plugins"
-            | "upstreams" | "certificates" | "snis" | "ca_certificates" | "vaults" | "tags"
-            | "key-sets" | "keys"
-            | "ai-providers" | "ai-models" | "ai-virtual-keys" | "cache") => true,
+        [entity, _id]
+            if matches!(
+                *entity,
+                "services"
+                    | "routes"
+                    | "consumers"
+                    | "plugins"
+                    | "upstreams"
+                    | "certificates"
+                    | "snis"
+                    | "ca_certificates"
+                    | "vaults"
+                    | "tags"
+                    | "key-sets"
+                    | "keys"
+                    | "ai-providers"
+                    | "ai-models"
+                    | "ai-virtual-keys"
+                    | "cache"
+            ) =>
+        {
+            true
+        }
         // /debug/node/log-level/{level}
         ["debug", "node", "log-level", _] => true,
         // /schemas/{entity}
@@ -315,6 +369,9 @@ fn is_known_route(path: &str) -> bool {
         ["ai-providers", _, "ai-models"] => true,
         // /ai-virtual-keys/{id}/rotate
         ["ai-virtual-keys", _, "rotate"] => true,
+        ["ai-virtual-keys", _, "budget-ledger"] => true,
+        ["ai-virtual-keys", _, "budget-reconciliations"] => true,
+        ["ai-virtual-keys", _, "budget-ledger", "rebuild"] => true,
         _ => false,
     }
 }
@@ -323,12 +380,19 @@ fn is_known_route(path: &str) -> bool {
 fn determine_allowed_methods(path: &str) -> &'static str {
     // Read-only endpoints — 只读端点
     match path {
-        "/" | "/status" | "/endpoints" | "/plugins/enabled"
-        | "/ai-usage" | "/ai-usage/summary" => return "GET, HEAD, OPTIONS",
+        "/" | "/status" | "/endpoints" | "/plugins/enabled" | "/ai-usage" | "/ai-usage/summary" => {
+            return "GET, HEAD, OPTIONS"
+        }
         _ => {}
     }
 
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["ai-virtual-keys", _, "budget-ledger"] => return "GET, HEAD, OPTIONS",
+        ["ai-virtual-keys", _, "budget-reconciliations"]
+        | ["ai-virtual-keys", _, "budget-ledger", "rebuild"] => return "OPTIONS, POST",
+        _ => {}
+    }
     match segments.len() {
         // Collection endpoints: /services, /routes, etc. — 集合端点
         1 => "GET, HEAD, OPTIONS, POST",
@@ -374,7 +438,8 @@ async fn options_middleware(
                     "name": "not found",
                     "code": 3,
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
 
         // Determine allowed methods based on endpoint type — 根据端点类型确定允许的方法
@@ -404,12 +469,21 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/status", get(status_info))
         .route("/config", axum::routing::post(post_config))
         .route("/endpoints", get(list_endpoints))
-        .route("/schemas/plugins/validate", axum::routing::post(validate_plugin_schema))
+        .route(
+            "/schemas/plugins/validate",
+            axum::routing::post(validate_plugin_schema),
+        )
         .route("/schemas/plugins/{name}", get(get_plugin_schema))
-        .route("/schemas/vaults/validate", axum::routing::post(validate_vault_schema))
+        .route(
+            "/schemas/vaults/validate",
+            axum::routing::post(validate_vault_schema),
+        )
         .route("/schemas/vaults/{name}", get(get_vault_schema))
         .route("/schemas/{entity_name}", get(get_entity_schema))
-        .route("/schemas/{entity_name}/validate", axum::routing::post(validate_entity_schema))
+        .route(
+            "/schemas/{entity_name}/validate",
+            axum::routing::post(validate_entity_schema),
+        )
         // Tags — 标签 API
         .route("/tags", get(list_all_tags))
         .route("/tags/{tag}", get(list_by_tag))
@@ -606,7 +680,10 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(delete_key),
         )
         // AI Providers
-        .route("/ai-providers", get(handlers::ai_providers::list).post(handlers::ai_providers::create))
+        .route(
+            "/ai-providers",
+            get(handlers::ai_providers::list).post(handlers::ai_providers::create),
+        )
         .route(
             "/ai-providers/{id_or_name}",
             get(handlers::ai_providers::get_one)
@@ -614,9 +691,15 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .put(handlers::ai_providers::upsert)
                 .delete(handlers::ai_providers::delete_one),
         )
-        .route("/ai-providers/{id}/ai-models", get(handlers::ai_providers::list_models))
+        .route(
+            "/ai-providers/{id}/ai-models",
+            get(handlers::ai_providers::list_models),
+        )
         // AI Models
-        .route("/ai-models", get(handlers::ai_models::list).post(handlers::ai_models::create))
+        .route(
+            "/ai-models",
+            get(handlers::ai_models::list).post(handlers::ai_models::create),
+        )
         .route(
             "/ai-models/{id}",
             get(handlers::ai_models::get_one)
@@ -629,21 +712,51 @@ pub fn build_admin_router(state: AdminState) -> Router {
         .route("/ai-usage", get(handlers::ai_usage::list))
         .route("/ai-usage/summary", get(handlers::ai_usage::summary))
         // AI Virtual Keys
-        .route("/ai-virtual-keys", get(handlers::ai_virtual_keys::list).post(handlers::ai_virtual_keys::create))
+        .route(
+            "/ai-virtual-keys",
+            get(handlers::ai_virtual_keys::list).post(handlers::ai_virtual_keys::create),
+        )
         .route(
             "/ai-virtual-keys/{id_or_name}",
             get(handlers::ai_virtual_keys::get_one)
                 .patch(handlers::ai_virtual_keys::update)
                 .delete(handlers::ai_virtual_keys::delete_one),
         )
-        .route("/ai-virtual-keys/{id}/rotate", axum::routing::post(handlers::ai_virtual_keys::rotate))
+        .route(
+            "/ai-virtual-keys/{id}/budget-ledger",
+            get(handlers::ai_virtual_keys::budget_ledger),
+        )
+        .route(
+            "/ai-virtual-keys/{id}/budget-reconciliations",
+            axum::routing::post(handlers::ai_virtual_keys::reconcile_budget),
+        )
+        .route(
+            "/ai-virtual-keys/{id}/budget-ledger/rebuild",
+            axum::routing::post(handlers::ai_virtual_keys::rebuild_budget_ledger),
+        )
+        .route(
+            "/ai-virtual-keys/{id}/rotate",
+            axum::routing::post(handlers::ai_virtual_keys::rotate),
+        )
         // Manager-only relay for testing a published, tag-managed AI Endpoint through the Proxy.
-        .route("/ai-endpoint-test", axum::routing::post(handlers::ai_endpoint_test::test_endpoint))
+        .route(
+            "/ai-endpoint-test",
+            axum::routing::post(handlers::ai_endpoint_test::test_endpoint),
+        )
         // Clustering — 集群端点
-        .route("/clustering/data-planes", get(handlers::clustering::list_data_planes))
-        .route("/clustering/status", get(handlers::clustering::clustering_status))
+        .route(
+            "/clustering/data-planes",
+            get(handlers::clustering::list_data_planes),
+        )
+        .route(
+            "/clustering/status",
+            get(handlers::clustering::clustering_status),
+        )
         // Cache management — 缓存管理（任务 16.3）
-        .route("/cache", axum::routing::delete(handlers::cache::purge_cache))
+        .route(
+            "/cache",
+            axum::routing::delete(handlers::cache::purge_cache),
+        )
         .route(
             "/cache/{key}",
             get(handlers::cache::get_cache_entry).delete(handlers::cache::delete_cache_entry),
@@ -662,7 +775,10 @@ pub fn build_admin_router(state: AdminState) -> Router {
         // Issue 4: OPTIONS requests return 204 (Kong-compatible) — OPTIONS 请求返回 204（兼容 Kong）
         .layer(middleware::from_fn(options_middleware))
         // Admin headers — Server + Admin 延迟响应头（最外层，确保所有请求都包含此头）
-        .layer(middleware::from_fn_with_state(state.clone(), admin_headers_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_headers_middleware,
+        ))
         .with_state(state)
 }
 
@@ -695,9 +811,9 @@ async fn admin_fallback_with_trailing_slash(
             // Re-route through the admin router — 通过 admin router 重新路由
             let router = build_admin_router(state);
             let mut svc = router.into_service();
-            return tower::Service::<axum::extract::Request>::call(&mut svc, req).await.unwrap_or_else(|e| {
-                match e {}
-            });
+            return tower::Service::<axum::extract::Request>::call(&mut svc, req)
+                .await
+                .unwrap_or_else(|e| match e {});
         }
     }
     (
@@ -707,7 +823,8 @@ async fn admin_fallback_with_trailing_slash(
             "name": "not found",
             "code": 3,
         })),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Build the Status API router — 构建 Status API 路由

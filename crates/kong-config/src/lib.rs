@@ -241,6 +241,65 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
             "ai_usage_dbless_capacity 不能大于 {AI_USAGE_DBLESS_CAPACITY_MAX}"
         )));
     }
+    if config.ai_budget_operation_timeout_ms == 0
+        || config.ai_budget_lock_timeout_ms == 0
+        || config.ai_budget_lock_timeout_ms > config.ai_budget_operation_timeout_ms
+    {
+        return Err(KongConfigError::ValidationError(
+            "AI budget timeout 必须为正数，且 lock timeout 不得大于 operation timeout".to_string(),
+        ));
+    }
+    if config.ai_budget_pg_pool_size < 2
+        || config.ai_budget_heartbeat_pg_pool_size != 1
+        || config.ai_budget_admin_pg_pool_size == 0
+        || config.ai_budget_recovery_reserved_ops == 0
+        || config.ai_budget_recovery_reserved_ops >= config.ai_budget_pg_pool_size
+        || config.ai_budget_max_concurrent_ops == 0
+        || config.ai_budget_max_concurrent_ops
+            > config
+                .ai_budget_pg_pool_size
+                .saturating_sub(config.ai_budget_recovery_reserved_ops)
+        || config
+            .ai_budget_pg_pool_size
+            .saturating_add(config.ai_budget_heartbeat_pg_pool_size)
+            .saturating_add(config.ai_budget_admin_pg_pool_size)
+            > 256
+    {
+        return Err(KongConfigError::ValidationError(
+            "AI budget pool 配置非法：heartbeat pool 必须为 1，热路径必须为 recovery 保留连接"
+                .to_string(),
+        ));
+    }
+    if config.ai_budget_owner_lease_seconds == 0
+        || config.ai_budget_owner_heartbeat_ms == 0
+        || config.ai_budget_owner_lease_seconds.saturating_mul(1_000)
+            <= config.ai_budget_owner_heartbeat_ms.saturating_mul(3)
+        || config
+            .pg_timeout
+            .saturating_add(config.ai_budget_operation_timeout_ms)
+            >= config
+                .ai_budget_owner_lease_seconds
+                .saturating_mul(1_000)
+                .saturating_sub(config.ai_budget_owner_heartbeat_ms)
+    {
+        return Err(KongConfigError::ValidationError(
+            "ai_budget_owner_lease_seconds 必须大于 3 倍 heartbeat 间隔".to_string(),
+        ));
+    }
+    if config.ai_budget_intent_stale_grace_seconds == 0
+        || config.ai_budget_active_intent_capacity == 0
+        || config.ai_budget_recovery_scan_batch == 0
+        || config.ai_budget_recovery_scan_batch > 10_000
+        || config.ai_budget_checkpoint_interval_seconds == 0
+        || config.ai_budget_checkpoint_soft_tail_events <= 0
+        || config.ai_budget_checkpoint_soft_tail_events
+            >= config.ai_budget_checkpoint_hard_tail_events
+        || config.ai_budget_checkpoint_hard_tail_events <= 0
+    {
+        return Err(KongConfigError::ValidationError(
+            "AI budget 容量、stale grace、recovery 与 checkpoint 阈值非法".to_string(),
+        ));
+    }
 
     Ok(())
 }
@@ -419,6 +478,52 @@ declarative_config = /etc/kong/kong.yml
                 malformed,
                 Err(KongConfigError::ValidationError(message))
                     if message.contains("ai_usage_flush_interval_ms")
+            ));
+        });
+    }
+
+    #[test]
+    fn ai_budget_runtime_config_rejects_unsafe_time_boundaries() {
+        with_cleared_kong_env(|| {
+            let short_lease = load_config_from_string(
+                "ai_budget_owner_lease_seconds = 15\n\
+                 ai_budget_owner_heartbeat_ms = 5000\n",
+            );
+            assert!(matches!(
+                short_lease,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("owner_lease")
+            ));
+
+            let inverted_timeout = load_config_from_string(
+                "ai_budget_operation_timeout_ms = 100\n\
+                 ai_budget_lock_timeout_ms = 101\n",
+            );
+            assert!(matches!(
+                inverted_timeout,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("lock timeout")
+            ));
+
+            let no_recovery_capacity = load_config_from_string(
+                "ai_budget_pg_pool_size = 4\n\
+                 ai_budget_max_concurrent_ops = 4\n\
+                 ai_budget_recovery_reserved_ops = 1\n",
+            );
+            assert!(matches!(
+                no_recovery_capacity,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("pool")
+            ));
+
+            let inverted_checkpoint = load_config_from_string(
+                "ai_budget_checkpoint_soft_tail_events = 100\n\
+                 ai_budget_checkpoint_hard_tail_events = 100\n",
+            );
+            assert!(matches!(
+                inverted_checkpoint,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("checkpoint")
             ));
         });
     }

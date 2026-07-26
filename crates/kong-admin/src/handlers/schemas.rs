@@ -243,7 +243,7 @@ const BUNDLED_PLUGINS: &[&str] = &[
     "ctx-checker", "ctx-checker-last", "enable-buffering", "enable-buffering-response", "mocking",
     "admin-api-method",
     // Kong-Rust native AI plugins — Kong-Rust 原生 AI 插件
-    "ai-key-auth",
+    "ai-key-auth", "ai-rate-limit",
 ];
 
 /// Return schema for Rust native plugins (no Lua schema.lua needed) — 返回 Rust 原生插件的 schema（无需 Lua schema.lua）
@@ -304,7 +304,32 @@ fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
             "entity_checks": [],
             "name": "ai-key-auth",
         })),
-        "ai-rate-limit" | "ai-cache" | "ai-prompt-guard" => Some(json!({
+        "ai-rate-limit" => Some(json!({
+            "fields": [
+                {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
+                {"config": {"type": "record", "required": true, "fields": [
+                    {"limit_by": {"type": "string", "default": "consumer", "one_of": ["global", "route", "consumer", "virtual_key"]}},
+                    {"tpm_limit": {"type": "integer", "nullable": true, "default": null, "between": [1, 2147483647]}},
+                    {"rpm_limit": {"type": "integer", "nullable": true, "default": null, "between": [1, 2147483647]}},
+                    {"header_name": {
+                        "type": "string",
+                        "default": "X-AI-Key",
+                        "deprecated": true,
+                        "description": "Deprecated compatibility field; runtime identity never uses it."
+                    }},
+                    {"error_code": {"type": "integer", "default": 429, "between": [0, 65535]}},
+                    {"error_message": {"type": "string", "default": "AI rate limit exceeded"}},
+                ]}},
+            ],
+            "entity_checks": [
+                {"custom_entity_check": {
+                    "name": "ai_rate_limit_limits",
+                    "field_sources": ["config.limit_by", "config.tpm_limit", "config.rpm_limit"]
+                }}
+            ],
+            "name": "ai-rate-limit",
+        })),
+        "ai-cache" | "ai-prompt-guard" => Some(json!({
             "fields": [
                 {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
                 {"config": {"type": "record", "required": true, "fields": []}},
@@ -370,6 +395,14 @@ fn get_plugin_config_schema(name: &str) -> serde_json::Value {
             {"error_code": {"type": "number", "default": 429}},
             {"error_message": {"type": "string", "default": "API rate limit exceeded"}},
             {"sync_rate": {"type": "number", "default": -1}},
+        ]),
+        "ai-rate-limit" => json!([
+            {"limit_by": {"type": "string", "default": "consumer", "one_of": ["global", "route", "consumer", "virtual_key"]}},
+            {"tpm_limit": {"type": "integer", "nullable": true, "default": null, "between": [1, 2147483647]}},
+            {"rpm_limit": {"type": "integer", "nullable": true, "default": null, "between": [1, 2147483647]}},
+            {"header_name": {"type": "string", "default": "X-AI-Key", "deprecated": true}},
+            {"error_code": {"type": "integer", "default": 429, "between": [0, 65535]}},
+            {"error_message": {"type": "string", "default": "AI rate limit exceeded"}},
         ]),
         "cors" => json!([
             {"origins": {"type": "array", "elements": {"type": "string"}}},
@@ -731,7 +764,7 @@ pub async fn get_plugin_schema(
         Ok(schema) => {
             // Ensure entity_checks is always present — 确保 entity_checks 始终存在
             let mut schema_json = schema;
-            if !schema_json.get("entity_checks").is_some() {
+            if schema_json.get("entity_checks").is_none() {
                 schema_json["entity_checks"] = json!([]);
             }
             (StatusCode::OK, Json(schema_json)).into_response()
@@ -908,6 +941,15 @@ pub async fn validate_plugin_schema(
         ).into_response();
     }
 
+    if plugin_name == "ai-rate-limit" {
+        let config = body.get("config").unwrap_or(&serde_json::Value::Null);
+        if let Err(error) =
+            kong_plugin_system::config_validation::validate_ai_rate_limit_config(config)
+        {
+            return ai_rate_limit_schema_violation(error).into_response();
+        }
+    }
+
     // If config is provided, validate its fields against known schema — 如果提供了 config，验证其字段是否在已知 schema 中
     if let Some(config) = body.get("config").and_then(|v| v.as_object()) {
         // Get known config fields from our schema definitions — 从 schema 定义中获取已知 config 字段
@@ -945,6 +987,7 @@ fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
         "key-auth" => vec!["key_names", "key_in_body", "key_in_header", "key_in_query", "hide_credentials", "anonymous", "run_on_preflight"],
         "basic-auth" => vec!["hide_credentials", "anonymous"],
         "rate-limiting" => vec!["second", "minute", "hour", "day", "month", "year", "limit_by", "policy", "fault_tolerant", "hide_client_headers", "redis_host", "redis_port", "redis_password", "redis_timeout", "redis_database", "header_name", "path", "redis_ssl", "redis_ssl_verify", "redis_server_name", "error_code", "error_message", "sync_rate"],
+        "ai-rate-limit" => vec!["limit_by", "tpm_limit", "rpm_limit", "header_name", "error_code", "error_message"],
         "cors" => vec!["origins", "methods", "headers", "exposed_headers", "credentials", "max_age", "preflight_continue", "private_network"],
         "tcp-log" => vec!["host", "port", "timeout", "keepalive", "tls", "tls_sni"],
         "udp-log" => vec!["host", "port", "timeout"],
@@ -986,4 +1029,34 @@ fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
         "ai-key-auth" => vec!["key_header", "error_format"],
         _ => vec![], // Unknown plugin: skip config field validation — 未知插件：跳过 config 字段验证
     }
+}
+
+pub(super) fn ai_rate_limit_schema_violation(
+    error: kong_plugin_system::config_validation::PluginConfigValidationError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let field = error.field();
+    let message = error.message();
+    let (display, fields) = if field.is_empty() {
+        (format!("config: {}", message), json!({"config": message}))
+    } else if field == "@entity" {
+        (
+            format!("config: {}", message),
+            json!({"config": {"@entity": [message]}}),
+        )
+    } else {
+        (
+            format!("config.{}: {}", field, message),
+            json!({"config": {field.to_string(): message}}),
+        )
+    };
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "message": format!("schema violation ({})", display),
+            "name": "schema violation",
+            "code": 2,
+            "fields": fields,
+        })),
+    )
 }

@@ -19,10 +19,12 @@ pub mod stream_tls;
 pub mod tls;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::FutureExt;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
@@ -35,7 +37,10 @@ use kong_core::traits::{
     RequestTransportSource,
 };
 use kong_plugin_system::{
-    PluginExecutor, PluginRegistry, RequestLifecycleObserver, ResolvedPlugin,
+    DispatchAbortCause, DispatchAbortKind, DispatchFailurePolicy, DispatchFailureResponse,
+    DispatchFailureResponseFormat, LifecycleHookTimeouts, PluginExecutor, PluginRegistry,
+    RequestDispatchAbortHandler, RequestDispatchHook, RequestFinalizer, RequestLifecycleObserver,
+    ResolvedPlugin,
 };
 use kong_router::{RequestContext, RouteMatch, Router};
 
@@ -56,6 +61,48 @@ fn apply_proxy_response_headers(response: &mut ResponseHeader, headers: &[String
             let _ = response.insert_header(name.trim().to_string(), value.trim().to_string());
         }
     }
+}
+
+fn set_dispatch_failure_response(ctx: &mut RequestCtx, response: &DispatchFailureResponse) {
+    let format = ctx
+        .extensions
+        .get::<DispatchFailureResponseFormat>()
+        .copied()
+        .unwrap_or(DispatchFailureResponseFormat::Generic);
+    let error_type = match response.status {
+        401 => "invalid_request_error",
+        403 => "insufficient_quota",
+        429 => "rate_limit_error",
+        500..=599 => "server_error",
+        _ => "gateway_error",
+    };
+    let body = match format {
+        DispatchFailureResponseFormat::Generic => serde_json::json!({
+            "error": {
+                "code": response.code,
+                "message": response.message,
+            }
+        }),
+        DispatchFailureResponseFormat::OpenAi => serde_json::json!({
+            "error": {
+                "message": response.message,
+                "type": error_type,
+                "param": null,
+                "code": response.code,
+            }
+        }),
+        DispatchFailureResponseFormat::Anthropic => serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": response.code,
+                "message": response.message,
+            },
+            "request_id": ctx.lifecycle.request_id,
+        }),
+    };
+    ctx.short_circuited = true;
+    ctx.exit_status = Some(response.status);
+    ctx.exit_body = Some(body.to_string());
 }
 
 /// Per-request context — passed between Pingora phases — 请求级上下文 — 在 Pingora 各阶段间传递
@@ -136,6 +183,14 @@ pub struct KongProxy {
     pub plugin_chains: Arc<RwLock<HashMap<(Option<Uuid>, Option<Uuid>), Arc<Vec<ResolvedPlugin>>>>>,
     /// Request lifecycle observers — 请求生命周期观察器
     pub lifecycle_observers: Arc<Vec<Arc<dyn RequestLifecycleObserver>>>,
+    /// 上游派发前执行的异步 hook。
+    pub dispatch_hooks: Arc<Vec<Arc<dyn RequestDispatchHook>>>,
+    /// critical 派发失败后、响应发出前执行的独立补偿器。
+    pub dispatch_abort_handlers: Arc<Vec<Arc<dyn RequestDispatchAbortHandler>>>,
+    /// 请求结果冻结后、普通插件 log 前执行的异步 finalizer。
+    pub request_finalizers: Arc<Vec<Arc<dyn RequestFinalizer>>>,
+    /// 每个生命周期 hook 的独立超时。
+    pub lifecycle_hook_timeouts: LifecycleHookTimeouts,
 }
 
 impl KongProxy {
@@ -168,6 +223,10 @@ impl KongProxy {
             dns_resolver,
             plugin_chains: Arc::new(RwLock::new(HashMap::new())),
             lifecycle_observers: Arc::new(Vec::new()),
+            dispatch_hooks: Arc::new(Vec::new()),
+            dispatch_abort_handlers: Arc::new(Vec::new()),
+            request_finalizers: Arc::new(Vec::new()),
+            lifecycle_hook_timeouts: LifecycleHookTimeouts::default(),
         }
     }
 
@@ -180,6 +239,52 @@ impl KongProxy {
         self
     }
 
+    /// 装配异步请求生命周期扩展。
+    ///
+    /// 三类组件显式分开，保证 critical dispatch hook 自身失败时，补偿不会再次
+    /// 回调同一个实现。每个组件由代理逐项施加 timeout 与 panic 隔离。
+    pub fn with_async_lifecycle_hooks(
+        self,
+        dispatch_hooks: Vec<Arc<dyn RequestDispatchHook>>,
+        dispatch_abort_handlers: Vec<Arc<dyn RequestDispatchAbortHandler>>,
+        request_finalizers: Vec<Arc<dyn RequestFinalizer>>,
+        timeouts: LifecycleHookTimeouts,
+    ) -> Self {
+        self.try_with_async_lifecycle_hooks(
+            dispatch_hooks,
+            dispatch_abort_handlers,
+            request_finalizers,
+            timeouts,
+        )
+        .expect("critical dispatch hook 必须配套同域独立 abort handler")
+    }
+
+    /// 校验并装配异步请求生命周期扩展。
+    pub fn try_with_async_lifecycle_hooks(
+        mut self,
+        dispatch_hooks: Vec<Arc<dyn RequestDispatchHook>>,
+        dispatch_abort_handlers: Vec<Arc<dyn RequestDispatchAbortHandler>>,
+        request_finalizers: Vec<Arc<dyn RequestFinalizer>>,
+        timeouts: LifecycleHookTimeouts,
+    ) -> Result<Self, &'static str> {
+        for hook in dispatch_hooks
+            .iter()
+            .filter(|hook| matches!(hook.failure_policy(), DispatchFailurePolicy::FailClosed(_)))
+        {
+            let has_matching_compensator = dispatch_abort_handlers
+                .iter()
+                .any(|handler| handler.compensation_domain() == hook.compensation_domain());
+            if !has_matching_compensator {
+                return Err("critical dispatch hook 必须配套同域独立 abort handler");
+            }
+        }
+        self.dispatch_hooks = Arc::new(dispatch_hooks);
+        self.dispatch_abort_handlers = Arc::new(dispatch_abort_handlers);
+        self.request_finalizers = Arc::new(request_finalizers);
+        self.lifecycle_hook_timeouts = timeouts;
+        Ok(self)
+    }
+
     fn notify_plugins_resolved(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) {
         for observer in self.lifecycle_observers.iter() {
             observer.on_plugins_resolved(plugins, ctx);
@@ -189,6 +294,132 @@ impl KongProxy {
     fn notify_request_finalizing(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) {
         for observer in self.lifecycle_observers.iter() {
             observer.on_request_finalizing(plugins, ctx);
+        }
+    }
+
+    async fn run_dispatch_hooks(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) -> bool {
+        let mut abort: Option<(DispatchAbortCause, DispatchFailureResponse)> = None;
+
+        for hook in self.dispatch_hooks.iter() {
+            let hook_name = hook.name();
+            let policy = hook.failure_policy();
+            let future =
+                AssertUnwindSafe(hook.before_upstream_dispatch(plugins, ctx)).catch_unwind();
+            let outcome = tokio::time::timeout(self.lifecycle_hook_timeouts.dispatch, future).await;
+
+            let failure_kind = match outcome {
+                Ok(Ok(Ok(()))) => None,
+                Ok(Ok(Err(error))) => {
+                    tracing::error!(
+                        hook = hook_name,
+                        error_code = %error.code,
+                        "上游派发 hook 执行失败: {}",
+                        error
+                    );
+                    Some(DispatchAbortKind::Error)
+                }
+                Ok(Err(_panic)) => {
+                    tracing::error!(hook = hook_name, "上游派发 hook panic");
+                    Some(DispatchAbortKind::Panic)
+                }
+                Err(_) => {
+                    tracing::error!(hook = hook_name, "上游派发 hook 超时");
+                    Some(DispatchAbortKind::Timeout)
+                }
+            };
+
+            if let Some(kind) = failure_kind {
+                if let DispatchFailurePolicy::FailClosed(response) = &policy {
+                    ctx.forbid_upstream_dispatch();
+                    if abort.is_none() {
+                        abort = Some((DispatchAbortCause::new(hook_name, kind), response.clone()));
+                    }
+                }
+            }
+
+            // hook 可在预期领域失败时自行写入固定短路响应。无论 failure policy
+            // 如何，只要它已短路或显式禁止派发，就必须走独立补偿。
+            if ctx.is_short_circuited() || ctx.is_upstream_dispatch_forbidden() {
+                ctx.forbid_upstream_dispatch();
+                if abort.is_none() {
+                    let response = match policy {
+                        DispatchFailurePolicy::FailClosed(response) => response,
+                        DispatchFailurePolicy::Continue => DispatchFailureResponse::new(
+                            503,
+                            "upstream_dispatch_forbidden",
+                            "Upstream dispatch unavailable",
+                        ),
+                    };
+                    abort = Some((
+                        DispatchAbortCause::new(hook_name, DispatchAbortKind::Explicit),
+                        response,
+                    ));
+                }
+            }
+        }
+
+        let Some((cause, failure_response)) = abort else {
+            return !ctx.is_upstream_dispatch_forbidden();
+        };
+
+        // 先不可逆禁止联网并冻结根错误，再调用与失败 hook 相互独立的补偿器。
+        // 补偿器可以清理不可信 quota headers，但不能把 budget/dispatch 根因改写成
+        // 自己的次生错误。
+        ctx.forbid_upstream_dispatch();
+        if !ctx.is_short_circuited() {
+            set_dispatch_failure_response(ctx, &failure_response);
+        }
+        let root_failure = (
+            ctx.exit_status,
+            ctx.exit_body.clone(),
+            ctx.exit_headers.clone(),
+        );
+        for handler in self.dispatch_abort_handlers.iter() {
+            let handler_name = handler.name();
+            let future = AssertUnwindSafe(handler.compensate_before_response(ctx, cause.clone()))
+                .catch_unwind();
+            match tokio::time::timeout(self.lifecycle_hook_timeouts.abort_compensation, future)
+                .await
+            {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => tracing::error!(
+                    handler = handler_name,
+                    error_code = %error.code,
+                    "派发中止补偿失败: {}",
+                    error
+                ),
+                Ok(Err(_panic)) => {
+                    tracing::error!(handler = handler_name, "派发中止补偿 panic")
+                }
+                Err(_) => tracing::error!(handler = handler_name, "派发中止补偿超时"),
+            }
+        }
+        ctx.short_circuited = true;
+        ctx.exit_status = root_failure.0;
+        ctx.exit_body = root_failure.1;
+        ctx.exit_headers = root_failure.2;
+        ctx.lifecycle
+            .mark_gateway_error(LifecyclePhase::Upstream, "request_dispatch_hook");
+        false
+    }
+
+    async fn run_request_finalizers(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) {
+        for finalizer in self.request_finalizers.iter() {
+            let finalizer_name = finalizer.name();
+            let future = AssertUnwindSafe(finalizer.finalize(plugins, ctx)).catch_unwind();
+            match tokio::time::timeout(self.lifecycle_hook_timeouts.finalizer, future).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => tracing::error!(
+                    finalizer = finalizer_name,
+                    error_code = %error.code,
+                    "请求 finalizer 执行失败: {}",
+                    error
+                ),
+                Ok(Err(_panic)) => {
+                    tracing::error!(finalizer = finalizer_name, "请求 finalizer panic")
+                }
+                Err(_) => tracing::error!(finalizer = finalizer_name, "请求 finalizer 超时"),
+            }
         }
     }
 
@@ -994,7 +1225,15 @@ impl ProxyHttp for KongProxy {
         ctx.upstream_tls = upstream_tls;
         ctx.upstream_sni = upstream_sni;
         ctx.upstream_is_grpc = upstream_is_grpc;
-        ctx.plugin_ctx.lifecycle.mark_upstream_attempted();
+
+        if !self
+            .run_dispatch_hooks(&plugins_ref, &mut ctx.plugin_ctx)
+            .await
+        {
+            return self
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &plugins_ref)
+                .await;
+        }
 
         Ok(false) // Continue to upstream — 继续到上游
     }
@@ -1014,8 +1253,6 @@ impl ProxyHttp for KongProxy {
                 return Err(pingora_core::Error::new_str("上游地址未设置"));
             }
         };
-        ctx.plugin_ctx.lifecycle.mark_upstream_attempted();
-
         // Ensure address includes port — 确保地址包含端口
         let addr_with_port = if raw_addr.contains(':') {
             raw_addr
@@ -1117,6 +1354,8 @@ impl ProxyHttp for KongProxy {
             }
         }
 
+        // DNS 与 peer 配置均已成功，下一步才会真正进入 Pingora 建连路径。
+        ctx.plugin_ctx.lifecycle.mark_upstream_attempted();
         Ok(Box::new(peer))
     }
 
@@ -2136,6 +2375,11 @@ impl ProxyHttp for KongProxy {
             "workspace_name": "default"
         }));
 
+        // observer 已形成不可变 usage fact，上面的延迟、大小与 log snapshot 也已冻结；
+        // 此后 finalizer 的 I/O 不计入客户端请求时延，并彼此隔离。
+        self.run_request_finalizers(&plugins, &mut ctx.plugin_ctx)
+            .await;
+
         // Execute plugin log phase (always executes, even after short-circuit) — 执行插件 log 阶段（总是执行，即使之前短路）
         if let Err(e) = PhaseRunner::run_log(&ctx.resolved_plugins, &mut ctx.plugin_ctx).await {
             tracing::error!("Log 阶段执行失败: {}", e);
@@ -2145,13 +2389,20 @@ impl ProxyHttp for KongProxy {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
+    use async_trait::async_trait;
     use kong_config::KongConfig;
     use kong_core::models::Route;
     use kong_core::traits::{RequestCtx, RequestTransportError, RequestTransportErrorKind};
-    use kong_plugin_system::{PluginRegistry, RequestLifecycleObserver, ResolvedPlugin};
+    use kong_plugin_system::{
+        DispatchAbortCause, DispatchFailurePolicy, DispatchFailureResponse,
+        DispatchFailureResponseFormat, LifecycleHookError, LifecycleHookTimeouts, PluginRegistry,
+        RequestDispatchAbortHandler, RequestDispatchHook, RequestFinalizer,
+        RequestLifecycleObserver, ResolvedPlugin,
+    };
     use kong_router::RequestContext;
     use pingora_core::{Error, ErrorType};
     use pingora_http::{RequestHeader, ResponseHeader};
@@ -2189,6 +2440,143 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum AsyncHookBehavior {
+        Success,
+        Error,
+        Panic,
+        Timeout,
+    }
+
+    struct TestDispatchHook {
+        name: &'static str,
+        compensation_domain: &'static str,
+        behavior: AsyncHookBehavior,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RequestDispatchHook for TestDispatchHook {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn compensation_domain(&self) -> &'static str {
+            self.compensation_domain
+        }
+
+        fn failure_policy(&self) -> DispatchFailurePolicy {
+            DispatchFailurePolicy::FailClosed(DispatchFailureResponse::new(
+                503,
+                "test_dispatch_failed",
+                "test dispatch failed",
+            ))
+        }
+
+        async fn before_upstream_dispatch(
+            &self,
+            _plugins: &[ResolvedPlugin],
+            _ctx: &mut RequestCtx,
+        ) -> Result<(), LifecycleHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.behavior {
+                AsyncHookBehavior::Success => Ok(()),
+                AsyncHookBehavior::Error => {
+                    Err(LifecycleHookError::new("test_error", "test failure"))
+                }
+                AsyncHookBehavior::Panic => panic!("test dispatch panic"),
+                AsyncHookBehavior::Timeout => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    struct TestAbortHandler {
+        compensation_domain: &'static str,
+        calls: Arc<AtomicUsize>,
+        saw_forbidden: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl RequestDispatchAbortHandler for TestAbortHandler {
+        fn name(&self) -> &'static str {
+            "test-abort"
+        }
+
+        fn compensation_domain(&self) -> &'static str {
+            self.compensation_domain
+        }
+
+        async fn compensate_before_response(
+            &self,
+            ctx: &mut RequestCtx,
+            _cause: DispatchAbortCause,
+        ) -> Result<(), LifecycleHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.saw_forbidden
+                .store(ctx.is_upstream_dispatch_forbidden(), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct OverwritingAbortHandler;
+
+    #[async_trait]
+    impl RequestDispatchAbortHandler for OverwritingAbortHandler {
+        fn name(&self) -> &'static str {
+            "overwriting-abort"
+        }
+
+        fn compensation_domain(&self) -> &'static str {
+            "test"
+        }
+
+        async fn compensate_before_response(
+            &self,
+            ctx: &mut RequestCtx,
+            _cause: DispatchAbortCause,
+        ) -> Result<(), LifecycleHookError> {
+            ctx.short_circuited = true;
+            ctx.exit_status = Some(503);
+            ctx.exit_body = Some(r#"{"error":{"code":"secondary_failure"}}"#.to_string());
+            Ok(())
+        }
+    }
+
+    struct TestFinalizer {
+        name: &'static str,
+        behavior: AsyncHookBehavior,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RequestFinalizer for TestFinalizer {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn finalize(
+            &self,
+            _plugins: &[ResolvedPlugin],
+            _ctx: &mut RequestCtx,
+        ) -> Result<(), LifecycleHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.behavior {
+                AsyncHookBehavior::Success => Ok(()),
+                AsyncHookBehavior::Error => {
+                    Err(LifecycleHookError::new("test_error", "test failure"))
+                }
+                AsyncHookBehavior::Panic => panic!("test finalizer panic"),
+                AsyncHookBehavior::Timeout => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok(())
+                }
+            }
+        }
+    }
+
     #[test]
     fn lifecycle_observers_are_optional_and_invoked_synchronously() {
         let resolved = Arc::new(AtomicUsize::new(0));
@@ -2204,6 +2592,208 @@ mod tests {
 
         assert_eq!(resolved.load(Ordering::SeqCst), 1);
         assert_eq!(finalizing.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn critical_dispatch_hook_requires_an_independent_abort_handler() {
+        let hooks: Vec<Arc<dyn RequestDispatchHook>> = vec![Arc::new(TestDispatchHook {
+            name: "critical",
+            compensation_domain: "test",
+            behavior: AsyncHookBehavior::Success,
+            calls: Arc::new(AtomicUsize::new(0)),
+        })];
+
+        let result = test_proxy().try_with_async_lifecycle_hooks(
+            hooks,
+            Vec::new(),
+            Vec::new(),
+            LifecycleHookTimeouts::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err("critical dispatch hook 必须配套同域独立 abort handler")
+        ));
+    }
+
+    #[test]
+    fn budget_dispatch_hook_rejects_quota_only_abort_handler() {
+        let hooks: Vec<Arc<dyn RequestDispatchHook>> = vec![Arc::new(TestDispatchHook {
+            name: "ai-budget-dispatch",
+            compensation_domain: "ai-budget",
+            behavior: AsyncHookBehavior::Success,
+            calls: Arc::new(AtomicUsize::new(0)),
+        })];
+        let handlers: Vec<Arc<dyn RequestDispatchAbortHandler>> =
+            vec![Arc::new(TestAbortHandler {
+                compensation_domain: "ai-quota",
+                calls: Arc::new(AtomicUsize::new(0)),
+                saw_forbidden: Arc::new(AtomicBool::new(false)),
+            })];
+
+        let result = test_proxy().try_with_async_lifecycle_hooks(
+            hooks,
+            handlers,
+            Vec::new(),
+            LifecycleHookTimeouts::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err("critical dispatch hook 必须配套同域独立 abort handler")
+        ));
+    }
+
+    #[test]
+    fn budget_dispatch_hook_accepts_matching_abort_handler() {
+        let hooks: Vec<Arc<dyn RequestDispatchHook>> = vec![Arc::new(TestDispatchHook {
+            name: "ai-budget-dispatch",
+            compensation_domain: "ai-budget",
+            behavior: AsyncHookBehavior::Success,
+            calls: Arc::new(AtomicUsize::new(0)),
+        })];
+        let handlers: Vec<Arc<dyn RequestDispatchAbortHandler>> =
+            vec![Arc::new(TestAbortHandler {
+                compensation_domain: "ai-budget",
+                calls: Arc::new(AtomicUsize::new(0)),
+                saw_forbidden: Arc::new(AtomicBool::new(false)),
+            })];
+
+        let result = test_proxy().try_with_async_lifecycle_hooks(
+            hooks,
+            handlers,
+            Vec::new(),
+            LifecycleHookTimeouts::default(),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn critical_dispatch_failures_are_isolated_and_compensated_before_response() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let compensation_calls = Arc::new(AtomicUsize::new(0));
+        let saw_forbidden = Arc::new(AtomicBool::new(false));
+        let hooks: Vec<Arc<dyn RequestDispatchHook>> = vec![
+            Arc::new(TestDispatchHook {
+                name: "error",
+                compensation_domain: "test",
+                behavior: AsyncHookBehavior::Error,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(TestDispatchHook {
+                name: "timeout",
+                compensation_domain: "test",
+                behavior: AsyncHookBehavior::Timeout,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(TestDispatchHook {
+                name: "panic",
+                compensation_domain: "test",
+                behavior: AsyncHookBehavior::Panic,
+                calls: Arc::clone(&calls),
+            }),
+        ];
+        let proxy = test_proxy().with_async_lifecycle_hooks(
+            hooks,
+            vec![Arc::new(TestAbortHandler {
+                compensation_domain: "test",
+                calls: Arc::clone(&compensation_calls),
+                saw_forbidden: Arc::clone(&saw_forbidden),
+            })],
+            Vec::new(),
+            LifecycleHookTimeouts {
+                dispatch: Duration::from_millis(5),
+                abort_compensation: Duration::from_millis(5),
+                finalizer: Duration::from_millis(5),
+            },
+        );
+        let mut ctx = RequestCtx::new();
+
+        assert!(!proxy.run_dispatch_hooks(&[], &mut ctx).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(compensation_calls.load(Ordering::SeqCst), 1);
+        assert!(saw_forbidden.load(Ordering::SeqCst));
+        assert!(ctx.is_upstream_dispatch_forbidden());
+        assert_eq!(ctx.exit_status, Some(503));
+        assert!(ctx
+            .exit_body
+            .as_deref()
+            .is_some_and(|body| body.contains("test_dispatch_failed")));
+    }
+
+    #[tokio::test]
+    async fn dispatch_compensation_preserves_anthropic_root_failure() {
+        let hooks: Vec<Arc<dyn RequestDispatchHook>> = vec![Arc::new(TestDispatchHook {
+            name: "panic",
+            compensation_domain: "test",
+            behavior: AsyncHookBehavior::Panic,
+            calls: Arc::new(AtomicUsize::new(0)),
+        })];
+        let proxy = test_proxy().with_async_lifecycle_hooks(
+            hooks,
+            vec![Arc::new(OverwritingAbortHandler)],
+            Vec::new(),
+            LifecycleHookTimeouts {
+                dispatch: Duration::from_millis(5),
+                abort_compensation: Duration::from_millis(5),
+                finalizer: Duration::from_millis(5),
+            },
+        );
+        let mut ctx = RequestCtx::new();
+        ctx.extensions
+            .insert(DispatchFailureResponseFormat::Anthropic);
+
+        assert!(!proxy.run_dispatch_hooks(&[], &mut ctx).await);
+        assert_eq!(ctx.exit_status, Some(503));
+        let body: serde_json::Value =
+            serde_json::from_str(ctx.exit_body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "test_dispatch_failed");
+        assert_eq!(body["error"]["message"], "test dispatch failed");
+        assert_eq!(body["request_id"], ctx.lifecycle.request_id);
+        assert!(!ctx
+            .exit_body
+            .as_deref()
+            .unwrap()
+            .contains("secondary_failure"));
+    }
+
+    #[tokio::test]
+    async fn finalizer_timeout_and_panic_do_not_block_later_finalizers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let finalizers: Vec<Arc<dyn RequestFinalizer>> = vec![
+            Arc::new(TestFinalizer {
+                name: "timeout",
+                behavior: AsyncHookBehavior::Timeout,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(TestFinalizer {
+                name: "panic",
+                behavior: AsyncHookBehavior::Panic,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(TestFinalizer {
+                name: "success",
+                behavior: AsyncHookBehavior::Success,
+                calls: Arc::clone(&calls),
+            }),
+        ];
+        let proxy = test_proxy().with_async_lifecycle_hooks(
+            Vec::new(),
+            Vec::new(),
+            finalizers,
+            LifecycleHookTimeouts {
+                dispatch: Duration::from_millis(5),
+                abort_compensation: Duration::from_millis(5),
+                finalizer: Duration::from_millis(5),
+            },
+        );
+        let mut ctx = RequestCtx::new();
+
+        proxy.run_request_finalizers(&[], &mut ctx).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]

@@ -13,6 +13,8 @@ use kong_core::models::Plugin;
 use kong_core::traits::{LifecyclePhase, Phase, PluginConfig, PluginHandler, RequestCtx};
 use uuid::Uuid;
 
+pub mod config_validation;
+
 /// Resolved plugin instance for runtime use — 已解析的插件实例 — 运行时使用
 #[derive(Clone)]
 pub struct ResolvedPlugin {
@@ -31,6 +33,11 @@ pub struct ResolvedPlugin {
 }
 
 pub mod lifecycle {
+    use std::fmt;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
     use kong_core::traits::RequestCtx;
 
     use crate::ResolvedPlugin;
@@ -43,9 +50,177 @@ pub mod lifecycle {
 
         fn on_request_finalizing(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx);
     }
+
+    /// 生命周期 hook 的稳定错误类型。
+    ///
+    /// `code` 用于低基数日志与指标，`message` 只用于服务端诊断，不直接暴露给客户端。
+    #[derive(Debug, Clone, thiserror::Error)]
+    #[error("{code}: {message}")]
+    pub struct LifecycleHookError {
+        pub code: Arc<str>,
+        pub message: Arc<str>,
+    }
+
+    impl LifecycleHookError {
+        pub fn new(code: impl Into<Arc<str>>, message: impl Into<Arc<str>>) -> Self {
+            Self {
+                code: code.into(),
+                message: message.into(),
+            }
+        }
+    }
+
+    /// critical dispatch hook 失败时使用的固定协议响应。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DispatchFailureResponse {
+        pub status: u16,
+        pub code: Arc<str>,
+        pub message: Arc<str>,
+    }
+
+    impl DispatchFailureResponse {
+        pub fn new(status: u16, code: impl Into<Arc<str>>, message: impl Into<Arc<str>>) -> Self {
+            Self {
+                status,
+                code: code.into(),
+                message: message.into(),
+            }
+        }
+    }
+
+    /// critical dispatch 失败时采用的客户端错误 envelope。
+    ///
+    /// AI 策略观察器只写入这一低层协议提示；代理无需依赖具体 AI crate。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DispatchFailureResponseFormat {
+        Generic,
+        OpenAi,
+        Anthropic,
+    }
+
+    /// dispatch hook 的失败策略。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum DispatchFailurePolicy {
+        /// 记录错误但不阻止请求，适用于非关键观测 hook。
+        Continue,
+        /// 禁止联网，完成独立补偿后返回固定响应。
+        FailClosed(DispatchFailureResponse),
+    }
+
+    /// 导致上游派发中止的稳定分类。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DispatchAbortKind {
+        Error,
+        Timeout,
+        Panic,
+        Explicit,
+    }
+
+    /// 独立补偿器收到的派发中止原因。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DispatchAbortCause {
+        pub hook_name: Arc<str>,
+        pub kind: DispatchAbortKind,
+    }
+
+    impl DispatchAbortCause {
+        pub fn new(hook_name: impl Into<Arc<str>>, kind: DispatchAbortKind) -> Self {
+            Self {
+                hook_name: hook_name.into(),
+                kind,
+            }
+        }
+    }
+
+    /// 生命周期异步 hook 的逐项超时配置。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LifecycleHookTimeouts {
+        pub dispatch: Duration,
+        pub abort_compensation: Duration,
+        pub finalizer: Duration,
+    }
+
+    impl Default for LifecycleHookTimeouts {
+        fn default() -> Self {
+            Self {
+                dispatch: Duration::from_secs(2),
+                abort_compensation: Duration::from_secs(2),
+                finalizer: Duration::from_secs(5),
+            }
+        }
+    }
+
+    /// 在 DNS、建连和上游写入之前执行的异步派发 hook。
+    #[async_trait]
+    pub trait RequestDispatchHook: Send + Sync {
+        /// 用于低基数日志与指标，不应包含请求级数据。
+        fn name(&self) -> &'static str;
+
+        /// 用于启动校验的稳定补偿域；同一关键 hook 必须有同域独立补偿器。
+        ///
+        /// 默认与 hook 名称相同，需由其他组件补偿的 hook 应显式覆盖。
+        fn compensation_domain(&self) -> &'static str {
+            self.name()
+        }
+
+        fn failure_policy(&self) -> DispatchFailurePolicy;
+
+        async fn before_upstream_dispatch(
+            &self,
+            plugins: &[ResolvedPlugin],
+            ctx: &mut RequestCtx,
+        ) -> Result<(), LifecycleHookError>;
+    }
+
+    /// critical dispatch 失败后的独立补偿器。
+    #[async_trait]
+    pub trait RequestDispatchAbortHandler: Send + Sync {
+        /// 用于低基数日志与指标，不应包含请求级数据。
+        fn name(&self) -> &'static str;
+
+        /// 本补偿器负责的稳定补偿域。
+        fn compensation_domain(&self) -> &'static str {
+            self.name()
+        }
+
+        async fn compensate_before_response(
+            &self,
+            ctx: &mut RequestCtx,
+            cause: DispatchAbortCause,
+        ) -> Result<(), LifecycleHookError>;
+    }
+
+    /// 客户端请求结束后、普通插件 log 阶段前执行的异步 finalizer。
+    #[async_trait]
+    pub trait RequestFinalizer: Send + Sync {
+        /// 用于低基数日志与指标，不应包含请求级数据。
+        fn name(&self) -> &'static str;
+
+        async fn finalize(
+            &self,
+            plugins: &[ResolvedPlugin],
+            ctx: &mut RequestCtx,
+        ) -> Result<(), LifecycleHookError>;
+    }
+
+    impl fmt::Display for DispatchAbortKind {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let value = match self {
+                Self::Error => "error",
+                Self::Timeout => "timeout",
+                Self::Panic => "panic",
+                Self::Explicit => "explicit",
+            };
+            formatter.write_str(value)
+        }
+    }
 }
 
-pub use lifecycle::RequestLifecycleObserver;
+pub use lifecycle::{
+    DispatchAbortCause, DispatchAbortKind, DispatchFailurePolicy, DispatchFailureResponse,
+    DispatchFailureResponseFormat, LifecycleHookError, LifecycleHookTimeouts,
+    RequestDispatchAbortHandler, RequestDispatchHook, RequestFinalizer, RequestLifecycleObserver,
+};
 
 /// Plugin registry — manages all registered plugin handlers — 插件注册表 — 管理所有已注册的插件 handler
 pub struct PluginRegistry {
@@ -166,6 +341,22 @@ impl PluginExecutor {
 
             let was_short_circuited = ctx.is_short_circuited();
             let termination_hint_before = ctx.lifecycle.termination_hint.clone();
+            if let Err(error) = config_validation::validate_plugin_config(
+                &plugin.config.name,
+                &plugin.config.config,
+            ) {
+                if phase != Phase::Log {
+                    ctx.lifecycle.mark_gateway_error(
+                        LifecyclePhase::from(phase),
+                        plugin.config.name.clone(),
+                    );
+                }
+                tracing::error!("插件 {} 配置校验失败: {}", plugin.config.name, error);
+                return Err(KongError::PluginError {
+                    plugin_name: plugin.config.name.clone(),
+                    message: format!("invalid plugin config: {}", error),
+                });
+            }
             let result = match phase {
                 Phase::InitWorker => plugin.handler.init_worker(&plugin.config).await,
                 Phase::Certificate => plugin.handler.certificate(&plugin.config, ctx).await,
@@ -225,6 +416,18 @@ impl PluginExecutor {
 
             let was_short_circuited = ctx.is_short_circuited();
             let termination_hint_before = ctx.lifecycle.termination_hint.clone();
+            if let Err(error) = config_validation::validate_plugin_config(
+                &plugin.config.name,
+                &plugin.config.config,
+            ) {
+                ctx.lifecycle
+                    .mark_gateway_error(LifecyclePhase::BodyFilter, plugin.config.name.clone());
+                tracing::error!("插件 {} 配置校验失败: {}", plugin.config.name, error);
+                return Err(KongError::PluginError {
+                    plugin_name: plugin.config.name.clone(),
+                    message: format!("invalid plugin config: {}", error),
+                });
+            }
             let result = plugin
                 .handler
                 .body_filter(&plugin.config, ctx, body, end_of_stream)

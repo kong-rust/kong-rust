@@ -253,13 +253,36 @@ fn form_pairs_to_json(pairs: &[(String, String)]) -> Value {
             // Single value — 单值
             let (_, ref val) = entries[0];
             // Check for nested dot notation like "config.key" — 检查嵌套点号表示法如 "config.key"
-            map.insert(key.clone(), smart_parse_value(val));
+            map.insert(key.clone(), parse_form_field_value(key, val));
         }
     }
 
     // Post-process: handle nested dot-notation keys like "service.id" — 后处理：处理嵌套点号 key 如 "service.id"
     let result = expand_dotted_keys(Value::Object(map));
     result
+}
+
+/// 按字段语义解析表单标量，避免精确十进制字段先经过二进制浮点。
+fn parse_form_field_value(field: &str, value: &str) -> Value {
+    if field == "budget_limit_decimal" {
+        return if value.is_empty() {
+            Value::Null
+        } else {
+            Value::String(value.to_string())
+        };
+    }
+
+    if matches!(field, "budget_limit" | "rpm_limit" | "tpm_limit") {
+        if value.is_empty() {
+            return Value::Null;
+        }
+        return serde_json::from_str::<Value>(value)
+            .ok()
+            .filter(Value::is_number)
+            .unwrap_or_else(|| Value::String(value.to_string()));
+    }
+
+    smart_parse_value(value)
 }
 
 /// Normalize form key: strip array brackets and extract dotted index — 归一化表单 key：去除数组括号并提取点号索引
@@ -381,6 +404,8 @@ fn is_known_numeric_field(field: &str) -> bool {
         // Upstream health check sub-fields
         | "concurrency" | "successes" | "timeouts" | "http_failures" | "tcp_failures"
         | "interval" | "threshold"
+        // AI Virtual Key quota / legacy budget fields
+        | "rpm_limit" | "tpm_limit" | "budget_limit"
     )
 }
 
@@ -510,5 +535,21 @@ mod tests {
         let val = form_pairs_to_json(&pairs);
         assert_eq!(val["enabled"], true);
         assert_eq!(val["strip_path"], false);
+    }
+
+    #[test]
+    fn test_virtual_key_decimal_form_value_remains_exact_string() {
+        let pairs = vec![
+            (
+                "budget_limit_decimal".to_string(),
+                "9007199254740991.123456789012".to_string(),
+            ),
+            ("rpm_limit".to_string(), "2147483647".to_string()),
+        ];
+        let mut val = form_pairs_to_json(&pairs);
+        revert_non_numeric_form_values(&mut val);
+
+        assert_eq!(val["budget_limit_decimal"], "9007199254740991.123456789012");
+        assert_eq!(val["rpm_limit"], 2_147_483_647);
     }
 }

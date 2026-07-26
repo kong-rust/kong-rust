@@ -79,6 +79,13 @@ fn create_test_app_with_store(
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage,
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
@@ -142,6 +149,13 @@ fn create_test_status_app() -> axum::Router {
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
@@ -226,6 +240,13 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
@@ -385,6 +406,13 @@ fn create_test_app_with_data() -> axum::Router {
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
@@ -1275,6 +1303,13 @@ fn create_test_app_with_cache() -> (axum::Router, Arc<kong_db::KongCache>) {
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
@@ -1549,6 +1584,13 @@ fn create_test_app_with_keys() -> (axum::Router, String, String) {
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
             store.clone(),
         )),
+        ai_enforcement: Arc::new(kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid()),
+        ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(Uuid::nil()),
+        )),
+        default_workspace_id: Uuid::nil(),
+        ai_budget_governance: None,
+        ai_budget_admin: None,
         ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),

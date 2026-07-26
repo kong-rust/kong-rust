@@ -1,8 +1,22 @@
-//! AI 速率限制器 — 基于 Token 计数和请求数的限流
+//! AI 实时配额存储。
 
+pub mod clock;
 pub mod memory;
+pub mod metrics;
+pub mod orchestration;
+pub mod store;
+pub mod types;
 
-/// 限流器 trait — 支持固定窗口计数
+pub use clock::{ManualRateLimitClock, RateLimitClock, SystemRateLimitClock};
+pub use memory::{
+    MemoryCleanupReport, MemoryRateLimitConfig, MemoryRateLimitConfigError, MemoryRateLimitStore,
+};
+pub use metrics::RateLimitStoreStatsSnapshot;
+pub use orchestration::{admit_with_recovery, settle_with_recovery};
+pub use store::{RateLimitStore, RateLimitStoreError, RateLimitStoreErrorKind};
+pub use types::*;
+
+/// 旧插件迁移期间保留的同步限流器接口。
 pub trait RateLimiter: Send + Sync {
     /// 只读查询当前计数是否超限，返回 (是否放行, 当前计数)
     /// Read-only check: returns (allowed, current_count) without modifying state.

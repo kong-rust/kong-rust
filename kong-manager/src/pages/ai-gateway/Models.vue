@@ -699,7 +699,7 @@ const formatEffectiveAmount = (value?: string | null) => {
 }
 
 const priceSourceLabel = (source?: string | null) => {
-  if (source === 'override') {
+  if (source === 'model_override' || source === 'override') {
     return l('Custom override', '自定义覆盖')
   }
   if (source === 'builtin') {

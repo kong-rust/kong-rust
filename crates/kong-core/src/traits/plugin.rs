@@ -318,6 +318,11 @@ pub struct RequestCtx {
     pub upstream_force_http1: bool,
     /// Whether a retry callback was registered by the plugin — 插件是否注册了重试回调
     pub upstream_retry_callback_registered: bool,
+    /// 上游派发是否已被生命周期 hook 不可逆地禁止。
+    ///
+    /// 一旦置为 `true`，代理不得再进行 DNS、建连或写入上游。该状态独立于
+    /// `short_circuited`，便于先完成补偿，再统一生成短路响应。
+    pub upstream_dispatch_forbidden: bool,
     /// Response header modification queue — 响应头修改队列
     pub response_headers_to_set: Vec<(String, String)>,
     /// Response header removal queue — 响应头删除队列
@@ -394,6 +399,7 @@ impl RequestCtx {
             request_buffering_enabled: false,
             upstream_force_http1: false,
             upstream_retry_callback_registered: false,
+            upstream_dispatch_forbidden: false,
             response_headers_to_set: Vec::new(),
             response_headers_to_remove: Vec::new(),
             authenticated_credential: None,
@@ -422,6 +428,16 @@ impl RequestCtx {
     /// Check if the request has been short-circuited — 检查是否已短路
     pub fn is_short_circuited(&self) -> bool {
         self.short_circuited
+    }
+
+    /// 不可逆地禁止本请求派发到上游。
+    pub fn forbid_upstream_dispatch(&mut self) {
+        self.upstream_dispatch_forbidden = true;
+    }
+
+    /// 返回本请求是否仍允许派发到上游。
+    pub fn is_upstream_dispatch_forbidden(&self) -> bool {
+        self.upstream_dispatch_forbidden
     }
 }
 

@@ -17,6 +17,7 @@ This document is the user-facing guide for Kong-Rust AI Gateway, covering quick 
 9. [Supported Providers](#9-supported-providers)
 10. [Precise Prompt-Token Counting](#10-precise-prompt-token-counting-tokenizer-registry)
 11. [Usage Analytics and Cost Estimation](#11-usage-analytics-and-cost-estimation)
+12. [Virtual Key Quota and Budget Enforcement](#12-virtual-key-quota-and-budget-enforcement)
 
 ---
 
@@ -152,8 +153,8 @@ An AI Virtual Key is a virtual API key for users/teams, used for:
 
 - Authenticating proxy traffic (active once the `ai-key-auth` plugin is attached — see [3.5](#35-ai-key-auth))
 - Model allow list (`allowed_models`) restricting which models can be accessed (active)
-- Fine-grained TPM / RPM quota control (`tpm_limit` / `rpm_limit` — stored but not yet enforced)
-- Budget caps (`budget_limit`) and usage tracking (`budget_used` — stored but not yet enforced)
+- Fine-grained TPM / RPM quotas (enforced with a per-node 60-second window once the Virtual Key policy chain is attached)
+- Lifetime USD budgets and an authoritative ledger (supported in Traditional PostgreSQL mode; see Section 12)
 
 Virtual Keys have the format `sk-kr-<uuid32>`. The raw key is returned once at creation time; only its SHA256 hash is stored thereafter.
 
@@ -253,18 +254,28 @@ The client specifies `"model": "gpt-4o-mini"` in the request body, and the gatew
 
 ### 3.2 ai-rate-limit
 
-Enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) rate limiting on AI requests. Uses a sliding window (60 seconds); TPM uses a pre-deduction + correction mechanism to ensure accurate metering.
+Enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) quotas on AI requests.
+The current backend uses a per-process, 60-second fixed window that starts on the first
+hit. TPM reserves the prompt estimate at admission and settles against normalized usage
+when the request ends. RPM and TPM are admitted atomically within the same window, so a
+rejection in either dimension does not leave a partial charge.
 
 #### Configuration Fields
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `limit_by` | string | `"consumer"` | Rate limit dimension: `consumer` / `route` / `global` / `virtual_key` |
-| `tpm_limit` | integer | `null` | Tokens Per Minute limit; `null` means unlimited |
-| `rpm_limit` | integer | `null` | Requests Per Minute limit; `null` means unlimited |
-| `header_name` | string | `"X-AI-Key"` | Request header name for reading the Virtual Key (effective when `limit_by=virtual_key`) |
-| `error_code` | integer | `429` | HTTP status code returned when limit is exceeded |
-| `error_message` | string | `"AI rate limit exceeded"` | Error message returned when limit is exceeded |
+| `tpm_limit` | integer / null | `null` | Plugin-level TPM limit for `global/route/consumer`, range `1..=2^31-1` |
+| `rpm_limit` | integer / null | `null` | Plugin-level RPM limit for `global/route/consumer`, range `1..=2^31-1` |
+| `header_name` | string | `"X-AI-Key"` | Deprecated and retained for old configurations; ignored at runtime |
+| `error_code` | integer | `429` | Legacy non-Virtual-Key error status |
+| `error_message` | string | `"AI rate limit exceeded"` | Legacy non-Virtual-Key error message |
+
+`global/route/consumer` requires at least one plugin-level limit. `virtual_key` requires
+both `ai-key-auth` and `ai-proxy`, and both plugin-level `tpm_limit/rpm_limit` values must
+be `null`. Limits come exclusively from the authenticated Virtual Key entity. Identity is
+the authenticated key UUID; the plugin does not re-read `header_name` or raw credential
+headers.
 
 #### Example Configurations
 
@@ -288,6 +299,17 @@ Enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) rate limiting on 
   "tpm_limit": 50000
 }
 ```
+
+**Use the authenticated Virtual Key's own limits:**
+
+```json
+{
+  "limit_by": "virtual_key"
+}
+```
+
+See [Section 12](#12-virtual-key-quota-and-budget-enforcement) for key creation, budgets,
+headers, and the error contract.
 
 ---
 
@@ -545,8 +567,16 @@ All AI Gateway-specific endpoints are prefixed with `/ai-`. The base path is the
 | `PATCH` | `/ai-virtual-keys/{id_or_name}` | Update Virtual Key configuration |
 | `DELETE` | `/ai-virtual-keys/{id_or_name}` | Delete a Virtual Key |
 | `POST` | `/ai-virtual-keys/{id}/rotate` | Rotate the key (generates a new key, returns the new raw `key`) |
+| `GET` | `/ai-virtual-keys/{id}/budget-ledger` | Read the budget account and ledger with status/time/cursor filters |
+| `POST` | `/ai-virtual-keys/{id}/budget-reconciliations` | Manually settle or waive an unresolved intent |
+| `POST` | `/ai-virtual-keys/{id}/budget-ledger/rebuild` | Verify or CAS-rebuild the budget aggregate |
 
 > **Security note**: The `key_hash` field is removed from all responses. The raw key (the `key` field) appears only once — in the successful response of `POST /ai-virtual-keys` and `POST /ai-virtual-keys/{id}/rotate`. Store it securely.
+
+`budget_used`, `budget_used_decimal`, accounting counts/state/revision, and
+`key_hash/key_prefix` are server-owned. Supplying them to create/PATCH returns 400. The
+canonical amount fields are fixed-12-decimal strings:
+`budget_limit_decimal/budget_used_decimal`.
 
 ---
 
@@ -1259,5 +1289,267 @@ operational controls until a dedicated retention feature is delivered. API query
 are capped at 90 days, but that cap does not delete older data.
 
 The initial release also does not provide cross-node DB-less aggregation, Hybrid DP-to-CP
-upload, provider invoice reconciliation, discounts/taxes/multi-currency, or hard budget
-enforcement.
+upload, provider invoice reconciliation, discounts/taxes, or multi-currency. Virtual Key
+budgets use the independent authoritative ledger described in Section 12; they are not
+deducted from `ai_usage_logs`.
+
+---
+
+## 12. Virtual Key Quota and Budget Enforcement
+
+### 12.1 Activation and configuration
+
+A Virtual Key policy runs only when the same effective plugin chain contains all three
+enabled plugins:
+
+```text
+ai-key-auth → ai-rate-limit(limit_by=virtual_key) → ai-proxy
+```
+
+Create a key with quota and a lifetime USD budget. Use an exact string for money:
+
+```bash
+curl -s -X POST http://localhost:8001/ai-virtual-keys \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "team-a",
+    "rpm_limit": 60,
+    "tpm_limit": 100000,
+    "budget_limit_decimal": "100.000000000000",
+    "allowed_models": ["gpt-4o-mini"]
+  }'
+```
+
+The raw `key` appears only in this response. `rpm_limit/tpm_limit` accept `null` or an
+integer in `1..=2^31-1`; `null` disables that dimension. Setting
+`budget_limit_decimal=null` pauses the budget but preserves historical
+`budget_used_decimal`. Clearing is rejected with 409 while pending or unresolved intents
+exist.
+
+Attach `ai-key-auth` and `ai-proxy` to the same Route, then attach `ai-rate-limit`
+without plugin-level limits:
+
+```bash
+curl -s -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-rate-limit",
+    "route": {"name": "ai-full-stack"},
+    "config": {"limit_by": "virtual_key"}
+  }'
+```
+
+Missing authenticated identity returns 401. A missing `ai-proxy` returns 500 without
+charging quota or creating a budget intent. Call the Route with the one-time key:
+
+```bash
+curl -i http://localhost:8000/ai/chat \
+  -H 'Authorization: Bearer sk-kr-...' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
+```
+
+### 12.2 Quota window, headers, and errors
+
+The current Memory adapter is a per-node, fixed 60-second window starting at the first
+hit. The same key UUID shares one bucket across all covered Endpoints in the process.
+Rename and rotation preserve the UUID and do not reset the window.
+
+Configured dimensions return:
+
+```text
+X-RateLimit-Limit-Requests
+X-RateLimit-Remaining-Requests
+X-RateLimit-Reset-Requests
+X-RateLimit-Limit-Tokens
+X-RateLimit-Remaining-Tokens
+X-RateLimit-Reset-Tokens
+```
+
+The corresponding three headers are omitted for an unconfigured dimension. A 429 also
+returns `Retry-After`. Remaining is the atomic admission snapshot after reserving the
+prompt estimate; final token settlement does not rewrite headers already sent.
+
+A Virtual Key RPM rejection returns:
+
+```json
+{
+  "error": {
+    "message": "Virtual key request rate limit exceeded.",
+    "type": "rate_limit_error",
+    "param": null,
+    "code": "requests_rate_limit_exceeded"
+  }
+}
+```
+
+TPM uses `tokens_rate_limit_exceeded` and
+`Virtual key token rate limit exceeded.`. Budget and infrastructure errors are fixed:
+
+| HTTP | code | Meaning |
+|---:|---|---|
+| 401 | `virtual_key_required` | The policy requires an authenticated Virtual Key |
+| 403 | `budget_exhausted` | Persisted used amount has reached or exceeded the limit |
+| 429 | `requests_rate_limit_exceeded` | RPM exceeded |
+| 429 | `tokens_rate_limit_exceeded` | TPM exceeded |
+| 500 | `ai_policy_chain_invalid` | Invalid Virtual Key policy chain |
+| 503 | `quota_backend_unavailable` | Quota backend timeout, outage, or overload |
+| 503 | `quota_backend_state_invalid` | Corrupt or conflicting quota idempotency state |
+| 503 | `quota_backend_unsupported` | Quota is unsupported in this mode |
+| 503 | `budget_accounting_unavailable` | Budget primary/owner is temporarily unavailable |
+| 503 | `budget_accounting_unresolved` | Accounting requires reconciliation |
+| 503 | `budget_accounting_unsupported` | Persistent budgets are unsupported in this mode |
+| 503 | `budget_pricing_unavailable` | No safe pricing snapshot can be formed |
+
+OpenAI/Responses clients receive the nested `error` object. When the client protocol is
+known to be Anthropic, the gateway uses the Anthropic error envelope.
+
+### 12.3 Lifetime budget semantics
+
+A budget is a lifetime USD **persisted-consumption cutoff**. If
+`budget_used >= budget_limit` at admission, the request returns 403 before the provider.
+An admitted request settles after the response using the same Decimal price/usage
+semantics as the usage fact, but it neither waits for nor depends on the analytics writer.
+
+This is not a strict zero-overspend reservation. One request or several concurrent
+in-flight requests can take usage above the limit; the next request is blocked. Manager
+may show more than 100%. Raising the limit takes effect at the next authoritative check.
+Rename, rotate, disable, and re-enable do not reset usage. Standard list-price estimates
+are not provider invoices.
+
+Important derived fields in a Virtual Key response include:
+
+```json
+{
+  "quota_enforcement": "configured_local",
+  "quota_backend": "memory",
+  "quota_scope": "node",
+  "quota_window_seconds": 60,
+  "budget_limit_decimal": "100.000000000000",
+  "budget_used_decimal": "83.250000000000",
+  "budget_percentage_decimal": "83.250000000000",
+  "budget_status": "warning",
+  "budget_backend": "postgres",
+  "auth_endpoint_count": 2,
+  "enforced_endpoint_count": 2,
+  "pending_intent_count": 0,
+  "unresolved_intent_count": 0
+}
+```
+
+The Manager Virtual Keys page consumes these server-derived values. It distinguishes
+`unconfigured/awaiting_plugin/configured_local_partial/configured_local/unsupported`
+quota, and
+`unconfigured/paused/awaiting_plugin/active/warning/exhausted/unresolved/unavailable/
+unsupported` budget states.
+
+### 12.4 Ledger, reconciliation, and rebuild
+
+Query unresolved entries. `status` can combine
+`pending,unresolved,settled,resolved,waived`; `from/to` use RFC 3339:
+
+```bash
+curl -s \
+  'http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-ledger?status=unresolved&size=50'
+```
+
+`data` contains entries, `account` is the current aggregate, and `next_cursor` requests
+the next page. Do not parse or construct cursors.
+
+Settle against reviewed actual cost:
+
+```bash
+curl -s -X POST \
+  http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-reconciliations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "intent_id": "<intent-uuid>",
+    "operation_id": "<stable-operation-uuid>",
+    "action": "settle",
+    "cost_usd_decimal": "0.123000000000",
+    "reason": "provider record reviewed"
+  }'
+```
+
+To confirm that no cost was incurred, waive and omit the amount:
+
+```json
+{
+  "intent_id": "<intent-uuid>",
+  "operation_id": "<stable-operation-uuid>",
+  "action": "waive",
+  "reason": "provider confirmed request was not executed"
+}
+```
+
+Network retries must reuse the same `operation_id`; changing the payload for an existing
+ID returns 409. Start with a dry-run aggregate verification:
+
+```bash
+curl -s -X POST \
+  http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-ledger/rebuild \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "operation_id": "<stable-operation-uuid>",
+    "reason": "scheduled ledger verification",
+    "dry_run": true
+  }'
+```
+
+Set `dry_run=false` only after reviewing `comparison`. A real rebuild uses checkpoint +
+revision tail and a short key-lock CAS. A continuously changing hot account can return
+409; retry later or during a maintenance window.
+
+### 12.5 Runtime and capacity boundaries
+
+| Mode | RPM/TPM | Persistent budget |
+|---|---|---|
+| Traditional + PostgreSQL | Per-node Memory, 60 seconds, resets on restart | Authoritative PostgreSQL primary ledger |
+| standalone DB-less | Per-node ephemeral Memory | Unsupported; a configured budget fails closed |
+| Hybrid CP/DP | Capability is unsupported | Unsupported; no DP-to-CP accounting |
+
+Traditional uses separate bounded PostgreSQL pools for budget hot-path,
+heartbeat/owner, and Admin/rebuild work, plus owner leases, stale recovery, and
+checkpointing. Important defaults:
+
+```ini
+ai_quota_memory_max_buckets = 100000
+ai_quota_memory_max_records = 2000000
+ai_quota_memory_max_records_per_bucket = 100000
+ai_quota_memory_max_live_reservations = 200000
+ai_quota_memory_recovery_headroom = 50000
+ai_quota_max_request_lifetime_ms = 900000
+ai_quota_settlement_retry_grace_ms = 300000
+ai_quota_cleanup_interval_ms = 30000
+ai_quota_cleanup_scan_batch = 4096
+
+ai_budget_pg_pool_size = 10
+ai_budget_heartbeat_pg_pool_size = 1
+ai_budget_admin_pg_pool_size = 2
+ai_budget_max_concurrent_ops = 8
+ai_budget_recovery_reserved_ops = 2
+ai_budget_recovery_scan_batch = 100
+ai_budget_operation_timeout_ms = 2000
+ai_budget_lock_timeout_ms = 500
+ai_budget_owner_lease_seconds = 30
+ai_budget_owner_heartbeat_ms = 5000
+ai_budget_intent_stale_grace_seconds = 60
+ai_budget_active_intent_capacity = 50000
+ai_budget_checkpoint_interval_seconds = 60
+ai_budget_checkpoint_soft_tail_events = 10000
+ai_budget_checkpoint_hard_tail_events = 100000
+```
+
+These defaults are not throughput SLAs. A normal budget request performs multiple
+primary operations, and one hot key serializes aggregate updates. The three pools can
+still share one PostgreSQL instance, WAL, disks, and CPU. Before production, benchmark
+budget QPS, concurrency, hot-key skew, long SSE, ledger rows/day, pool and lock wait,
+heartbeat lag, checkpoint tail, and failure recovery.
+
+There is currently no Redis quota backend. N nodes using Memory can theoretically admit
+roughly N times the configured quota; REQ-AI-009 will add Redis without changing the
+`RateLimitStore` contract. There is also no Elasticsearch/OpenSearch, ClickHouse, or
+Kafka usage/log backend; external analytics, retention, and migration belong to
+REQ-AI-013. The budget ledger must remain on a strongly consistent Store that satisfies
+atomic transactions, idempotency, audit, and reconciliation. Redis or ES is not a direct
+replacement.

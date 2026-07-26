@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use kong_ai::auth::{AiAuthContext, VirtualKeyAuthenticator};
+use kong_ai::enforcement::{AiClientProtocol, AiPolicyChainSnapshot};
 use kong_ai::models::AiVirtualKey;
 use kong_ai::plugins::AiKeyAuthPlugin;
 use kong_core::error::{KongError, Result};
@@ -363,6 +364,55 @@ async fn explicit_dialect_overrides_inference() {
         .unwrap();
 
     assert_eq!(error_body(&ctx)["error"]["code"], "invalid_api_key");
+}
+
+#[tokio::test]
+async fn bearer_credential_uses_anthropic_chain_protocol() {
+    let (plugin, _) = build_plugin(MockKeyDao::new(vec![make_key("team-a", "sk-kr-valid")]));
+    let mut ctx = ctx_with(
+        &[("Authorization", "Bearer sk-kr-valid")],
+        Some(chat_body("claude-sonnet-5")),
+    );
+    ctx.extensions.insert(AiPolicyChainSnapshot {
+        client_protocol: Some(AiClientProtocol::Anthropic),
+        ..Default::default()
+    });
+
+    plugin
+        .access(&plugin_config(json!({"error_format": "auto"})), &mut ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        ctx.extensions
+            .get::<AiAuthContext>()
+            .unwrap()
+            .client_protocol,
+        AiClientProtocol::Anthropic
+    );
+}
+
+#[tokio::test]
+async fn explicit_error_format_overrides_chain_protocol_after_authentication() {
+    let (plugin, _) = build_plugin(MockKeyDao::new(vec![make_key("team-a", "sk-kr-valid")]));
+    let mut ctx = ctx_with(&[("x-api-key", "sk-kr-valid")], Some(chat_body("gpt-4o")));
+    ctx.extensions.insert(AiPolicyChainSnapshot {
+        client_protocol: Some(AiClientProtocol::Anthropic),
+        ..Default::default()
+    });
+
+    plugin
+        .access(&plugin_config(json!({"error_format": "openai"})), &mut ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        ctx.extensions
+            .get::<AiAuthContext>()
+            .unwrap()
+            .client_protocol,
+        AiClientProtocol::OpenAi
+    );
 }
 
 // ============ Model allow list — 模型白名单 ============

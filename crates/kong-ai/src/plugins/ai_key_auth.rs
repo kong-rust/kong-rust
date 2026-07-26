@@ -13,7 +13,10 @@ use serde::Deserialize;
 use kong_core::error::Result;
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 
-use crate::auth::{model_allowed, AiAuthContext, AuthError, VirtualKeyAuthenticator};
+use crate::auth::{
+    model_allowed, AiAuthContext, AuthError, VirtualKeyAuthenticator, VirtualKeyPolicySnapshot,
+};
+use crate::enforcement::{AiClientProtocol, AiPolicyChainSnapshot};
 
 /// Standard bearer credential header — 标准 bearer 凭证头
 const HEADER_AUTHORIZATION: &str = "authorization";
@@ -114,9 +117,7 @@ impl AiKeyAuthPlugin {
 
     /// Resolve the error dialect — 判定错误体风格
     ///
-    /// "auto" infers Anthropic from the x-api-key credential header or an
-    /// Anthropic-shaped request path, and falls back to OpenAI.
-    /// "auto" 依据 x-api-key 凭证头或 Anthropic 形态的请求路径推断为 Anthropic，否则回退 OpenAI。
+    /// 显式配置优先；仅 `auto` 读取有效策略链，再按 header/path 推断。
     fn resolve_error_format(
         cfg: &AiKeyAuthConfig,
         ctx: &RequestCtx,
@@ -125,7 +126,17 @@ impl AiKeyAuthPlugin {
         match cfg.error_format.as_str() {
             "anthropic" => ErrorFormat::Anthropic,
             "openai" => ErrorFormat::OpenAi,
-            _ => {
+            "auto" => {
+                if let Some(protocol) = ctx
+                    .extensions
+                    .get::<AiPolicyChainSnapshot>()
+                    .and_then(|snapshot| snapshot.client_protocol)
+                {
+                    return match protocol {
+                        AiClientProtocol::OpenAi => ErrorFormat::OpenAi,
+                        AiClientProtocol::Anthropic => ErrorFormat::Anthropic,
+                    };
+                }
                 if source == Some(CredentialSource::XApiKey)
                     || ctx.request_path.contains("/v1/messages")
                 {
@@ -134,6 +145,7 @@ impl AiKeyAuthPlugin {
                     ErrorFormat::OpenAi
                 }
             }
+            _ => ErrorFormat::OpenAi,
         }
     }
 
@@ -233,6 +245,11 @@ impl PluginHandler for AiKeyAuthPlugin {
         let credential = Self::extract_credential(ctx, &cfg);
         let format = Self::resolve_error_format(&cfg, ctx, credential.as_ref().map(|(_, s)| *s));
 
+        ctx.extensions.insert(match format {
+            ErrorFormat::OpenAi => kong_plugin_system::DispatchFailureResponseFormat::OpenAi,
+            ErrorFormat::Anthropic => kong_plugin_system::DispatchFailureResponseFormat::Anthropic,
+        });
+
         let (raw_key, _source) = match credential {
             Some(credential) => credential,
             None => {
@@ -251,11 +268,17 @@ impl PluginHandler for AiKeyAuthPlugin {
         };
 
         // 4. 先注入已认证身份，使后续 model allow-list 拒绝也能进入 usage 事实。
+        let client_protocol = match format {
+            ErrorFormat::OpenAi => AiClientProtocol::OpenAi,
+            ErrorFormat::Anthropic => AiClientProtocol::Anthropic,
+        };
         ctx.extensions.insert(AiAuthContext {
             virtual_key_id: key.id,
             key_name: key.name.clone(),
             key_prefix: key.key_prefix.clone(),
             consumer_id: key.consumer_id,
+            client_protocol,
+            policy: VirtualKeyPolicySnapshot::from_key(&key),
         });
         if let Some(consumer_id) = key.consumer_id {
             ctx.consumer_id = Some(consumer_id);
@@ -415,8 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn explicit_format_overrides_inference() {
-        let ctx = ctx_with_headers(&[]);
+    fn bearer_uses_anthropic_chain_when_format_is_auto() {
+        let mut ctx = ctx_with_headers(&[("Authorization", "Bearer sk-kr-abc")]);
+        ctx.extensions.insert(AiPolicyChainSnapshot {
+            client_protocol: Some(AiClientProtocol::Anthropic),
+            ..Default::default()
+        });
+
+        let format = AiKeyAuthPlugin::resolve_error_format(
+            &AiKeyAuthConfig::default(),
+            &ctx,
+            Some(CredentialSource::Bearer),
+        );
+
+        assert_eq!(format, ErrorFormat::Anthropic);
+    }
+
+    #[test]
+    fn explicit_format_overrides_chain_and_header_inference() {
+        let mut ctx = ctx_with_headers(&[("x-api-key", "sk-kr-abc")]);
+        ctx.extensions.insert(AiPolicyChainSnapshot {
+            client_protocol: Some(AiClientProtocol::Anthropic),
+            ..Default::default()
+        });
         let cfg = AiKeyAuthConfig {
             error_format: "openai".to_string(),
             ..Default::default()
@@ -429,6 +473,10 @@ mod tests {
             error_format: "anthropic".to_string(),
             ..Default::default()
         };
+        ctx.extensions
+            .get_mut::<AiPolicyChainSnapshot>()
+            .unwrap()
+            .client_protocol = Some(AiClientProtocol::OpenAi);
         let format =
             AiKeyAuthPlugin::resolve_error_format(&cfg, &ctx, Some(CredentialSource::Bearer));
         assert_eq!(format, ErrorFormat::Anthropic);

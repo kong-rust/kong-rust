@@ -2,14 +2,25 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
 
-use kong_core::error::Result;
+use kong_core::error::{KongError, Result};
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 
+use crate::auth::AiAuthContext;
+use crate::enforcement::{
+    apply_quota_headers, inspect_budget_before_quota, quota_error_contract,
+    reject_with_protocol_error, AiClientProtocol, AiEnforcementRuntime, AiPolicyChainSnapshot,
+    AiPolicyConfigErrorCode, AiRateLimitMode, AiRateLimitRequestContext, BudgetInspectionOutcome,
+    QuotaHeaderMode,
+};
 use crate::plugins::context::AiRequestState;
-use crate::ratelimit::RateLimiter;
-use crate::ratelimit::memory::MemoryRateLimiter;
+use crate::ratelimit::{
+    admit_with_recovery, AdmissionDecision, AdmitCommand, InspectQuery, InspectResult, QuotaCharge,
+    QuotaLimits, RateLimitKey, RateLimitStoreErrorKind, RateLimitSubject, RateLimiter, WindowSpec,
+};
 use crate::token::{global_registry, TokenCounter, TokenizerRegistry};
 
 // ============ 插件配置 ============
@@ -57,26 +68,366 @@ pub struct AiRateLimitContext {
 
 /// AI 速率限制插件
 pub struct AiRateLimitPlugin {
-    limiter: Arc<dyn RateLimiter>,
+    backend: AiRateLimitBackend,
+}
+
+enum AiRateLimitBackend {
+    Runtime(Arc<AiEnforcementRuntime>),
+    Legacy(Arc<dyn RateLimiter>),
 }
 
 impl AiRateLimitPlugin {
-    /// 创建新的 ai-rate-limit 插件实例（默认 60 秒窗口）
-    pub fn new() -> Self {
+    /// 使用 server 构造的共享 enforcement runtime。
+    pub fn new(runtime: Arc<AiEnforcementRuntime>) -> Self {
         Self {
-            limiter: Arc::new(MemoryRateLimiter::new(std::time::Duration::from_secs(60))),
+            backend: AiRateLimitBackend::Runtime(runtime),
         }
     }
 
-    /// 使用自定义限流器创建插件（用于测试）
+    /// 使用旧同步限流器创建插件，仅保留历史测试/嵌入方兼容。
+    #[deprecated(note = "请使用 AiRateLimitPlugin::new(shared_runtime)")]
     pub fn with_limiter(limiter: Arc<dyn RateLimiter>) -> Self {
-        Self { limiter }
+        Self {
+            backend: AiRateLimitBackend::Legacy(limiter),
+        }
     }
-}
 
-impl Default for AiRateLimitPlugin {
-    fn default() -> Self {
-        Self::new()
+    fn validate_config(config: &PluginConfig) -> Result<()> {
+        kong_plugin_system::config_validation::validate_ai_rate_limit_config(&config.config)
+            .map_err(|error| KongError::PluginError {
+                plugin_name: config.name.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    fn protocol(ctx: &RequestCtx) -> AiClientProtocol {
+        ctx.extensions
+            .get::<AiAuthContext>()
+            .map(|auth| auth.client_protocol)
+            .or_else(|| {
+                ctx.extensions
+                    .get::<AiPolicyChainSnapshot>()
+                    .and_then(|snapshot| snapshot.client_protocol)
+            })
+            .unwrap_or(AiClientProtocol::OpenAi)
+    }
+
+    fn reject_policy(
+        ctx: &mut RequestCtx,
+        protocol: AiClientProtocol,
+        status: u16,
+        code: &str,
+        message: &str,
+    ) {
+        reject_with_protocol_error(ctx, protocol, status, code, message);
+    }
+
+    async fn access_runtime(
+        runtime: &AiEnforcementRuntime,
+        cfg: &AiRateLimitConfig,
+        ctx: &mut RequestCtx,
+    ) -> Result<()> {
+        let protocol = Self::protocol(ctx);
+        let mode = AiRateLimitMode::parse(&cfg.limit_by).ok_or_else(|| KongError::PluginError {
+            plugin_name: "ai-rate-limit".to_string(),
+            message: "invalid limit_by".to_string(),
+        })?;
+
+        if let Some(error) = ctx
+            .extensions
+            .get::<AiPolicyChainSnapshot>()
+            .and_then(|snapshot| snapshot.config_error.clone())
+        {
+            let (status, code, message) = match error.code {
+                AiPolicyConfigErrorCode::MissingAiProxy => (
+                    500,
+                    "ai_policy_chain_invalid",
+                    "AI policy chain is missing ai-proxy",
+                ),
+                _ => (
+                    500,
+                    "ai_policy_chain_invalid",
+                    "AI policy chain configuration is invalid",
+                ),
+            };
+            Self::reject_policy(ctx, protocol, status, code, message);
+            return Ok(());
+        }
+
+        let (subject, limits, budget_auth) = match mode {
+            AiRateLimitMode::VirtualKey => {
+                let snapshot = ctx.extensions.get::<AiPolicyChainSnapshot>();
+                if snapshot.is_none_or(|snapshot| !snapshot.has_ai_proxy) {
+                    Self::reject_policy(
+                        ctx,
+                        protocol,
+                        500,
+                        "ai_policy_chain_invalid",
+                        "AI policy chain is missing ai-proxy",
+                    );
+                    return Ok(());
+                }
+                let Some(auth) = ctx.extensions.get::<AiAuthContext>().cloned() else {
+                    Self::reject_policy(
+                        ctx,
+                        protocol,
+                        401,
+                        "virtual_key_required",
+                        "A virtual key is required.",
+                    );
+                    return Ok(());
+                };
+                (
+                    RateLimitSubject::VirtualKey(auth.virtual_key_id),
+                    QuotaLimits {
+                        requests: auth.policy.rpm_limit,
+                        tokens: auth.policy.tpm_limit,
+                    },
+                    Some(auth),
+                )
+            }
+            AiRateLimitMode::Global => (
+                RateLimitSubject::Global,
+                QuotaLimits {
+                    requests: cfg.rpm_limit.and_then(NonZeroU64::new),
+                    tokens: cfg.tpm_limit.and_then(NonZeroU64::new),
+                },
+                None,
+            ),
+            AiRateLimitMode::Route => {
+                let Some(route_id) = ctx.route_id else {
+                    Self::reject_policy(
+                        ctx,
+                        protocol,
+                        500,
+                        "ai_policy_chain_invalid",
+                        "Route-scoped quota requires a matched route",
+                    );
+                    return Ok(());
+                };
+                (
+                    RateLimitSubject::Route(route_id),
+                    QuotaLimits {
+                        requests: cfg.rpm_limit.and_then(NonZeroU64::new),
+                        tokens: cfg.tpm_limit.and_then(NonZeroU64::new),
+                    },
+                    None,
+                )
+            }
+            AiRateLimitMode::Consumer => (
+                RateLimitSubject::Consumer(ctx.consumer_id),
+                QuotaLimits {
+                    requests: cfg.rpm_limit.and_then(NonZeroU64::new),
+                    tokens: cfg.tpm_limit.and_then(NonZeroU64::new),
+                },
+                None,
+            ),
+        };
+
+        if let Some(auth) = budget_auth.as_ref() {
+            match inspect_budget_before_quota(runtime, auth, protocol, ctx).await {
+                BudgetInspectionOutcome::Continue => {}
+                BudgetInspectionOutcome::Rejected => return Ok(()),
+                BudgetInspectionOutcome::Exhausted => {
+                    if limits.requests.is_some() || limits.tokens.is_some() {
+                        let quota_runtime = match runtime.quota_runtime() {
+                            Ok(runtime) => runtime,
+                            Err(_) => {
+                                reject_quota_backend_error(
+                                    ctx,
+                                    protocol,
+                                    RateLimitStoreErrorKind::Unsupported,
+                                );
+                                return Ok(());
+                            }
+                        };
+                        let key = RateLimitKey::new(
+                            quota_runtime.deployment_namespace.clone(),
+                            subject.clone(),
+                        );
+                        match quota_runtime
+                            .store
+                            .inspect(InspectQuery::Current {
+                                key: key.clone(),
+                                window: WindowSpec::fixed(Duration::from_secs(60)),
+                                limits,
+                            })
+                            .await
+                        {
+                            Ok(InspectResult::Current(snapshot)) => {
+                                ctx.extensions
+                                    .insert(AiRateLimitRequestContext::snapshot_only(
+                                        key, limits, protocol, snapshot,
+                                    ));
+                            }
+                            Ok(_) => {
+                                reject_quota_backend_error(
+                                    ctx,
+                                    protocol,
+                                    RateLimitStoreErrorKind::Corrupt,
+                                );
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                reject_quota_backend_error(ctx, protocol, error.kind());
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Self::reject_policy(
+                        ctx,
+                        protocol,
+                        403,
+                        "budget_exhausted",
+                        "The virtual key budget has been exhausted.",
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        // Virtual Key 可以只配置预算而没有 RPM/TPM；这种情况下 quota Store 零调用。
+        if limits.requests.is_none() && limits.tokens.is_none() {
+            return Ok(());
+        }
+
+        let quota_runtime = match runtime.quota_runtime() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                reject_quota_backend_error(ctx, protocol, RateLimitStoreErrorKind::Unsupported);
+                return Ok(());
+            }
+        };
+        let key = RateLimitKey::new(quota_runtime.deployment_namespace.clone(), subject);
+        let estimated = if limits.tokens.is_some() {
+            compute_estimated_prompt_tokens(ctx).await
+        } else {
+            0
+        };
+        let reserved = QuotaCharge {
+            requests: 1,
+            tokens: estimated,
+        };
+        let command = AdmitCommand {
+            request_id: Arc::from(ctx.lifecycle.request_id.clone()),
+            key: key.clone(),
+            window: WindowSpec::fixed(Duration::from_secs(60)),
+            limits,
+            reserve: reserved,
+        };
+
+        match admit_with_recovery(quota_runtime.store.as_ref(), command).await {
+            Ok(AdmissionDecision::Allowed {
+                reservation,
+                snapshot,
+                ..
+            }) => {
+                ctx.extensions.insert(AiRateLimitRequestContext::allowed(
+                    key,
+                    limits,
+                    protocol,
+                    reserved,
+                    reservation,
+                    snapshot,
+                ));
+            }
+            Ok(AdmissionDecision::Rejected {
+                reason, snapshot, ..
+            }) => {
+                ctx.extensions.insert(AiRateLimitRequestContext::rejected(
+                    key, limits, protocol, reserved, reason, snapshot,
+                ));
+                if mode == AiRateLimitMode::VirtualKey {
+                    let (code, message) = match reason {
+                        crate::ratelimit::ExceededDimension::Tokens => (
+                            "tokens_rate_limit_exceeded",
+                            "Virtual key token rate limit exceeded.",
+                        ),
+                        crate::ratelimit::ExceededDimension::Requests
+                        | crate::ratelimit::ExceededDimension::RequestsAndTokens => (
+                            "requests_rate_limit_exceeded",
+                            "Virtual key request rate limit exceeded.",
+                        ),
+                    };
+                    Self::reject_policy(ctx, protocol, 429, code, message);
+                } else {
+                    Self::reject_policy(
+                        ctx,
+                        protocol,
+                        cfg.error_code,
+                        "rate_limit_exceeded",
+                        &cfg.error_message,
+                    );
+                }
+            }
+            Err(error) => {
+                reject_quota_backend_error(ctx, protocol, error.kind());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn access_legacy(
+        limiter: &dyn RateLimiter,
+        cfg: &AiRateLimitConfig,
+        ctx: &mut RequestCtx,
+    ) -> Result<()> {
+        // 旧路径只用于兼容既有嵌入测试，server 不再装配。
+        let rate_key = match cfg.limit_by.as_str() {
+            "global" => "global".to_string(),
+            "route" => format!(
+                "route:{}",
+                ctx.route_id.map(|id| id.to_string()).unwrap_or_default()
+            ),
+            "consumer" => format!(
+                "consumer:{}",
+                ctx.consumer_id.map(|id| id.to_string()).unwrap_or_default()
+            ),
+            _ => "global".to_string(),
+        };
+
+        if let Some(rpm_limit) = cfg.rpm_limit {
+            let rpm_key = format!("{}:rpm", rate_key);
+            let (allowed, current) = limiter.check_and_increment(&rpm_key, rpm_limit, 1);
+            if !allowed {
+                ctx.short_circuited = true;
+                ctx.exit_status = Some(cfg.error_code);
+                ctx.exit_body = Some(
+                    serde_json::json!({
+                        "message": cfg.error_message,
+                        "current_rpm": current,
+                        "limit": rpm_limit
+                    })
+                    .to_string(),
+                );
+                return Ok(());
+            }
+        }
+
+        if let Some(tpm_limit) = cfg.tpm_limit {
+            let estimated = compute_estimated_prompt_tokens(ctx).await;
+            let tpm_key = format!("{}:tpm", rate_key);
+            let (allowed, current) = limiter.check_and_increment(&tpm_key, tpm_limit, estimated);
+            if !allowed {
+                ctx.short_circuited = true;
+                ctx.exit_status = Some(cfg.error_code);
+                ctx.exit_body = Some(
+                    serde_json::json!({
+                        "message": cfg.error_message,
+                        "current_tpm": current,
+                        "limit": tpm_limit
+                    })
+                    .to_string(),
+                );
+                return Ok(());
+            }
+            ctx.extensions.insert(AiRateLimitContext {
+                rate_key,
+                estimated_prompt_tokens: estimated,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -94,85 +445,24 @@ impl PluginHandler for AiRateLimitPlugin {
     }
 
     fn version(&self) -> &str {
-        "0.1.0"
+        "0.2.0"
     }
 
     async fn access(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        Self::validate_config(config)?;
         let cfg: AiRateLimitConfig = crate::parse_plugin_config(config)?;
-
-        // 1. 根据 limit_by 确定限流键
-        let rate_key = match cfg.limit_by.as_str() {
-            "global" => "global".to_string(),
-            "route" => format!(
-                "route:{}",
-                ctx.route_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default()
-            ),
-            "consumer" => format!(
-                "consumer:{}",
-                ctx.consumer_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default()
-            ),
-            // virtual_key 将在 DAO 集成后实现，暂时 fallback 到 global
-            _ => "global".to_string(),
-        };
-
-        // 2. 检查 RPM（原子 check-and-increment，避免 TOCTOU 竞态）
-        if let Some(rpm_limit) = cfg.rpm_limit {
-            let rpm_key = format!("{}:rpm", rate_key);
-            let (allowed, current) = self.limiter.check_and_increment(&rpm_key, rpm_limit, 1);
-            if !allowed {
-                ctx.short_circuited = true;
-                ctx.exit_status = Some(cfg.error_code);
-                ctx.exit_body = Some(
-                    serde_json::json!({
-                        "message": cfg.error_message,
-                        "current_rpm": current,
-                        "limit": rpm_limit
-                    })
-                    .to_string(),
-                );
-                return Ok(());
+        match &self.backend {
+            AiRateLimitBackend::Runtime(runtime) => Self::access_runtime(runtime, &cfg, ctx).await,
+            AiRateLimitBackend::Legacy(limiter) => {
+                Self::access_legacy(limiter.as_ref(), &cfg, ctx).await
             }
         }
-
-        // 3. 检查 TPM（预扣估算值，原子 check-and-increment）
-        if let Some(tpm_limit) = cfg.tpm_limit {
-            // 预扣：优先用 TokenizerRegistry 精确计算(双轨/HF/远端 API);
-            // registry 未注册或 body 缺失时降级到字符估算保持向后兼容
-            // Pre-debit: prefer TokenizerRegistry for accurate count;
-            // fall back to byte/4 estimation when registry is absent or body missing
-            let estimated = compute_estimated_prompt_tokens(ctx).await;
-
-            let tpm_key = format!("{}:tpm", rate_key);
-            let (allowed, current) = self.limiter.check_and_increment(&tpm_key, tpm_limit, estimated);
-            if !allowed {
-                ctx.short_circuited = true;
-                ctx.exit_status = Some(cfg.error_code);
-                ctx.exit_body = Some(
-                    serde_json::json!({
-                        "message": cfg.error_message,
-                        "current_tpm": current,
-                        "limit": tpm_limit
-                    })
-                    .to_string(),
-                );
-                return Ok(());
-            }
-
-            // 存储预扣信息到 extensions，供 log 阶段修正
-            ctx.extensions.insert(AiRateLimitContext {
-                rate_key: rate_key.clone(),
-                estimated_prompt_tokens: estimated,
-            });
-        }
-
-        Ok(())
     }
 
     async fn log(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        let AiRateLimitBackend::Legacy(limiter) = &self.backend else {
+            return Ok(());
+        };
         // TPM 修正：根据实际 token 消耗量修正预扣值
         let rl_ctx = ctx.extensions.get::<AiRateLimitContext>();
         let ai_state = ctx.extensions.get::<AiRequestState>();
@@ -185,15 +475,44 @@ impl PluginHandler for AiRateLimitPlugin {
                 let tpm_key = format!("{}:tpm", rl_ctx.rate_key);
                 if actual > estimated {
                     // 实际消耗 > 预扣：补扣差额
-                    self.limiter.increment(&tpm_key, actual - estimated);
+                    limiter.increment(&tpm_key, actual - estimated);
                 } else if estimated > actual {
                     // 预扣 > 实际消耗：退还多扣的部分
-                    self.limiter.decrement(&tpm_key, estimated - actual);
+                    limiter.decrement(&tpm_key, estimated - actual);
                 }
             }
         }
         Ok(())
     }
+
+    async fn header_filter(&self, _config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        let Some(request) = ctx.extensions.get_mut::<AiRateLimitRequestContext>() else {
+            return Ok(());
+        };
+        let snapshot = request
+            .response_snapshot
+            .as_ref()
+            .or(request.admission_snapshot.as_ref())
+            .cloned();
+        let mode = request
+            .rejection
+            .map(QuotaHeaderMode::Rejected)
+            .unwrap_or(QuotaHeaderMode::Allowed);
+        request.headers_emitted = snapshot.is_some();
+        if let Some(snapshot) = snapshot {
+            apply_quota_headers(ctx, &snapshot, mode);
+        }
+        Ok(())
+    }
+}
+
+fn reject_quota_backend_error(
+    ctx: &mut RequestCtx,
+    protocol: AiClientProtocol,
+    kind: RateLimitStoreErrorKind,
+) {
+    let (code, message) = quota_error_contract(kind);
+    reject_with_protocol_error(ctx, protocol, 503, code, message);
 }
 
 // ============ 辅助函数 / Helpers ============
@@ -240,4 +559,286 @@ async fn compute_estimated_prompt_tokens(ctx: &kong_core::traits::RequestCtx) ->
 
     // 3. 历史 byte/4 估算兜底
     TokenCounter::count_estimate(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use kong_core::traits::PluginHandler;
+    use serde_json::json;
+
+    use super::*;
+    use crate::auth::VirtualKeyPolicySnapshot;
+    use crate::enforcement::{BudgetCapability, QuotaCapability};
+    use crate::ratelimit::{
+        InspectQuery, InspectResult, ManualRateLimitClock, MemoryRateLimitStore,
+        RateLimitBackendDescriptor, RateLimitStore, RateLimitStoreError,
+        RateLimitStoreStatsSnapshot, SettleCommand, SettlementResult,
+    };
+
+    struct AlwaysUnknownAdmissionStore {
+        inner: Arc<MemoryRateLimitStore>,
+        commands: Mutex<Vec<AdmitCommand>>,
+    }
+
+    impl AlwaysUnknownAdmissionStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(MemoryRateLimitStore::with_defaults(Arc::new(
+                    ManualRateLimitClock::default(),
+                ))),
+                commands: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RateLimitStore for AlwaysUnknownAdmissionStore {
+        fn descriptor(&self) -> RateLimitBackendDescriptor {
+            self.inner.descriptor()
+        }
+
+        async fn admit(
+            &self,
+            command: AdmitCommand,
+        ) -> std::result::Result<AdmissionDecision, RateLimitStoreError> {
+            self.commands.lock().unwrap().push(command);
+            Err(RateLimitStoreError::new(
+                RateLimitStoreErrorKind::OutcomeUnknown,
+                "admission ACK is unknown",
+            ))
+        }
+
+        async fn settle(
+            &self,
+            command: SettleCommand,
+        ) -> std::result::Result<SettlementResult, RateLimitStoreError> {
+            self.inner.settle(command).await
+        }
+
+        async fn inspect(
+            &self,
+            query: InspectQuery,
+        ) -> std::result::Result<InspectResult, RateLimitStoreError> {
+            if matches!(&query, InspectQuery::Admission { .. }) {
+                Ok(InspectResult::NotFound)
+            } else {
+                self.inner.inspect(query).await
+            }
+        }
+
+        fn stats(&self) -> RateLimitStoreStatsSnapshot {
+            self.inner.stats()
+        }
+    }
+
+    fn runtime() -> (Arc<AiEnforcementRuntime>, Arc<MemoryRateLimitStore>) {
+        let store = Arc::new(MemoryRateLimitStore::with_defaults(Arc::new(
+            ManualRateLimitClock::default(),
+        )));
+        let runtime = Arc::new(
+            AiEnforcementRuntime::with_local_quota(
+                Arc::clone(&store) as Arc<dyn RateLimitStore>,
+                "test",
+                false,
+                BudgetCapability::UnsupportedDbLess,
+            )
+            .unwrap(),
+        );
+        assert_eq!(runtime.capability.quota, QuotaCapability::LocalMemory);
+        (runtime, store)
+    }
+
+    #[tokio::test]
+    async fn runtime_path_rejects_with_snapshot_headers() {
+        let (runtime, _store) = runtime();
+        let plugin = AiRateLimitPlugin::new(runtime);
+        let config = PluginConfig {
+            name: "ai-rate-limit".to_string(),
+            config: json!({
+                "limit_by": "global",
+                "rpm_limit": 1,
+                "tpm_limit": null
+            }),
+        };
+        let mut first = RequestCtx::new();
+        plugin.access(&config, &mut first).await.unwrap();
+        assert!(!first.is_short_circuited());
+
+        let mut second = RequestCtx::new();
+        plugin.access(&config, &mut second).await.unwrap();
+        assert_eq!(second.exit_status, Some(429));
+        plugin.header_filter(&config, &mut second).await.unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_str(second.exit_body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert!(second.response_headers_to_set.contains(&(
+            "X-RateLimit-Remaining-Requests".to_string(),
+            "0".to_string()
+        )));
+        assert!(second
+            .response_headers_to_set
+            .iter()
+            .any(|(name, _)| name == "Retry-After"));
+    }
+
+    #[tokio::test]
+    async fn virtual_key_mode_uses_authenticated_uuid_and_policy_limits() {
+        let (runtime, store) = runtime();
+        let plugin = AiRateLimitPlugin::new(runtime);
+        let virtual_key_id = uuid::Uuid::new_v4();
+        let config = PluginConfig {
+            name: "ai-rate-limit".to_string(),
+            config: json!({
+                "limit_by": "virtual_key",
+                "rpm_limit": null,
+                "tpm_limit": null
+            }),
+        };
+        let mut ctx = RequestCtx::new();
+        ctx.extensions.insert(AiPolicyChainSnapshot {
+            has_ai_key_auth: true,
+            has_ai_proxy: true,
+            rate_limit_mode: Some(AiRateLimitMode::VirtualKey),
+            client_protocol: Some(AiClientProtocol::Anthropic),
+            config_error: None,
+        });
+        ctx.extensions.insert(AiAuthContext {
+            virtual_key_id,
+            key_name: "key".to_string(),
+            key_prefix: "sk-kr-test".to_string(),
+            consumer_id: None,
+            client_protocol: AiClientProtocol::Anthropic,
+            policy: VirtualKeyPolicySnapshot {
+                rpm_limit: NonZeroU64::new(2),
+                tpm_limit: None,
+                budget_guard_required: false,
+                accounting_blocked: false,
+            },
+        });
+
+        plugin.access(&config, &mut ctx).await.unwrap();
+
+        assert!(!ctx.is_short_circuited());
+        let current = store
+            .inspect(InspectQuery::Current {
+                key: RateLimitKey::new("test", RateLimitSubject::VirtualKey(virtual_key_id)),
+                window: WindowSpec::fixed(Duration::from_secs(60)),
+                limits: QuotaLimits {
+                    requests: NonZeroU64::new(2),
+                    tokens: None,
+                },
+            })
+            .await
+            .unwrap();
+        let InspectResult::Current(snapshot) = current else {
+            panic!("current quota snapshot expected");
+        };
+        assert_eq!(snapshot.requests.unwrap().used, 1);
+    }
+
+    #[tokio::test]
+    async fn virtual_key_mode_without_auth_fails_before_store_call() {
+        let (runtime, store) = runtime();
+        let plugin = AiRateLimitPlugin::new(runtime);
+        let config = PluginConfig {
+            name: "ai-rate-limit".to_string(),
+            config: json!({
+                "limit_by": "virtual_key",
+                "rpm_limit": null,
+                "tpm_limit": null
+            }),
+        };
+        let mut ctx = RequestCtx::new();
+        ctx.extensions.insert(AiPolicyChainSnapshot {
+            has_ai_key_auth: true,
+            has_ai_proxy: true,
+            rate_limit_mode: Some(AiRateLimitMode::VirtualKey),
+            client_protocol: Some(AiClientProtocol::OpenAi),
+            config_error: None,
+        });
+
+        plugin.access(&config, &mut ctx).await.unwrap();
+
+        assert_eq!(ctx.exit_status, Some(401));
+        assert_eq!(store.stats().admissions_allowed, 0);
+        assert_eq!(store.stats().admissions_rejected, 0);
+    }
+
+    #[test]
+    fn quota_backend_errors_use_exact_public_contract() {
+        let cases = [
+            (
+                RateLimitStoreErrorKind::OutcomeUnknown,
+                "quota_backend_unavailable",
+                "Quota enforcement is temporarily unavailable.",
+            ),
+            (
+                RateLimitStoreErrorKind::Corrupt,
+                "quota_backend_state_invalid",
+                "Quota enforcement state is invalid.",
+            ),
+            (
+                RateLimitStoreErrorKind::Unsupported,
+                "quota_backend_unsupported",
+                "Quota enforcement is not supported in this deployment mode.",
+            ),
+        ];
+
+        for (kind, code, message) in cases {
+            let mut ctx = RequestCtx::new();
+            reject_quota_backend_error(&mut ctx, AiClientProtocol::OpenAi, kind);
+
+            assert_eq!(ctx.exit_status, Some(503));
+            let body: serde_json::Value =
+                serde_json::from_str(ctx.exit_body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["error"]["type"], "server_error");
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], message);
+            assert!(ctx.response_headers_to_set.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_still_unknown_after_bounded_replay_returns_fixed_503() {
+        let store = Arc::new(AlwaysUnknownAdmissionStore::new());
+        let runtime = Arc::new(
+            AiEnforcementRuntime::with_local_quota(
+                store.clone() as Arc<dyn RateLimitStore>,
+                "test",
+                false,
+                BudgetCapability::UnsupportedDbLess,
+            )
+            .unwrap(),
+        );
+        let plugin = AiRateLimitPlugin::new(runtime);
+        let config = PluginConfig {
+            name: "ai-rate-limit".to_string(),
+            config: json!({
+                "limit_by": "global",
+                "rpm_limit": 10,
+                "tpm_limit": null
+            }),
+        };
+        let mut ctx = RequestCtx::new();
+
+        plugin.access(&config, &mut ctx).await.unwrap();
+
+        assert_eq!(ctx.exit_status, Some(503));
+        let body: serde_json::Value =
+            serde_json::from_str(ctx.exit_body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "quota_backend_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "Quota enforcement is temporarily unavailable."
+        );
+        assert!(ctx.extensions.get::<AiRateLimitRequestContext>().is_none());
+        assert!(ctx.response_headers_to_set.is_empty());
+        let commands = store.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], commands[1]);
+    }
 }

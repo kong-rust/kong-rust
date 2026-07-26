@@ -231,9 +231,14 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 #### 当前范围边界
 
 - `ai-cache` 当前只生成缓存键和处理跳过标头，不提供响应存储、命中读取或语义相似度检索
-- Virtual Key 当前提供安全生成、存储、查询和轮换管理；请求认证、模型授权、RPM/TPM 绑定和预算扣减尚未接入代理链路
+- Virtual Key 已通过 `ai-key-auth` 接入请求认证、enabled/expiry/allowed_models
+  校验和 Consumer 身份注入；key 自身 RPM/TPM 与预算执行尚待 REQ-AI-003，
+  Hybrid AI 实体同步仍不支持
 - AI 限流器当前为单进程内存实现，不提供 Redis 后端或多节点共享配额
-- `limit_by=consumer` 的配置分支已存在，但实时代理链尚未把 Consumer 身份注入 AI 插件；当前不能提供真正的 per-consumer 隔离
+- AI 调用事实当前只支持 PostgreSQL `ai_usage_logs` 或 DB-less 本节点内存，
+  尚未提供 Elasticsearch/OpenSearch、ClickHouse 或消息管道等外部 backend
+- `limit_by=consumer` 在存在 `ctx.consumer_id`（包括绑定 Consumer 的 Virtual
+  Key）时可以隔离；缺少 Consumer 身份时仍落入遗留空桶，不能作为可靠匿名隔离
 - Prompt Guard 当前为正则和长度规则，不包含基于模型或 embedding 的语义检测
 
 ## 非功能性需求
@@ -259,6 +264,25 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 - 内存占用不高于原版 Kong
 - 利用 Pingora 的多线程共享连接池优化上游连接复用
 - Lua 插件通过 LuaJIT 执行，性能应与原版 Kong 接近
+
+### 可扩展性与容量
+
+- 每个新增数据面能力的需求分析和方案设计必须明确目标 QPS/并发、租户或 key
+  基数、状态与数据增长、保留期、p95/p99 预算、水平扩展语义、故障降级及压测
+  口径；不能只证明单节点功能正确。
+- 高频请求级日志和 usage fact 必须通过可独立配置的 sink 与 query backend
+  接入外部存储：sink/transport 可以使用 Kafka 等消息管道，query backend 使用
+  Elasticsearch/OpenSearch、ClickHouse 或其他可查询分析存储。企业拓扑必须包含
+  外部查询存储，不能只把消息发出后继续无限期依赖 PG 查询。PostgreSQL 可作为
+  默认、中小规模后端或有期限的迁移桥；采集、批量、重试和背压不得阻塞代理热
+  路径。
+- 实时配额与限流状态必须通过可插拔 Store 支持 Redis 等具备原子操作和 TTL 的
+  分布式后端。多副本使用本机内存时必须明确标记为 local，不能宣称全局一致。
+- 配置实体和强一致、可审计的预算账本可以继续使用事务型存储作为权威来源；
+  实时计数、海量事件和财务账本按语义分层，不能笼统地全部写入 PG、Redis 或
+  日志检索系统。
+- 外部后端必须定义有界队列、批量与并发限制、幂等键、结果不确定、积压上限、
+  retention/归档、健康和 lag 指标，以及切换、双写或恢复策略。
 
 ### 安全
 

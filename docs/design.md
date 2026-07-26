@@ -8,6 +8,10 @@ Kong-Rust 是 Kong API 网关的 Rust 重写版本，基于 Cloudflare Pingora �
 - **兼容优先**：所有外部行为（API、配置、插件接口）与 Kong 完全一致
 - **Rust 原生**：核心代理引擎、路由匹配、数据库访问等用 Rust 实现，追求极致性能
 - **Lua 桥接**：通过 mlua + LuaJIT 运行现有 Lua 插件，提供完整 PDK 兼容层
+- **按数据语义分层**：配置、强一致账本、实时共享状态和海量事件分别选择事务库、
+  分布式计数后端与外部分析存储，不把 PostgreSQL 或进程内存固化为唯一实现
+- **水平扩展优先**：数据面契约不泄漏单节点时钟、内存容器或数据库私有语义；
+  每项设计同时说明 local 基线和多副本企业部署的容量、背压与降级路径
 
 ## 代码复用分析
 
@@ -1035,15 +1039,19 @@ match config.role {
 AI 配置实体使用通用 `Dao<T>` / `PgDao<T>` 和 DB-less DAO。PostgreSQL 表由
 migration `002_ai_gateway` 创建，`004_ai_model_max_input_tokens` 为模型补充输入
 token 上限；migration `006_ai_usage_logs` 将 Model 价格迁移到
-`NUMERIC(28,12)`，并新增独立的请求级事实表 `ai_usage_logs`。事实表不对 Route、
-Service、Provider、Model、Virtual Key 或 Consumer 建外键，删除配置实体不会级联
-删除历史事实。
+`NUMERIC(28,12)`，并新增独立的请求级事实表 `ai_usage_logs`。migration
+`007_ai_virtual_key_budget_accounting` 将 Virtual Key 预算迁移到
+`NUMERIC(28,12)`，并创建 request ledger、owner session、checkpoint 和运行时
+settings；migration `008_ai_budget_overflow_idempotency` 收紧 numeric overflow
+未决账务的幂等约束。analytics 事实表不对 Route、Service、Provider、Model、
+Virtual Key 或 Consumer 建外键；预算 ledger 也不对已删除的 Virtual Key 或 usage
+fact 建外键，配置删除和 analytics 归档均不会级联删除审计历史。
 
 | 实体 | 当前字段 | 关系与用途 |
 |------|----------|------------|
 | `ai_providers` | `id`, `name`, `provider_type`, `endpoint_url`, `auth_config`, `default_model`, `config`, `enabled`, `tags`, `ws_id`, timestamps | 保存上游类型、端点和认证信息；`provider_type` 选择 driver |
 | `ai_models` | `id`, `name`, `provider_id`, `model_name`, `priority`, `weight`, `input_cost`, `output_cost`, `max_tokens`, `max_input_tokens`, `config`, `enabled`, `tags`, `ws_id`, timestamps | `provider_id` 外键指向 provider；相同 `name` 构成一个 model group，`model_name` 是发给上游的真实模型名 |
-| `ai_virtual_keys` | `id`, `name`, `key_hash`, `key_prefix`, `consumer_id`, `allowed_models`, `tpm_limit`, `rpm_limit`, `budget_limit`, `budget_used`, `enabled`, `expires_at`, `tags`, `ws_id`, timestamps | 可选关联 Consumer；保存密钥哈希、模型范围、限额和预算元数据 |
+| `ai_virtual_keys` | `id`, `name`, `key_hash`, `key_prefix`, `consumer_id`, `allowed_models`, `tpm_limit`, `rpm_limit`, `budget_limit`, `budget_used`, `budget_pending_count`, `budget_unresolved_count`, `budget_accounting_revision`, checkpoint tail/state，`enabled`, `expires_at`, `tags`, `ws_id`, timestamps | 可选关联 Consumer；保存密钥哈希和模型范围，并作为 PostgreSQL 预算账户 aggregate |
 
 ```
 Plugin config.model_group / request.model
@@ -1128,8 +1136,8 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 | 774 | `ai-key-auth` | `access`：按 Bearer / `x-api-key` / 自定义头提取虚拟密钥，SHA-256 查表（进程内缓存 TTL 1s + 负缓存，Admin CUD/rotate 即时失效），校验 enabled/expiry/allowed_models，注入 `AiAuthContext` 与 `consumer_id`；失败以 OpenAI 或 Anthropic 风格错误体短路 401/403 |
 | 773 | `ai-prompt-guard` | `access`：检查 user 消息长度、deny/allow 正则；可阻断或仅记录 |
 | 772 | `ai-cache` | `access`：处理 skip header，按最后一条或全部 user 消息计算 SHA-256 cache key；`log` 当前不写缓存 |
-| 771 | `ai-rate-limit` | `access`：内存 60 秒窗口的 RPM/TPM 原子预扣；`log`：用实际 usage 修正 TPM |
-| 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
+| 771 | `ai-rate-limit` | `access`：通过异步 `RateLimitStore` 联合预扣 RPM/TPM；`virtual_key` 模式读取已认证 key 自身额度并先检查权威预算状态；`header_filter` 注入 quota snapshot |
+| 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；预算启用时冻结 pricing snapshot；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
 
 插件间通过 `RequestCtx.extensions` 传递类型化的 `AiAuthContext`、
 `AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、
@@ -1148,6 +1156,20 @@ Decimal 计算成本，把最终 `AiUsageFact` 放回 extensions 供 `ai-proxy.l
 随后只执行一次有界 `try_send`。`ai-proxy.logging.log_statistics=false` 仍只关闭
 Kong 兼容序列化日志，不关闭调用事实采集。
 
+REQ-AI-003 在同步 observer 之外增加通用 async dispatch hook、dispatch abort
+compensator 和 request finalizer。预算 hook 在真正允许上游联网前把 prepared
+intent 幂等推进到 dispatching；critical hook 的 error、timeout 或 panic 会先设置
+不可逆 `dispatch_forbidden`，再在响应前补偿 quota 和未联网 intent。客户端结果
+确定后，quota finalizer 使用 Store 签发的 opaque reservation 修正 token，budget
+finalizer 使用同一 `AiUsageFact` 结算账本。任一 finalizer 失败不会跳过另一个，
+analytics writer 的队列或 PostgreSQL 写入结果也不参与预算事务。
+
+Virtual Key quota 当前由有界 `MemoryRateLimitStore` 提供：同一 key 的 RPM/TPM
+在一个 60 秒、首次命中起算的固定窗口内联合原子准入；request ID 和 settlement
+operation ID 分别保证重放幂等，window generation 防止长请求修改新窗口。该
+adapter 是本进程状态，多节点不共享且重启清零；Redis adapter 由 REQ-AI-009
+交付。
+
 `kong-plugin-system` 的解析器支持 Global / Service / Route / Consumer 关联，同名配置由更具体关联覆盖；但是当前代理链在 Consumer 身份可用前以 `consumer_id=None` 构建，因此运行时实际生效的是 Global / Service / Route 配置，Consumer 级 AI 插件配置尚未接入动态重解析。`ai-key-auth` 会在 access 阶段写入 `ctx.consumer_id`，因此同一请求内的下游插件（如 `ai-rate-limit` 的 `limit_by=consumer`）能读到 Consumer 身份，但插件链本身不会因此重新解析。
 
 #### 10.5 Admin API
@@ -1156,13 +1178,21 @@ Kong 兼容序列化日志，不关闭调用事实采集。
 |------|----------|
 | Provider | `GET/POST /ai-providers`; `GET/PATCH/PUT/DELETE /ai-providers/{id_or_name}`; `GET /ai-providers/{id}/ai-models` |
 | Model | `GET/POST /ai-models`; `GET/PATCH/PUT/DELETE /ai-models/{id}`; `GET /ai-model-groups` |
-| Virtual Key | `GET/POST /ai-virtual-keys`; `GET/PATCH/DELETE /ai-virtual-keys/{id_or_name}`; `POST /ai-virtual-keys/{id}/rotate` |
+| Virtual Key | `GET/POST /ai-virtual-keys`; `GET/PATCH/DELETE /ai-virtual-keys/{id_or_name}`; `POST /ai-virtual-keys/{id}/rotate`; `GET /ai-virtual-keys/{id}/budget-ledger`; `POST /ai-virtual-keys/{id}/budget-reconciliations`; `POST /ai-virtual-keys/{id}/budget-ledger/rebuild` |
 | Usage | `GET /ai-usage`; `GET /ai-usage/summary` |
 
 创建或轮换 virtual key 时生成 `sk-kr-...` 明文，只在该次响应返回；持久化内容是
 SHA-256 `key_hash` 和可识别的 `key_prefix`。列表、查询和更新响应不返回
 `key_hash`。AI 实体在 PostgreSQL 和 DB-less 启动路径中都注入 Admin state；
 `ai-proxy` 共享相同的 model/provider DAO。
+
+PostgreSQL 模式的 Virtual Key create/PATCH/delete 使用
+`BudgetAccountGovernance`，普通客户端不能写 `budget_used`、账务 count/state/
+revision 或 `key_hash/key_prefix`。金额的规范字段为固定 12 位字符串
+`budget_limit_decimal/budget_used_decimal`；legacy number 只作可无损兼容投影。
+有 pending/unresolved intent 时，清空预算或删除 key 返回 409。ledger 查询提供
+状态/时间/cursor，人工 reconciliation 使用稳定 operation ID 执行 settle/waive，
+rebuild 默认 dry-run，并通过 revision CAS 防止覆盖并发账务。
 
 `/ai-usage` 与 `/ai-usage/summary` 使用严格的独立 query parser，不接受未知或
 重复参数，也不允许调用方选择 workspace。两者共享 `[start,end)`、精确过滤器与
@@ -1186,7 +1216,10 @@ AI Endpoint 聚合视图，二级导航提供 AI 接口、服务商连接、调�
 - Provider 和 Model 页面使用结构化字段管理类型、地址、凭据、模型、权重、成本和
   token 上限；常规创建和编辑页面不显示可编辑 JSON。
 - Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并可按
-  `virtual_key_id` 下钻调用统计；预算扣减仍不由 analytics 事实执行。
+  `virtual_key_id` 下钻调用统计；同时显示服务端派生的本节点 quota/Endpoint
+  coverage、精确 Decimal 预算进度、预警/耗尽/未决/unsupported，以及 ledger、
+  settle/waive 和 verify/rebuild 操作。预算扣减由独立强一致账本执行，不由
+  analytics 事实执行。
 - 调用统计包含“用量分析”和“调用日志”：前者展示可计算成本、已知 token 小计与
   覆盖率、原生 SVG 趋势和模型/Virtual Key 排行，后者展示可过滤、稳定分页的
   元数据事实与详情。
@@ -1410,6 +1443,27 @@ analytics 事实、API、cursor、Manager 和 writer 日志只包含元数据，
 Virtual Key 明文或 `key_hash`。首版 PG 表没有自动 retention、partition、archive、
 export 或 delete API，会持续增长；查询窗口上限 90 天不等于数据保留期。
 
+预算是独立于 `AiUsageStore` 的强一致领域。`BudgetStore` 覆盖 inspect、intent、
+dispatch、settlement、owner lease、stale recovery 和 checkpoint；
+`BudgetAdminStore` 覆盖 ledger、reconciliation 与 verify/rebuild；
+`BudgetAccountGovernance` 让 limit/clear/delete 和普通 Virtual Key 字段在同一
+key-first 事务中提交。PostgreSQL adapter 以 request/operation ID 幂等，aggregate、
+open intent count、ledger 和 revision 同事务推进。opening balance 与 genesis
+checkpoint 保留升级前的累计金额，checkpoint + bounded revision tail 避免普通
+rebuild 永久退化为全历史扫描。
+
+Traditional 启动路径分别装配有上限的 budget hot、heartbeat/owner 与 Admin
+PostgreSQL pool。owner session 使用数据库时钟、lease 和 fencing；进程内有界
+registry 在任务取消、commit 结果不确定或 finalizer 暂时失败时保留 safe-zero、
+retry fact 或 unresolved 恢复状态。失联 owner 的 prepared intent 可以自动结算
+`not_incurred=0`，dispatching intent 保守转 unresolved。三个 pool 当前仍可能共享
+同一 PostgreSQL 实例和物理 I/O；这是资源优先级隔离，不是无限容量或完全物理
+隔离。
+
+预算语义是已持久化消费截止线：准入时若 `budget_used >= budget_limit` 则在
+provider 前返回 403；已准入请求按最终标准成本结算，可能把使用率推到 100% 以上，
+下一请求才开始阻断。它不是最大成本预留、预付余额或供应商账单级严格零超支。
+
 #### 10.8 可观测性
 
 - `ai-proxy.log` 合并 `ai.proxy.{provider,model,route_type,stream}`、`ai.usage.{prompt_tokens,completion_tokens,total_tokens}` 和 `ai.latency.e2e_ms` 到 `ctx.log_serialize`，供现有日志插件消费。
@@ -1423,12 +1477,16 @@ export 或 delete API，会持续增长；查询窗口上限 90 天不等于数�
 #### 10.9 当前限制与延期项
 
 - `ai-cache` 只有 cache key/skip-header 基础设施；Redis 读写、命中短路、回写和语义缓存未实现。
-- `ai-rate-limit` 只有进程内窗口；`limit_by=virtual_key` 当前退化为 global，尚未查询实体级 TPM/RPM 或 budget。Redis 分布式限流未实现。
+- `ai-rate-limit(limit_by=virtual_key)` 已按认证 key ID 读取实体 RPM/TPM，并通过
+  异步 Store 执行联合准入/修正；当前唯一 adapter 仍是本进程 Memory。多节点共享
+  Redis 配额、distributed/degraded 状态与 backend 切换治理未实现，归
+  REQ-AI-009。
 - Virtual Key 的请求认证已由 `ai-key-auth` 插件（priority 774）接入：校验
   enabled、expiry 和 allowed models（支持末尾 `*` 前缀通配），并注入
   `AiAuthContext`、`consumer_id` 与 `authenticated_credential`。调用统计可关联
-  Virtual Key，但 `budget_used` 累加、原子预算扣减与拒绝仍由 REQ-AI-003 交付；
-  best-effort usage fact 不能承担硬预算账本。
+  Virtual Key；Traditional PostgreSQL 已通过独立 Decimal ledger 累加
+  `budget_used` 并执行 403/503 fail-closed。best-effort usage fact 仍不能承担
+  硬预算账本，DB-less/Hybrid 持久预算明确不支持。
 - Hybrid 模式 CP→DP 配置同步不包含任何 AI 实体，因此 DP 节点上没有 Virtual Key 数据，`ai-key-auth` 在 DP 上无法认证。
 - Prompt Guard 当前只有正则/长度规则；语义 guard、embedding 检测和分类评分未实现。
 - Model balancer 已实现 priority、weight、token-size 过滤和健康冷却结构，但 `ai-proxy` 尚未回报成功/失败，也未使用插件配置中的 `retries`，因此运行时没有跨 provider 失败重试或健康 fallback。
@@ -1439,6 +1497,56 @@ export 或 delete API，会持续增长；查询窗口上限 90 天不等于数�
   计价均为后续工作。
 - Workspace-scoped AI model/provider 解析、Consumer 级插件动态选择、Provider 级
   AI Prometheus、MCP Gateway 和 Agent Gateway 均为后续工作。
+
+#### 10.10 企业级规模化演进约束
+
+下表同时标注当前可运行基线和企业目标。REQ-AI-003 已完成核心编码但仍处于验证
+收口，Redis 与外部 analytics 后端尚未实现，不能在 Admin/Manager 或文档中误报
+为当前能力：
+
+| 数据语义 | 当前状态 / 已规划首版 | 企业规模目标 | 稳定领域边界 |
+|---|---|---|---|
+| 配置实体 | 已实现：PostgreSQL / DB-less 声明式配置 | PostgreSQL 或兼容事务存储 | `Dao<T>` 与配置快照 |
+| 预算账本 | 已实现：PostgreSQL primary、Decimal aggregate/ledger、owner lease、recovery/checkpoint、Admin reconciliation；REQ-AI-003 验证中 | 可分片的强一致事务账本，必要时配合独立热状态 | `BudgetStore` / `BudgetAdminStore` / `BudgetAccountGovernance` |
+| RPM/TPM 实时配额 | 已实现：Virtual Key + 有界 Memory adapter，本进程 60 秒窗口 | REQ-AI-009：Redis 等跨节点原子计数后端 | 异步 `RateLimitStore` |
+| 调用事实与成本分析 | 已实现：PostgreSQL `ai_usage_logs` / DB-less ring | 外部日志或分析存储，可经消息管道解耦 | `AiUsageSink` + `AiUsageQueryBackend` |
+| 指标与追踪 | 已实现：Prometheus 文本与结构化日志 | Prometheus remote write / OTLP 等 | 低基数 metrics 与 trace exporter |
+
+规模化存储遵循以下约束：
+
+1. usage collector、标准化、计价和 Admin DTO 不依赖具体存储。现有
+   `AiUsageStore` 在外部后端落地前拆分为写入 sink 与查询 backend；PG/Memory
+   可同时实现两者，Kafka 类管道可以只实现 sink，Elasticsearch/OpenSearch 或
+   ClickHouse 类后端按 capability 提供查询。部署模式、持久/易失属性与物理
+   backend ID 必须分离，sink 与 query backend 独立配置；首个企业拓扑至少包含
+   一个外部可查询存储，不能以 Kafka-only 加长期 PG 查询完成外部化。
+2. usage event 使用带 `schema_version`、确定性 event ID/request ID 和 Decimal
+   字符串的稳定 envelope。每个 sink 拥有独立有界队列、批量条数/字节、并发、
+   超时、重试和可选 spool/DLQ；慢或失败的 sink 不能阻塞代理或其他 sink。
+   snapshot/cursor 由 backend 持有不透明 token，公共契约不得假设 PG sequence
+   或内存 ring generation。外部 backend 还必须声明 retention/index rollover、
+   可见性 SLA、查询能力、lag 和迁移/双写对账语义。
+3. REQ-AI-003 冻结异步 `RateLimitStore` 的联合准入、结算和查询契约。一次
+   `admit` 原子检查并预扣 RPM/TPM，Store 返回 opaque window/reservation token；
+   `request_id` 与 settlement operation ID 分别保证准入和修正幂等。时间、
+   generation、TTL 和原子快照由 backend 依照上层 `WindowSpec` 实现，插件不能
+   自行拼 key 或依赖 `Instant`；同一 Virtual Key 跨 Endpoint 共享 bucket。
+   REQ-AI-009 在不改变上层语义的前提下提供 Redis 实现。
+4. 预算与 analytics 完全解耦：外部 usage sink 成功与否不影响预算。首版 PG
+   预算实现通过 `BudgetStore`/Admin/governance traits 隔离 SQL，锁粒度限定为
+   单 key，禁止全局串行热点；未来更换分片事务账本或独立 admission 热状态时
+   仍必须保持
+   request ID 幂等、账本审计和 fail-closed 契约。Redis/ES 不能直接替代权威
+   财务账本。
+5. 每个后续数据面 `design.md` 必须给出容量模型：QPS/并发、节点数、key/租户
+   基数、事件大小与增长、保留期、远程调用次数、连接池和超时、热点/倾斜、
+   背压/降级、低基数指标，以及单节点、多节点、高基数、后端超时/故障的负载
+   验证结果或明确基线。
+
+外部 usage backend 与生命周期治理由 REQ-AI-013 跟踪；Redis 分布式实时配额由
+REQ-AI-009 跟踪。当前已实现的 usage PG/Memory、本地 quota 和 PostgreSQL
+预算账本是默认部署档位；在 REQ-AI-003 的真实 HTTP、运行模式和容量验证完成前，
+不得把它们表述为已经验收的企业规模 SLA。
 
 ## 错误处理
 

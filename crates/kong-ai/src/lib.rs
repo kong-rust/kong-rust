@@ -7,6 +7,8 @@ pub mod dao;
 pub mod auth;
 pub mod provider;
 pub mod codec;
+pub mod enforcement;
+pub mod budget;
 pub mod token;
 pub mod ratelimit;
 pub mod plugins;

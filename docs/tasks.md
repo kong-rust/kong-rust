@@ -428,6 +428,31 @@
   - 需求分析：`docs/pm/REQ-AI-002/analysis.md`；方案设计：`docs/pm/REQ-AI-002/design.md`
   - 实现记录：`docs/implementation-logs/req-ai-002_2026-07-26_ai-usage-analytics.md`
 
+- [ ] **15.6** Virtual Key 配额与预算控制（REQ-AI-003）`[R10]`（核心编码与
+  主链路验证完成 / 发布档位验证中，尚未验收完成）
+  - 已完成需求分析与方案设计门禁；核心编码已覆盖异步 `RateLimitStore`、有界
+    Memory adapter、请求级 reservation/settlement、生命周期
+    dispatch/compensator/finalizer、PostgreSQL Decimal 预算账本、专用
+    hot/heartbeat/Admin pool、恢复/checkpoint，以及 Virtual Key
+    Admin/Manager 状态与 reconciliation
+  - 多节点 Redis 配额与外部 usage/log 存储分别留给 REQ-AI-009、REQ-AI-013，
+    本需求保持 adapter 边界并明确 local/unsupported capability
+  - 需求分析：`docs/pm/REQ-AI-003/analysis.md`；方案设计：
+    `docs/pm/REQ-AI-003/design.md`
+  - 实现记录：
+    `docs/implementation-logs/req-ai-003_2026-07-26_quota-budget-enforcement.md`
+  - 最终验证矩阵（由实现收口回填，不得提前勾选完成）：
+
+    | 范围 | 证据 | 状态 |
+    |---|---|---|
+    | Rust contract/单元/集成 | `kong-ai`、`kong-proxy`、`kong-admin`、`kong-config`、`kong-plugin-system` | 🟢 760 通过、0 失败 |
+    | 真实 PostgreSQL | migration 006→007→008、事务/幂等/stale/checkpoint/rebuild | 🟢 budget 22/22，migration 1/1 |
+    | 真实 HTTP 核心路径 | 8000/8001 的 401/403/429/500/503、headers 与双协议错误体 | 🟢 核心矩阵通过且临时状态已清理 |
+    | Manager | lint/build/Playwright 与运行服务浏览器巡检 | 🟢 lint/build、Playwright 6/6、浏览器巡检通过 |
+    | 运行模式 | Traditional、DB-less、Hybrid capability/unsupported | 🟡 契约/投影通过，独立进程矩阵待补 |
+    | 容量/故障 | 热点 key、pool 饱和、heartbeat、commit unknown、高基数/长 SSE | 🟡 Memory 10k 基准通过，其余待发布档位证据 |
+    | 差异 | `git diff --check`、新增 Rust 文件 rustfmt check | 🟢 通过 |
+
 ## 阶段 16：Admin API 补全
 
 - [x] **16.1** 实现 KeySet 实体（模型 + DAO + Admin API）`[R3, R4]`

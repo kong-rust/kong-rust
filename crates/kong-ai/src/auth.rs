@@ -4,6 +4,7 @@
 //! (cache invalidation on key mutations).
 //! 由 ai-key-auth 插件（查找）与 Admin API（密钥变更时失效缓存）共用的认证器。
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use kong_core::traits::{Dao, PageParams};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::enforcement::AiClientProtocol;
 use crate::models::AiVirtualKey;
 
 /// Cache TTL — bounds staleness after an out-of-band key change (multi-node / direct DB writes)
@@ -50,6 +52,44 @@ pub struct AiAuthContext {
     pub key_prefix: String,
     /// Bound consumer, if any — 绑定的 Consumer（如有）
     pub consumer_id: Option<Uuid>,
+    /// 已解析的客户端协议，供所有策略错误保持同一响应方言。
+    pub client_protocol: AiClientProtocol,
+    /// 认证缓存中携带的不可变 policy hint；预算权威判断仍必须查询 primary Store。
+    pub policy: VirtualKeyPolicySnapshot,
+}
+
+/// Virtual Key 在认证时刻的限额/预算提示。
+///
+/// 该快照只用于选择 quota 命令与决定是否进入预算权威查询，不能作为预算余额真相。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualKeyPolicySnapshot {
+    pub rpm_limit: Option<NonZeroU64>,
+    pub tpm_limit: Option<NonZeroU64>,
+    pub budget_guard_required: bool,
+    pub accounting_blocked: bool,
+}
+
+impl VirtualKeyPolicySnapshot {
+    pub fn from_key(key: &AiVirtualKey) -> Self {
+        let rpm_limit = key
+            .rpm_limit
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new);
+        let tpm_limit = key
+            .tpm_limit
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new);
+        let accounting_blocked = key.budget_unresolved_count > 0
+            || (key.budget_limit.is_none() && key.budget_pending_count > 0);
+        Self {
+            rpm_limit,
+            tpm_limit,
+            budget_guard_required: key.budget_limit.is_some()
+                || key.budget_pending_count > 0
+                || key.budget_unresolved_count > 0,
+            accounting_blocked,
+        }
+    }
 }
 
 /// Virtual key authenticator — 虚拟密钥认证器

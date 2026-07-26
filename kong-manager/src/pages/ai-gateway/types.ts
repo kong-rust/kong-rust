@@ -20,7 +20,7 @@ export interface AiProvider {
 
 export interface AiModelEffectivePrice {
   amount: string
-  source: 'builtin' | 'override' | string
+  source: 'builtin' | 'model_override' | 'override' | string
   version: string
   snapshot_date: string
   effective_from?: string | null
@@ -68,6 +68,46 @@ export interface AiModelGroup {
   name: string
 }
 
+export type AiQuotaCapability =
+  | 'local_memory'
+  | 'local_memory_ephemeral'
+  | 'unsupported'
+
+export type AiBudgetCapability =
+  | 'postgres_authoritative'
+  | 'accounting_unavailable'
+  | 'unsupported'
+
+export interface AiVirtualKeyCapability {
+  quota: AiQuotaCapability
+  budget: AiBudgetCapability
+}
+
+export type AiQuotaEnforcement =
+  | 'unsupported'
+  | 'unconfigured'
+  | 'awaiting_plugin'
+  | 'configured_local_partial'
+  | 'configured_local'
+
+export type AiBudgetStatus =
+  | 'unsupported'
+  | 'unavailable'
+  | 'unresolved'
+  | 'unconfigured'
+  | 'paused'
+  | 'awaiting_plugin'
+  | 'exhausted'
+  | 'warning'
+  | 'active'
+
+export type AiBudgetFinancialStatus =
+  | 'unconfigured'
+  | 'paused'
+  | 'exhausted'
+  | 'warning'
+  | 'active'
+
 export interface AiVirtualKey {
   id: string
   name: string
@@ -78,10 +118,53 @@ export interface AiVirtualKey {
   tpm_limit?: number | null
   rpm_limit?: number | null
   budget_limit?: number | null
-  budget_used: number
+  budget_used: number | null
+  budget_limit_decimal?: string | null
+  budget_used_decimal?: string | null
+  capability?: AiVirtualKeyCapability
+  quota_enforcement?: AiQuotaEnforcement
+  quota_backend?: string | null
+  quota_scope?: string | null
+  quota_window_seconds?: number | null
+  budget_status?: AiBudgetStatus
+  budget_financial_status?: AiBudgetFinancialStatus | null
+  budget_backend?: string | null
+  budget_percentage_decimal?: string | null
+  coverage_available?: boolean
+  auth_endpoint_count?: number | null
+  enforced_endpoint_count?: number | null
+  policy_error_count?: number | null
+  pending_intent_count?: number | null
+  unresolved_intent_count?: number | null
   enabled: boolean
   expires_at?: number | null
   created_at?: number | null
   updated_at?: number | null
   tags?: string[] | null
+}
+
+export interface AiBudgetLedgerEntry {
+  id: string
+  virtual_key_id: string
+  kind: string
+  status: 'pending' | 'unresolved' | 'settled' | 'resolved' | 'waived'
+  request_id?: string | null
+  observed_cost_usd_decimal?: string | null
+  accounted_cost_usd_decimal?: string | null
+  cost_status?: string | null
+  cost_reasons?: string[]
+  resolution_reason?: string | null
+  created_at: string
+}
+
+export interface AiBudgetLedgerResponse {
+  data: AiBudgetLedgerEntry[]
+  account?: {
+    budget_limit_decimal?: string | null
+    budget_used_decimal: string
+    pending_intent_count: number
+    unresolved_intent_count: number
+    accounting_revision: number
+  } | null
+  next_cursor?: string | null
 }

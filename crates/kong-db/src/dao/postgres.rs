@@ -74,6 +74,8 @@ pub struct ColumnDef {
     pub col_type: ColumnType,
     /// Whether the column is nullable — 是否可空
     pub nullable: bool,
+    /// Whether generic entity writes may set this column — 通用实体写入是否允许设置该列
+    pub writable: bool,
 }
 
 /// Entity schema descriptor — 实体 Schema 描述
@@ -106,6 +108,26 @@ impl EntitySchema {
             db_column: db_column.to_string(),
             col_type,
             nullable,
+            writable: true,
+        });
+        self
+    }
+
+    /// Add a database/server-owned column that is selectable but excluded from generic writes.
+    /// 添加数据库/服务端维护的列：允许查询，但从通用写入中排除。
+    pub fn server_owned_column(
+        mut self,
+        json_name: &str,
+        db_column: &str,
+        col_type: ColumnType,
+        nullable: bool,
+    ) -> Self {
+        self.columns.push(ColumnDef {
+            json_name: json_name.to_string(),
+            db_column: db_column.to_string(),
+            col_type,
+            nullable,
+            writable: false,
         });
         self
     }
@@ -457,6 +479,9 @@ fn entity_to_params(entity_json: &Value, schema: &EntitySchema) -> Result<Vec<(S
     let mut params = Vec::new();
 
     for col in &schema.columns {
+        if !col.writable {
+            continue;
+        }
         let json_val = obj.get(&col.json_name).unwrap_or(&Value::Null);
         let param = json_to_sql_param(json_val, &col.col_type)?;
         params.push((col.db_column.clone(), param));
@@ -894,7 +919,11 @@ impl<T: Entity> Dao<T> for PgDao<T> {
                 continue; // Do not allow updating primary key and created_at — 不允许更新主键和创建时间
             }
 
-            if let Some(col) = self.schema.find_column(key) {
+            if let Some(col) = self
+                .schema
+                .find_column(key)
+                .filter(|column| column.writable)
+            {
                 let param = json_to_sql_param(value, &col.col_type)?;
                 let placeholder = match &param {
                     SqlParam::TimestampEpoch(_) | SqlParam::TimestampEpochMs(_) => {
@@ -1503,8 +1532,44 @@ pub fn ai_virtual_key_schema() -> EntitySchema {
         .text_array("allowed_models")
         .integer_opt("tpm_limit")
         .integer_opt("rpm_limit")
-        .float_opt("budget_limit")
-        .float("budget_used")
+        .decimal_opt("budget_limit")
+        .server_owned_column("budget_used", "budget_used", ColumnType::Decimal, false)
+        .server_owned_column(
+            "budget_pending_count",
+            "budget_pending_count",
+            ColumnType::Integer,
+            false,
+        )
+        .server_owned_column(
+            "budget_unresolved_count",
+            "budget_unresolved_count",
+            ColumnType::Integer,
+            false,
+        )
+        .server_owned_column(
+            "budget_accounting_revision",
+            "budget_accounting_revision",
+            ColumnType::Integer,
+            false,
+        )
+        .server_owned_column(
+            "budget_checkpoint_tail_events",
+            "budget_checkpoint_tail_events",
+            ColumnType::Integer,
+            false,
+        )
+        .server_owned_column(
+            "budget_state_updated_at",
+            "budget_state_updated_at",
+            ColumnType::Timestamp,
+            false,
+        )
+        .server_owned_column(
+            "budget_accounting_state",
+            "budget_accounting_state",
+            ColumnType::Text,
+            false,
+        )
         .boolean("enabled")
         .column("expires_at", "expires_at", ColumnType::Timestamp, true)
         .tags()
@@ -1513,7 +1578,10 @@ pub fn ai_virtual_key_schema() -> EntitySchema {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_model_schema, decimal_to_json, json_to_sql_param, ColumnType, SqlParam};
+    use super::{
+        ai_model_schema, ai_virtual_key_schema, decimal_to_json, entity_to_params,
+        json_to_sql_param, ColumnType, SqlParam,
+    };
     use rust_decimal::Decimal;
 
     #[test]
@@ -1537,6 +1605,50 @@ mod tests {
             assert_eq!(column.col_type, ColumnType::Decimal);
             assert!(column.nullable);
         }
+    }
+
+    #[test]
+    fn ai_virtual_key_schema_uses_decimal_and_read_only_accounting_columns() {
+        let schema = ai_virtual_key_schema();
+
+        let limit = schema
+            .find_column("budget_limit")
+            .expect("budget limit must be persisted");
+        assert_eq!(limit.col_type, ColumnType::Decimal);
+        assert!(limit.nullable);
+        assert!(limit.writable);
+
+        for name in [
+            "budget_used",
+            "budget_pending_count",
+            "budget_unresolved_count",
+            "budget_accounting_revision",
+            "budget_checkpoint_tail_events",
+            "budget_state_updated_at",
+            "budget_accounting_state",
+        ] {
+            let column = schema
+                .find_column(name)
+                .unwrap_or_else(|| panic!("{name} must be selectable"));
+            assert!(!column.writable, "{name} must be server-owned");
+        }
+
+        let json = serde_json::json!({
+            "id": "10000000-0000-0000-0000-000000000001",
+            "budget_limit": "12.500000000000",
+            "budget_used": "3.000000000000",
+            "budget_pending_count": 7,
+            "budget_accounting_state": "pending"
+        });
+        let params = entity_to_params(&json, &schema).unwrap();
+        assert!(params.iter().any(|(name, _)| name == "budget_limit"));
+        assert!(!params.iter().any(|(name, _)| name == "budget_used"));
+        assert!(!params
+            .iter()
+            .any(|(name, _)| name == "budget_pending_count"));
+        assert!(!params
+            .iter()
+            .any(|(name, _)| name == "budget_accounting_state"));
     }
 
     #[test]

@@ -174,6 +174,156 @@ where
     deserializer.deserialize_option(OptionalModelCostVisitor)
 }
 
+/// 校验并规范 Virtual Key 预算金额为可无损写入 `NUMERIC(28,12)` 的值。
+pub fn normalize_budget_amount(value: Decimal) -> Result<Decimal, String> {
+    if value < Decimal::ZERO {
+        return Err("预算金额不能为负数".to_string());
+    }
+
+    let normalized = value.normalize();
+    if normalized.scale() > 12 {
+        return Err("预算金额最多支持 12 位小数".to_string());
+    }
+
+    let upper_bound = Decimal::from_i128_with_scale(DECIMAL_28_12_UPPER_BOUND, 0);
+    if normalized >= upper_bound {
+        return Err("预算金额超出 NUMERIC(28,12) 范围".to_string());
+    }
+
+    let mut fixed = normalized;
+    fixed.rescale(12);
+    Ok(fixed)
+}
+
+/// 解析十进制预算字符串；支持科学计数法，但绝不进行舍入。
+pub fn parse_budget_amount(value: &str) -> Result<Decimal, String> {
+    let normalized = trim_decimal_fraction_zeros(value);
+    let parsed = if normalized.contains(['e', 'E']) {
+        Decimal::from_scientific(&normalized)
+    } else {
+        Decimal::from_str_exact(&normalized)
+    }
+    .map_err(|error| format!("预算金额不是有效十进制数: {error}"))?;
+
+    normalize_budget_amount(parsed)
+}
+
+fn serialize_budget_amount<S>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let value = normalize_budget_amount(*value).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&value.to_string())
+}
+
+fn serialize_optional_budget_amount<S>(
+    value: &Option<Decimal>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serialize_budget_amount(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+struct BudgetAmountVisitor;
+
+impl<'de> Visitor<'de> for BudgetAmountVisitor {
+    type Value = Decimal;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NUMERIC(28,12) 范围内的非负预算十进制字符串或数字")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        parse_budget_amount(value).map_err(E::custom)
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_str(&value)
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        normalize_budget_amount(Decimal::from_i128_with_scale(i128::from(value), 0))
+            .map_err(E::custom)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        normalize_budget_amount(Decimal::from_i128_with_scale(i128::from(value), 0))
+            .map_err(E::custom)
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if !value.is_finite() {
+            return Err(E::custom("预算金额必须是有限数字"));
+        }
+        parse_budget_amount(&value.to_string()).map_err(E::custom)
+    }
+}
+
+fn deserialize_budget_amount<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(BudgetAmountVisitor)
+}
+
+fn deserialize_optional_budget_amount<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OptionalBudgetAmountVisitor;
+
+    impl<'de> Visitor<'de> for OptionalBudgetAmountVisitor {
+        type Value = Option<Decimal>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("null、预算十进制字符串或兼容的旧数字")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(BudgetAmountVisitor).map(Some)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalBudgetAmountVisitor)
+}
+
 /// AI Provider 配置（对应 ai_providers 表）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -242,7 +392,7 @@ pub struct AiModel {
 }
 
 /// AI Virtual Key（虚拟 API Key — virtual API key for rate limiting and budget control）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiVirtualKey {
     pub id: Uuid,
@@ -257,9 +407,29 @@ pub struct AiVirtualKey {
     pub tpm_limit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpm_limit: Option<i32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_budget_amount",
+        deserialize_with = "deserialize_optional_budget_amount"
+    )]
+    pub budget_limit: Option<Decimal>,
+    #[serde(
+        serialize_with = "serialize_budget_amount",
+        deserialize_with = "deserialize_budget_amount"
+    )]
+    pub budget_used: Decimal,
+    /// 服务端维护的未决 intent 数量。
+    pub budget_pending_count: i64,
+    /// 服务端维护的 unresolved intent/account issue 数量。
+    pub budget_unresolved_count: i64,
+    /// 单 key 的账务 CAS revision。
+    pub budget_accounting_revision: i64,
+    /// 最新 checkpoint 之后的保守事件计数。
+    pub budget_checkpoint_tail_events: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub budget_limit: Option<f64>,
-    pub budget_used: f64,
+    pub budget_state_updated_at: Option<i64>,
+    /// 数据库生成的 `clean` / `pending` / `unresolved` 状态。
+    pub budget_accounting_state: String,
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
@@ -271,6 +441,35 @@ pub struct AiVirtualKey {
     pub updated_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+}
+
+impl Default for AiVirtualKey {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            name: String::new(),
+            key_hash: String::new(),
+            key_prefix: String::new(),
+            consumer_id: None,
+            allowed_models: None,
+            tpm_limit: None,
+            rpm_limit: None,
+            budget_limit: None,
+            budget_used: Decimal::ZERO,
+            budget_pending_count: 0,
+            budget_unresolved_count: 0,
+            budget_accounting_revision: 0,
+            budget_checkpoint_tail_events: 0,
+            budget_state_updated_at: None,
+            budget_accounting_state: "clean".to_string(),
+            enabled: false,
+            expires_at: None,
+            ws_id: None,
+            created_at: None,
+            updated_at: None,
+            tags: None,
+        }
+    }
 }
 
 /// 认证配置（嵌入在 AiProviderConfig.auth_config JSONB 中 — embedded in auth_config JSONB column）
@@ -447,6 +646,85 @@ mod tests {
 
         assert_eq!(value["input_cost"], "1.230000000000");
         assert_eq!(value["output_cost"], "9999999999999999.999999999999");
+    }
+
+    #[test]
+    fn ai_virtual_key_budget_accepts_strings_and_legacy_numbers() {
+        let key: AiVirtualKey = serde_json::from_value(serde_json::json!({
+            "budget_limit": "100.500000000000",
+            "budget_used": 83.25,
+            "budget_pending_count": 2,
+            "budget_unresolved_count": 1,
+            "budget_accounting_revision": 7,
+            "budget_checkpoint_tail_events": 3,
+            "budget_accounting_state": "unresolved"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            key.budget_limit,
+            Some(Decimal::from_i128_with_scale(1005, 1))
+        );
+        assert_eq!(key.budget_used, Decimal::from_i128_with_scale(8325, 2));
+        assert_eq!(key.budget_pending_count, 2);
+        assert_eq!(key.budget_unresolved_count, 1);
+        assert_eq!(key.budget_accounting_revision, 7);
+        assert_eq!(key.budget_checkpoint_tail_events, 3);
+        assert_eq!(key.budget_accounting_state, "unresolved");
+    }
+
+    #[test]
+    fn ai_virtual_key_missing_accounting_fields_default_to_clean_zero_state() {
+        let key: AiVirtualKey = serde_json::from_value(serde_json::json!({
+            "name": "db-less-key"
+        }))
+        .unwrap();
+
+        assert_eq!(key.budget_used, Decimal::ZERO);
+        assert_eq!(key.budget_pending_count, 0);
+        assert_eq!(key.budget_unresolved_count, 0);
+        assert_eq!(key.budget_accounting_state, "clean");
+    }
+
+    #[test]
+    fn ai_virtual_key_budget_serializes_as_fixed_scale_strings() {
+        let value = serde_json::to_value(AiVirtualKey {
+            budget_limit: Some(Decimal::from_i128_with_scale(1005, 1)),
+            budget_used: Decimal::from_i128_with_scale(8325, 2),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(value["budget_limit"], "100.500000000000");
+        assert_eq!(value["budget_used"], "83.250000000000");
+    }
+
+    #[test]
+    fn ai_virtual_key_budget_rejects_lossy_negative_and_out_of_range_values() {
+        for budget_limit in [
+            serde_json::json!("0.0000000000001"),
+            serde_json::json!(-1),
+            serde_json::json!("10000000000000000"),
+        ] {
+            let error = serde_json::from_value::<AiVirtualKey>(serde_json::json!({
+                "budget_limit": budget_limit
+            }))
+            .unwrap_err();
+            assert!(error.to_string().contains("预算金额"));
+        }
+    }
+
+    #[test]
+    fn ai_virtual_key_budget_allows_extra_trailing_zeroes_without_rounding() {
+        let key: AiVirtualKey = serde_json::from_value(serde_json::json!({
+            "budget_limit": "1.2300000000000",
+            "budget_used": "9999999999999999.9999999999990"
+        }))
+        .unwrap();
+        let value = serde_json::to_value(key).unwrap();
+
+        assert_eq!(value["budget_limit"], "1.230000000000");
+        assert_eq!(value["budget_used"], "9999999999999999.999999999999");
     }
 
     #[test]

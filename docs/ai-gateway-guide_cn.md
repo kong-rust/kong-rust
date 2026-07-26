@@ -17,6 +17,7 @@
 9. [支持的 Provider](#9-支持的-provider)
 10. [精确 prompt-token 计数](#10-精确-prompt-token-计数tokenizer-registry)
 11. [调用统计与成本估算](#11-调用统计与成本估算)
+12. [Virtual Key 配额与预算执行](#12-virtual-key-配额与预算执行)
 
 ---
 
@@ -152,8 +153,8 @@ AI Virtual Key 是一种面向用户/团队的虚拟 API Key，用于：
 
 - 代理流量认证（挂载 `ai-key-auth` 插件后生效，见 [3.5](#35-ai-key-auth)）
 - 允许访问的模型白名单（`allowed_models`，已生效）
-- 细粒度的 TPM / RPM 配额控制（`tpm_limit` / `rpm_limit`，当前仅存储，尚未生效）
-- 预算上限（`budget_limit`）和使用量追踪（`budget_used`，当前仅存储，尚未生效）
+- 细粒度的 TPM / RPM 配额控制（挂载 Virtual Key 策略链后，以本节点 60 秒窗口生效）
+- 生命周期 USD 预算和强一致账本（Traditional PostgreSQL 支持；见第 12 节）
 
 Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，此后只存储 SHA256 哈希。
 
@@ -253,18 +254,26 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 
 ### 3.2 ai-rate-limit
 
-对 AI 请求实施 RPM（每分钟请求数）和 TPM（每分钟 Token 数）限流。采用滑动窗口（60 秒），TPM 使用预扣 + 修正机制，保证计量准确。
+对 AI 请求实施 RPM（每分钟请求数）和 TPM（每分钟 Token 数）配额。当前使用
+本进程、首次命中起算的 60 秒固定窗口；TPM 在准入时预扣 prompt 估值，并在请求
+结束后按标准化 usage 修正。同一个窗口内 RPM/TPM 联合原子准入，任一维超限都
+不会留下部分扣减。
 
 #### 配置字段
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `limit_by` | string | `"consumer"` | 限流维度：`consumer` / `route` / `global` / `virtual_key` |
-| `tpm_limit` | integer | `null` | Token Per Minute 上限，`null` 表示不限 |
-| `rpm_limit` | integer | `null` | Request Per Minute 上限，`null` 表示不限 |
-| `header_name` | string | `"X-AI-Key"` | 读取 Virtual Key 的请求头名称（`limit_by=virtual_key` 时生效） |
-| `error_code` | integer | `429` | 超限时返回的 HTTP 状态码 |
-| `error_message` | string | `"AI rate limit exceeded"` | 超限时返回的错误消息 |
+| `tpm_limit` | integer / null | `null` | `global/route/consumer` 的 TPM 上限，范围 `1..=2^31-1` |
+| `rpm_limit` | integer / null | `null` | `global/route/consumer` 的 RPM 上限，范围 `1..=2^31-1` |
+| `header_name` | string | `"X-AI-Key"` | 已弃用，仅为旧配置保留；运行时不使用 |
+| `error_code` | integer | `429` | 旧的非 Virtual Key 模式错误状态 |
+| `error_message` | string | `"AI rate limit exceeded"` | 旧的非 Virtual Key 模式错误消息 |
+
+`global/route/consumer` 至少配置一个 plugin-level limit。`virtual_key` 模式必须
+同时挂载 `ai-key-auth` 和 `ai-proxy`，并要求插件自身的 `tpm_limit/rpm_limit`
+均为 `null`；额度只读取认证 Virtual Key 实体上的同名字段。Virtual Key 身份只
+使用认证后的 key UUID，不从 `header_name` 或原始请求头重新解析。
 
 #### 示例配置
 
@@ -288,6 +297,17 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
   "tpm_limit": 50000
 }
 ```
+
+**按 Virtual Key 自身额度限流：**
+
+```json
+{
+  "limit_by": "virtual_key"
+}
+```
+
+Virtual Key 的创建、预算、响应头和错误契约见
+[第 12 节](#12-virtual-key-配额与预算执行)。
 
 ---
 
@@ -546,8 +566,15 @@ ai_virtual_keys:
 | `PATCH` | `/ai-virtual-keys/{id_or_name}` | 更新 Virtual Key 配置 |
 | `DELETE` | `/ai-virtual-keys/{id_or_name}` | 删除 Virtual Key |
 | `POST` | `/ai-virtual-keys/{id}/rotate` | 轮换密钥（生成新密钥，返回新的原始 `key`） |
+| `GET` | `/ai-virtual-keys/{id}/budget-ledger` | 查询预算账户与账本，支持状态/时间/cursor |
+| `POST` | `/ai-virtual-keys/{id}/budget-reconciliations` | 人工 settle 或 waive 未决 intent |
+| `POST` | `/ai-virtual-keys/{id}/budget-ledger/rebuild` | 校验或 CAS 重建预算 aggregate |
 
 > **安全说明**：`key_hash` 字段在所有响应中均被移除。原始密钥（`key` 字段）仅在 `POST /ai-virtual-keys` 和 `POST /ai-virtual-keys/{id}/rotate` 的成功响应中出现一次，请妥善保存。
+
+`budget_used`、`budget_used_decimal`、账务 count/state/revision 以及
+`key_hash/key_prefix` 都是服务端字段；create/PATCH 传入会返回 400。预算金额的
+规范字段是固定 12 位字符串 `budget_limit_decimal/budget_used_decimal`。
 
 ---
 
@@ -1252,4 +1279,261 @@ gauges。至少监控丢失事实、队列满、写入失败、重试耗尽、�
 限制不会删除更早数据。
 
 首版也不提供 DB-less 跨节点聚合、Hybrid DP→CP 上传、供应商账单对账、折扣/税费/
-多币种或硬预算执行。
+多币种。Virtual Key 预算使用下面第 12 节所述的独立强一致账本，不从
+`ai_usage_logs` 扣减。
+
+---
+
+## 12. Virtual Key 配额与预算执行
+
+### 12.1 激活条件与配置
+
+Virtual Key 策略只在同一条有效插件链同时包含以下三个启用插件时执行：
+
+```text
+ai-key-auth → ai-rate-limit(limit_by=virtual_key) → ai-proxy
+```
+
+先创建带额度和生命周期预算的 key。金额请使用精确字符串：
+
+```bash
+curl -s -X POST http://localhost:8001/ai-virtual-keys \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "team-a",
+    "rpm_limit": 60,
+    "tpm_limit": 100000,
+    "budget_limit_decimal": "100.000000000000",
+    "allowed_models": ["gpt-4o-mini"]
+  }'
+```
+
+原始 `key` 只在该响应出现一次。`rpm_limit/tpm_limit` 接受 `null` 或
+`1..=2^31-1` 的整数；`null` 表示该维度不限制。`budget_limit_decimal=null`
+暂停预算，但保留历史 `budget_used_decimal`；有 pending/unresolved intent 时
+清空会返回 409。
+
+在同一 Route 上挂载 `ai-key-auth`、`ai-proxy`，再挂载不带 plugin-level limit
+的 `ai-rate-limit`：
+
+```bash
+curl -s -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-rate-limit",
+    "route": {"name": "ai-full-stack"},
+    "config": {"limit_by": "virtual_key"}
+  }'
+```
+
+`virtual_key` 模式若缺少认证身份则返回 401；缺少 `ai-proxy` 返回 500，且不会
+消耗 quota 或建立预算 intent。请求使用创建时返回的密钥：
+
+```bash
+curl -i http://localhost:8000/ai/chat \
+  -H 'Authorization: Bearer sk-kr-...' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
+```
+
+### 12.2 配额窗口、响应头和错误
+
+当前 Memory adapter 是本节点、首次命中起算的 60 秒固定窗口。同一 key UUID
+命中多个已挂载策略的 Endpoint 仍共享当前进程的一份 bucket；rename 和 rotate
+不改变 UUID，因此不重置窗口。
+
+已配置的维度返回：
+
+```text
+X-RateLimit-Limit-Requests
+X-RateLimit-Remaining-Requests
+X-RateLimit-Reset-Requests
+X-RateLimit-Limit-Tokens
+X-RateLimit-Remaining-Tokens
+X-RateLimit-Reset-Tokens
+```
+
+未配置维度省略对应三项。429 额外返回 `Retry-After`。响应里的 remaining 是
+准入时 prompt 预扣后的原子快照；请求结束后的 token 修正不会追溯修改已发送的
+header。
+
+Virtual Key RPM 超限返回：
+
+```json
+{
+  "error": {
+    "message": "Virtual key request rate limit exceeded.",
+    "type": "rate_limit_error",
+    "param": null,
+    "code": "requests_rate_limit_exceeded"
+  }
+}
+```
+
+TPM 使用 `tokens_rate_limit_exceeded` 和
+`Virtual key token rate limit exceeded.`。预算和基础设施错误固定为：
+
+| HTTP | code | 含义 |
+|---:|---|---|
+| 401 | `virtual_key_required` | 策略需要已认证 Virtual Key |
+| 403 | `budget_exhausted` | 已持久化 used 已达到或超过 limit |
+| 429 | `requests_rate_limit_exceeded` | RPM 超限 |
+| 429 | `tokens_rate_limit_exceeded` | TPM 超限 |
+| 500 | `ai_policy_chain_invalid` | Virtual Key 策略链无效 |
+| 503 | `quota_backend_unavailable` | quota backend 超时、不可用或过载 |
+| 503 | `quota_backend_state_invalid` | quota 幂等状态损坏或冲突 |
+| 503 | `quota_backend_unsupported` | 当前模式不支持 quota |
+| 503 | `budget_accounting_unavailable` | 预算 primary/owner 暂时不可用 |
+| 503 | `budget_accounting_unresolved` | 有账务未决，需要对账 |
+| 503 | `budget_accounting_unsupported` | 当前模式不支持持久预算 |
+| 503 | `budget_pricing_unavailable` | 本次请求无法形成安全价格快照 |
+
+OpenAI/Responses 使用嵌套 `error`；已知 Anthropic 客户端协议时使用 Anthropic
+error envelope。
+
+### 12.3 生命周期预算语义
+
+预算是 USD 生命周期累计的**已持久化消费截止线**。准入时若
+`budget_used >= budget_limit`，请求在 provider 前 403。已准入请求在响应后按与
+调用事实相同的 Decimal 价格/usage 口径结算到独立账本，但不等待也不依赖
+analytics writer。
+
+这不是严格零超支 reservation：一个请求或多个并发在途请求可以把 used 推到
+limit 以上，下一请求才开始拒绝。Manager 可显示超过 100%。调高 limit 后下一次
+权威检查即可恢复；rename、rotate、disable/enable 不清零。标准列表价估算也不是
+供应商发票。
+
+Virtual Key 响应的主要派生字段包括：
+
+```json
+{
+  "quota_enforcement": "configured_local",
+  "quota_backend": "memory",
+  "quota_scope": "node",
+  "quota_window_seconds": 60,
+  "budget_limit_decimal": "100.000000000000",
+  "budget_used_decimal": "83.250000000000",
+  "budget_percentage_decimal": "83.250000000000",
+  "budget_status": "warning",
+  "budget_backend": "postgres",
+  "auth_endpoint_count": 2,
+  "enforced_endpoint_count": 2,
+  "pending_intent_count": 0,
+  "unresolved_intent_count": 0
+}
+```
+
+Manager 的 Virtual Keys 页面直接消费这些状态，区分
+`unconfigured/awaiting_plugin/configured_local_partial/configured_local/
+unsupported` quota，以及
+`unconfigured/paused/awaiting_plugin/active/warning/exhausted/unresolved/
+unavailable/unsupported` budget。
+
+### 12.4 账本查询、对账与 rebuild
+
+查询未决账本；`status` 可用逗号组合
+`pending,unresolved,settled,resolved,waived`，`from/to` 为 RFC 3339：
+
+```bash
+curl -s \
+  'http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-ledger?status=unresolved&size=50'
+```
+
+响应的 `data` 是明细，`account` 是当前 aggregate，`next_cursor` 用于下一页。
+不要解析或自行构造 cursor。
+
+人工按实际成本 settle：
+
+```bash
+curl -s -X POST \
+  http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-reconciliations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "intent_id": "<intent-uuid>",
+    "operation_id": "<stable-operation-uuid>",
+    "action": "settle",
+    "cost_usd_decimal": "0.123000000000",
+    "reason": "provider record reviewed"
+  }'
+```
+
+确认无需计费时 waive，省略金额：
+
+```json
+{
+  "intent_id": "<intent-uuid>",
+  "operation_id": "<stable-operation-uuid>",
+  "action": "waive",
+  "reason": "provider confirmed request was not executed"
+}
+```
+
+网络重试必须复用同一 `operation_id`；同 ID 传不同载荷返回 409。先执行 dry-run
+校验 aggregate：
+
+```bash
+curl -s -X POST \
+  http://localhost:8001/ai-virtual-keys/<key-uuid>/budget-ledger/rebuild \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "operation_id": "<stable-operation-uuid>",
+    "reason": "scheduled ledger verification",
+    "dry_run": true
+  }'
+```
+
+只在复核 `comparison` 后把 `dry_run` 改为 `false`。真实 rebuild 使用
+checkpoint + revision tail 和短 key-lock CAS；热点账户持续变化时可能返回 409，
+应稍后或在维护窗口重试。
+
+### 12.5 运行模式与容量边界
+
+| 模式 | RPM/TPM | 持久预算 |
+|---|---|---|
+| Traditional + PostgreSQL | 本节点 Memory，60 秒，重启清零 | PostgreSQL primary 强一致账本 |
+| standalone DB-less | 本节点 Memory，易失 | unsupported，配置预算后 fail closed |
+| Hybrid CP/DP | capability 为 unsupported | unsupported；没有 DP→CP accounting |
+
+Traditional 为预算 hot path、heartbeat/owner 和 Admin/rebuild 使用独立的有界
+PostgreSQL pool，并使用 owner lease、stale recovery 和 checkpoint。重要默认
+配置如下：
+
+```ini
+ai_quota_memory_max_buckets = 100000
+ai_quota_memory_max_records = 2000000
+ai_quota_memory_max_records_per_bucket = 100000
+ai_quota_memory_max_live_reservations = 200000
+ai_quota_memory_recovery_headroom = 50000
+ai_quota_max_request_lifetime_ms = 900000
+ai_quota_settlement_retry_grace_ms = 300000
+ai_quota_cleanup_interval_ms = 30000
+ai_quota_cleanup_scan_batch = 4096
+
+ai_budget_pg_pool_size = 10
+ai_budget_heartbeat_pg_pool_size = 1
+ai_budget_admin_pg_pool_size = 2
+ai_budget_max_concurrent_ops = 8
+ai_budget_recovery_reserved_ops = 2
+ai_budget_recovery_scan_batch = 100
+ai_budget_operation_timeout_ms = 2000
+ai_budget_lock_timeout_ms = 500
+ai_budget_owner_lease_seconds = 30
+ai_budget_owner_heartbeat_ms = 5000
+ai_budget_intent_stale_grace_seconds = 60
+ai_budget_active_intent_capacity = 50000
+ai_budget_checkpoint_interval_seconds = 60
+ai_budget_checkpoint_soft_tail_events = 10000
+ai_budget_checkpoint_hard_tail_events = 100000
+```
+
+这些默认值不是吞吐 SLA。预算正常请求需要多次 primary 操作，单热点 key 的
+aggregate 更新必然串行；三个 pool 仍可共享同一 PostgreSQL 实例、WAL、磁盘和
+CPU。上线前应按预算 QPS、并发、热点分布、长 SSE、ledger rows/day、pool wait、
+lock wait、heartbeat lag、checkpoint tail 和故障恢复进行压测。
+
+当前没有 Redis quota backend。多节点 Memory 理论上可获得约 N 倍额度；
+REQ-AI-009 将在不改变 `RateLimitStore` 契约的前提下交付 Redis。当前也没有
+Elasticsearch/OpenSearch、ClickHouse 或 Kafka usage/log backend；外部
+analytics、retention 和迁移由 REQ-AI-013 交付。预算账本必须继续使用满足原子
+事务、幂等、审计和 reconciliation 的强一致 Store，不能用 Redis 或 ES 直接
+替代。

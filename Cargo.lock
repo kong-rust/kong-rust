@@ -1824,6 +1824,7 @@ dependencies = [
 name = "kong-admin"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
@@ -1839,6 +1840,7 @@ dependencies = [
  "kong-proxy",
  "kong-router",
  "mime",
+ "num-bigint",
  "openssl",
  "reqwest",
  "rust_decimal",
@@ -1888,6 +1890,8 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tracing",
+ "unicode-normalization",
+ "url",
  "uuid",
 ]
 
@@ -2003,6 +2007,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "futures-util",
  "hickory-resolver",
  "http",
  "kong-config",
@@ -2075,6 +2080,7 @@ dependencies = [
  "pingora-proxy",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tokio-openssl",

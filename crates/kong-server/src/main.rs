@@ -236,6 +236,7 @@ fn build_plugin_registry(
     ai_models: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiModel>>,
     ai_providers: Arc<dyn kong_core::traits::Dao<kong_ai::models::AiProviderConfig>>,
     virtual_key_auth: Arc<kong_ai::auth::VirtualKeyAuthenticator>,
+    enforcement_runtime: Arc<kong_ai::enforcement::AiEnforcementRuntime>,
 ) -> kong_plugin_system::PluginRegistry {
     let mut registry = kong_plugin_system::PluginRegistry::new();
     let plugin_names = config.loaded_plugins();
@@ -276,7 +277,9 @@ fn build_plugin_registry(
     );
     registry.register(
         "ai-rate-limit",
-        Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()),
+        Arc::new(kong_ai::plugins::AiRateLimitPlugin::new(
+            enforcement_runtime,
+        )),
     );
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
     registry.register(
@@ -304,6 +307,150 @@ fn build_plugin_registry(
     }
 
     registry
+}
+
+/// 按运行模式构造唯一的 AI enforcement runtime。
+fn build_ai_enforcement_runtime(
+    config: &kong_config::KongConfig,
+    budget_runtime: Option<kong_ai::enforcement::SupportedBudgetRuntime>,
+) -> anyhow::Result<Arc<kong_ai::enforcement::AiEnforcementRuntime>> {
+    if !config.role.is_traditional() {
+        return Ok(Arc::new(
+            kong_ai::enforcement::AiEnforcementRuntime::unsupported_hybrid(),
+        ));
+    }
+
+    let store_config = kong_ai::ratelimit::MemoryRateLimitConfig {
+        max_buckets: config.ai_quota_memory_max_buckets,
+        max_idempotency_records: config.ai_quota_memory_max_records,
+        max_records_per_bucket: config.ai_quota_memory_max_records_per_bucket,
+        max_live_reservations: config.ai_quota_memory_max_live_reservations,
+        recovery_record_headroom: config.ai_quota_memory_recovery_headroom,
+        max_request_lifetime: std::time::Duration::from_millis(
+            config.ai_quota_max_request_lifetime_ms,
+        ),
+        settlement_retry_grace: std::time::Duration::from_millis(
+            config.ai_quota_settlement_retry_grace_ms,
+        ),
+        cleanup_interval: std::time::Duration::from_millis(config.ai_quota_cleanup_interval_ms),
+        cleanup_scan_batch: config.ai_quota_cleanup_scan_batch,
+    };
+    let store: Arc<dyn kong_ai::ratelimit::RateLimitStore> = Arc::new(
+        kong_ai::ratelimit::MemoryRateLimitStore::new(
+            store_config,
+            Arc::new(kong_ai::ratelimit::SystemRateLimitClock::new()),
+        )
+        .map_err(|error| anyhow::anyhow!("无效的 AI quota memory 配置: {error}"))?,
+    );
+    let budget_capability = if config.is_dbless() {
+        kong_ai::enforcement::BudgetCapability::UnsupportedDbLess
+    } else {
+        // PostgreSQL traditional 部署具备权威预算能力；owner 是否已注册由
+        // budget_runtime() 的动态可用性单独表达。
+        kong_ai::enforcement::BudgetCapability::PostgresAuthoritative
+    };
+    let mut runtime = kong_ai::enforcement::AiEnforcementRuntime::with_local_quota(
+        store,
+        config.ai_enforcement_namespace.clone(),
+        config.is_dbless(),
+        budget_capability,
+    )
+    .map_err(anyhow::Error::msg)?;
+    if let Some(budget_runtime) = budget_runtime {
+        runtime = runtime.with_supported_budget(budget_runtime);
+    }
+    Ok(Arc::new(runtime))
+}
+
+async fn load_all_entities<T, D>(dao: &D) -> kong_core::error::Result<Vec<T>>
+where
+    T: kong_core::traits::Entity,
+    D: kong_core::traits::Dao<T> + ?Sized,
+{
+    let mut entities = Vec::new();
+    let mut offset = None;
+    loop {
+        let page = dao
+            .page(&kong_core::traits::PageParams {
+                size: 1_000,
+                offset: offset.clone(),
+                ..Default::default()
+            })
+            .await?;
+        entities.extend(page.data);
+        match page.offset {
+            Some(next) if Some(&next) != offset.as_ref() => offset = Some(next),
+            _ => return Ok(entities),
+        }
+    }
+}
+
+fn build_pg_budget_store(
+    config: &kong_config::KongConfig,
+    pool: sqlx::PgPool,
+) -> anyhow::Result<Arc<kong_ai::budget::PgBudgetStore>> {
+    use sha2::{Digest, Sha256};
+
+    let canonical_config = format!(
+        "budget-runtime:v1\n{}\n{}\n{}\n{}",
+        config.ai_enforcement_namespace,
+        config.ai_budget_checkpoint_hard_tail_events,
+        config.ai_budget_operation_timeout_ms,
+        config.ai_budget_lock_timeout_ms
+    );
+    let config_fingerprint: Arc<str> =
+        Arc::from(format!("{:x}", Sha256::digest(canonical_config.as_bytes())));
+    Ok(Arc::new(kong_ai::budget::PgBudgetStore::new(
+        pool,
+        kong_ai::budget::PgBudgetStoreConfig {
+            deployment_namespace: Arc::from(config.ai_enforcement_namespace.clone()),
+            checkpoint_hard_tail_events: config.ai_budget_checkpoint_hard_tail_events,
+            config_fingerprint,
+            statement_timeout: std::time::Duration::from_millis(
+                config.ai_budget_operation_timeout_ms,
+            ),
+            lock_timeout: std::time::Duration::from_millis(config.ai_budget_lock_timeout_ms),
+        },
+    )?))
+}
+
+async fn build_pg_budget_runtime(
+    config: &kong_config::KongConfig,
+    store: Arc<kong_ai::budget::PgBudgetStore>,
+    owner_store: Arc<kong_ai::budget::PgBudgetStore>,
+    node_id: uuid::Uuid,
+    catalog: Arc<kong_ai::usage::PriceCatalog>,
+) -> anyhow::Result<kong_ai::enforcement::SupportedBudgetRuntime> {
+    let session_id = uuid::Uuid::now_v7();
+    let owner_lease = std::time::Duration::from_secs(config.ai_budget_owner_lease_seconds);
+    kong_ai::budget::BudgetStore::register_owner(
+        owner_store.as_ref(),
+        kong_ai::budget::RegisterBudgetOwner {
+            session_id,
+            node_id,
+            lease_duration: owner_lease,
+        },
+    )
+    .await?;
+    let registry = kong_ai::enforcement::ActiveBudgetIntentRegistry::new(
+        config.ai_budget_active_intent_capacity,
+    )
+    .map_err(|error| anyhow::anyhow!("无法创建预算活动 intent registry: {error}"))?;
+    let store: Arc<dyn kong_ai::budget::BudgetStore> = store;
+    let owner_store: Arc<dyn kong_ai::budget::BudgetStore> = owner_store;
+    kong_ai::enforcement::SupportedBudgetRuntime::new(
+        store,
+        owner_store,
+        catalog,
+        registry,
+        node_id,
+        session_id,
+        std::time::Duration::from_secs(config.ai_budget_intent_stale_grace_seconds),
+        owner_lease,
+        config.ai_budget_max_concurrent_ops as usize,
+        std::time::Duration::from_millis(config.ai_budget_operation_timeout_ms),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 /// Handle db subcommands — 处理 db 子命令
@@ -479,9 +626,13 @@ fn start_gateway(
     // Note: rt must survive until run_forever(), otherwise the sqlx connection pool background tasks — 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
     // will terminate when runtime is dropped, requiring connection rebuilds and causing slow startup responses. — 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
-    let (mut kong_proxy, mut admin_state, refresh_rx, usage_writer_runner) = rt.block_on(
-        init_proxy_and_admin(&config, auto_migrate, log_updater, current_log_level),
-    )?;
+    let (mut kong_proxy, mut admin_state, refresh_rx, usage_writer_runner, budget_background) = rt
+        .block_on(init_proxy_and_admin(
+            &config,
+            auto_migrate,
+            log_updater,
+            current_log_level,
+        ))?;
 
     // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
     let access_log_writer = rt
@@ -646,6 +797,32 @@ fn start_gateway(
         );
         server.add_service(usage_service);
     }
+    if let Some(background) = budget_background {
+        let budget_owner_service = pingora_core::services::background::background_service(
+            "AI Budget Maintenance",
+            AiBudgetOwnerBgService {
+                enforcement: background.enforcement,
+                store: background.store,
+                owner_store: background.owner_store,
+                catalog: background.catalog,
+                node_id: background.node_id,
+                registry_capacity: background.registry_capacity,
+                stale_after: background.stale_after,
+                owner_lease: background.owner_lease,
+                max_concurrent_admissions: background.max_concurrent_admissions,
+                operation_timeout: background.operation_timeout,
+                heartbeat_interval: std::time::Duration::from_millis(
+                    config.ai_budget_owner_heartbeat_ms,
+                ),
+                recovery_scan_batch: config.ai_budget_recovery_scan_batch as usize,
+                checkpoint_interval: std::time::Duration::from_secs(
+                    config.ai_budget_checkpoint_interval_seconds,
+                ),
+                checkpoint_soft_tail_events: config.ai_budget_checkpoint_soft_tail_events,
+            },
+        );
+        server.add_service(budget_owner_service);
+    }
 
     // Phase 5.5: Role-specific startup — 阶段 5.5：角色特定启动逻辑
     if let Some(cp) = cp_arc {
@@ -720,6 +897,19 @@ fn start_gateway(
 
 /// Async initialization: connect DB, load data, build KongProxy and AdminState — 异步初始化：连接 DB、加载数据、构建 KongProxy 和 AdminState
 /// auto_migrate: if true, auto-run bootstrap + up instead of failing on pending migrations — auto_migrate: 为 true 时自动执行 bootstrap + up，而非报错退出
+struct AiBudgetBackgroundRuntime {
+    enforcement: Arc<kong_ai::enforcement::AiEnforcementRuntime>,
+    store: Arc<kong_ai::budget::PgBudgetStore>,
+    owner_store: Arc<kong_ai::budget::PgBudgetStore>,
+    catalog: Arc<kong_ai::usage::PriceCatalog>,
+    node_id: uuid::Uuid,
+    registry_capacity: usize,
+    stale_after: std::time::Duration,
+    owner_lease: std::time::Duration,
+    max_concurrent_admissions: usize,
+    operation_timeout: std::time::Duration,
+}
+
 async fn init_proxy_and_admin(
     config: &Arc<kong_config::KongConfig>,
     auto_migrate: bool,
@@ -730,9 +920,10 @@ async fn init_proxy_and_admin(
     kong_admin::AdminState,
     tokio::sync::mpsc::UnboundedReceiver<&'static str>,
     Option<kong_ai::usage::AiUsageWriterRunner>,
+    Option<AiBudgetBackgroundRuntime>,
 )> {
     use kong_core::models::*;
-    use kong_core::traits::{Dao, PageParams};
+    use kong_core::traits::Dao;
     use kong_db::*;
 
     // Use configured node_id if provided, otherwise generate a new one — 如果配置了 node_id 则使用，否则生成新的
@@ -748,8 +939,11 @@ async fn init_proxy_and_admin(
 
     // Create shared async DNS resolver — 创建共享异步 DNS 解析器
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(config));
+    let price_catalog =
+        Arc::new(kong_ai::usage::PriceCatalog::builtin().map_err(anyhow::Error::msg)?);
 
     if config.is_dbless() {
+        let enforcement_runtime = build_ai_enforcement_runtime(config, None)?;
         // db-less mode: empty routing table, in-memory store — db-less 模式：空路由表，内存存储
         let store = Arc::new(DblessStore::new());
 
@@ -780,9 +974,13 @@ async fn init_proxy_and_admin(
             Arc::clone(&ai_models),
             Arc::clone(&ai_providers),
             Arc::clone(&virtual_key_auth),
+            Arc::clone(&enforcement_runtime),
         );
 
-        let (ai_usage, usage_writer_runner, lifecycle_observers) = if config.role.is_traditional() {
+        let (ai_usage, usage_writer_runner, mut lifecycle_observers) = if config
+            .role
+            .is_traditional()
+        {
             let memory_store = Arc::new(
                 kong_ai::usage::MemoryAiUsageStore::new(node_id, config.ai_usage_dbless_capacity)
                     .map_err(anyhow::Error::msg)?,
@@ -798,11 +996,9 @@ async fn init_proxy_and_admin(
             .map_err(anyhow::Error::msg)?;
             let stats = writer.stats();
             memory_store.attach_writer_stats(Arc::clone(&stats));
-            let catalog =
-                Arc::new(kong_ai::usage::PriceCatalog::builtin().map_err(anyhow::Error::msg)?);
             let collector = Arc::new(kong_ai::usage::AiUsageCollector::new(
                 writer,
-                catalog,
+                Arc::clone(&price_catalog),
                 node_id,
                 uuid::Uuid::nil(),
             ));
@@ -822,6 +1018,11 @@ async fn init_proxy_and_admin(
                 Vec::new(),
             )
         };
+        lifecycle_observers.insert(
+            0,
+            Arc::new(kong_ai::enforcement::AiPolicyChainObserver::new())
+                as Arc<dyn kong_plugin_system::RequestLifecycleObserver>,
+        );
 
         let kong_proxy = kong_proxy::KongProxy::new(
             &[],
@@ -832,7 +1033,38 @@ async fn init_proxy_and_admin(
             dns_resolver,
             Arc::clone(config),
         )
-        .with_lifecycle_observers(lifecycle_observers);
+        .with_lifecycle_observers(lifecycle_observers)
+        .with_async_lifecycle_hooks(
+            Vec::new(),
+            if enforcement_runtime.quota_runtime().is_ok() {
+                vec![
+                    Arc::new(kong_ai::enforcement::AiQuotaDispatchAbortCompensator::new(
+                        Arc::clone(&enforcement_runtime),
+                    ))
+                        as Arc<dyn kong_plugin_system::RequestDispatchAbortHandler>,
+                ]
+            } else {
+                Vec::new()
+            },
+            if enforcement_runtime.quota_runtime().is_ok() {
+                vec![
+                    Arc::new(kong_ai::enforcement::AiRateLimitFinalizer::new(Arc::clone(
+                        &enforcement_runtime,
+                    ))) as Arc<dyn kong_plugin_system::RequestFinalizer>,
+                ]
+            } else {
+                Vec::new()
+            },
+            kong_plugin_system::LifecycleHookTimeouts {
+                dispatch: std::time::Duration::from_millis(config.ai_lifecycle_dispatch_timeout_ms),
+                abort_compensation: std::time::Duration::from_millis(
+                    config.ai_lifecycle_abort_timeout_ms,
+                ),
+                finalizer: std::time::Duration::from_millis(
+                    config.ai_lifecycle_finalizer_timeout_ms,
+                ),
+            },
+        );
 
         let admin_state = kong_admin::AdminState {
             services: Arc::new(DblessDao::<Service>::new(Arc::clone(&store))),
@@ -850,6 +1082,15 @@ async fn init_proxy_and_admin(
             ai_providers,
             ai_models,
             ai_virtual_keys,
+            ai_enforcement: Arc::clone(&enforcement_runtime),
+            ai_policy_coverage: Arc::new(std::sync::RwLock::new(
+                kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::unavailable(
+                    uuid::Uuid::nil(),
+                ),
+            )),
+            default_workspace_id: uuid::Uuid::nil(),
+            ai_budget_governance: None,
+            ai_budget_admin: None,
             virtual_key_auth,
             node_id,
             config: Arc::clone(config),
@@ -868,7 +1109,13 @@ async fn init_proxy_and_admin(
             ai_usage,
         };
 
-        Ok((kong_proxy, admin_state, refresh_rx, usage_writer_runner))
+        Ok((
+            kong_proxy,
+            admin_state,
+            refresh_rx,
+            usage_writer_runner,
+            None,
+        ))
     } else {
         // PostgreSQL mode — PostgreSQL 模式
         let db = Database::connect(config).await?;
@@ -904,11 +1151,91 @@ async fn init_proxy_and_admin(
             }
         }
 
-        // Full data load from DB — 从 DB 全量加载初始数据
-        let all_params = PageParams {
-            size: 1000,
-            ..Default::default()
+        let default_workspace_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM workspaces WHERE name = 'default' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(db.pool())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("默认 workspace 不存在，无法启动 Admin 与 AI 服务"))?;
+        let (pg_budget_store, pg_budget_owner_store, pg_budget_admin_store) =
+            if config.role.is_traditional() {
+                let hot_pool = Database::connect_primary_pool(
+                    config,
+                    config.ai_budget_pg_pool_size,
+                    config.pg_timeout,
+                )
+                .await?;
+                let owner_pool = Database::connect_primary_pool(
+                    config,
+                    config.ai_budget_heartbeat_pg_pool_size,
+                    config.pg_timeout,
+                )
+                .await?;
+                let admin_pool = Database::connect_primary_pool(
+                    config,
+                    config.ai_budget_admin_pg_pool_size,
+                    config.pg_timeout,
+                )
+                .await?;
+                (
+                    Some(build_pg_budget_store(config, hot_pool)?),
+                    Some(build_pg_budget_store(config, owner_pool)?),
+                    Some(build_pg_budget_store(config, admin_pool)?),
+                )
+            } else {
+                (None, None, None)
+            };
+        let enforcement_runtime = if let Some(store) = pg_budget_store.as_ref() {
+            match build_pg_budget_runtime(
+                config,
+                Arc::clone(store),
+                Arc::clone(
+                    pg_budget_owner_store
+                        .as_ref()
+                        .expect("traditional budget owner store"),
+                ),
+                node_id,
+                Arc::clone(&price_catalog),
+            )
+            .await
+            {
+                Ok(budget_runtime) => {
+                    tracing::info!(
+                        owner_session_id = %budget_runtime.owner_session_id,
+                        "AI budget owner 已注册"
+                    );
+                    build_ai_enforcement_runtime(config, Some(budget_runtime))?
+                }
+                Err(error) => {
+                    tracing::error!("AI budget owner 注册失败，预算请求将 fail closed: {error}");
+                    build_ai_enforcement_runtime(config, None)?
+                }
+            }
+        } else {
+            build_ai_enforcement_runtime(config, None)?
         };
+        let budget_background = pg_budget_store
+            .as_ref()
+            .map(|store| AiBudgetBackgroundRuntime {
+                enforcement: Arc::clone(&enforcement_runtime),
+                store: Arc::clone(store),
+                owner_store: Arc::clone(
+                    pg_budget_owner_store
+                        .as_ref()
+                        .expect("traditional budget owner store"),
+                ),
+                catalog: Arc::clone(&price_catalog),
+                node_id,
+                registry_capacity: config.ai_budget_active_intent_capacity,
+                stale_after: std::time::Duration::from_secs(
+                    config.ai_budget_intent_stale_grace_seconds,
+                ),
+                owner_lease: std::time::Duration::from_secs(config.ai_budget_owner_lease_seconds),
+                max_concurrent_admissions: config.ai_budget_max_concurrent_ops as usize,
+                operation_timeout: std::time::Duration::from_millis(
+                    config.ai_budget_operation_timeout_ms,
+                ),
+            });
 
         let routes_dao = PgDao::<Route>::new(db.clone(), route_schema());
         let services_dao = PgDao::<Service>::new(db.clone(), service_schema());
@@ -918,48 +1245,46 @@ async fn init_proxy_and_admin(
         let certificates_dao = PgDao::<Certificate>::new(db.clone(), certificate_schema());
         let snis_dao = PgDao::<Sni>::new(db.clone(), sni_schema());
         let ca_certificates_dao = PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema());
-        let (ai_usage, usage_writer_runner, lifecycle_observers) = if config.role.is_traditional() {
-            let default_workspace_id: uuid::Uuid = sqlx::query_scalar(
-                "SELECT id FROM workspaces WHERE name = 'default' ORDER BY id LIMIT 1",
-            )
-            .fetch_optional(db.pool())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("默认 workspace 不存在，无法启动 AI usage analytics"))?;
-            let pg_store = Arc::new(kong_ai::usage::PgAiUsageStore::new(db.pool().clone()));
-            let usage_store: Arc<dyn kong_ai::usage::AiUsageStore> = pg_store;
-            let (writer, runner) = kong_ai::usage::AiUsageWriter::channel_with_shutdown(
-                Arc::clone(&usage_store),
-                config.ai_usage_queue_capacity,
-                config.ai_usage_batch_size,
-                std::time::Duration::from_millis(config.ai_usage_flush_interval_ms),
-                std::time::Duration::from_millis(config.ai_usage_shutdown_timeout_ms),
-            )
-            .map_err(anyhow::Error::msg)?;
-            let stats = writer.stats();
-            let catalog =
-                Arc::new(kong_ai::usage::PriceCatalog::builtin().map_err(anyhow::Error::msg)?);
-            let collector = Arc::new(kong_ai::usage::AiUsageCollector::new(
-                writer,
-                catalog,
-                node_id,
-                default_workspace_id,
-            ));
-            (
-                kong_ai::usage::AiUsageRuntime::Supported {
-                    store: usage_store,
+        let (ai_usage, usage_writer_runner, mut lifecycle_observers) =
+            if config.role.is_traditional() {
+                let pg_store = Arc::new(kong_ai::usage::PgAiUsageStore::new(db.pool().clone()));
+                let usage_store: Arc<dyn kong_ai::usage::AiUsageStore> = pg_store;
+                let (writer, runner) = kong_ai::usage::AiUsageWriter::channel_with_shutdown(
+                    Arc::clone(&usage_store),
+                    config.ai_usage_queue_capacity,
+                    config.ai_usage_batch_size,
+                    std::time::Duration::from_millis(config.ai_usage_flush_interval_ms),
+                    std::time::Duration::from_millis(config.ai_usage_shutdown_timeout_ms),
+                )
+                .map_err(anyhow::Error::msg)?;
+                let stats = writer.stats();
+                let collector = Arc::new(kong_ai::usage::AiUsageCollector::new(
+                    writer,
+                    Arc::clone(&price_catalog),
+                    node_id,
                     default_workspace_id,
-                    stats,
-                },
-                Some(runner),
-                vec![collector as Arc<dyn kong_plugin_system::RequestLifecycleObserver>],
-            )
-        } else {
-            (
-                kong_ai::usage::AiUsageRuntime::UnsupportedHybrid,
-                None,
-                Vec::new(),
-            )
-        };
+                ));
+                (
+                    kong_ai::usage::AiUsageRuntime::Supported {
+                        store: usage_store,
+                        default_workspace_id,
+                        stats,
+                    },
+                    Some(runner),
+                    vec![collector as Arc<dyn kong_plugin_system::RequestLifecycleObserver>],
+                )
+            } else {
+                (
+                    kong_ai::usage::AiUsageRuntime::UnsupportedHybrid,
+                    None,
+                    Vec::new(),
+                )
+            };
+        lifecycle_observers.insert(
+            0,
+            Arc::new(kong_ai::enforcement::AiPolicyChainObserver::new())
+                as Arc<dyn kong_plugin_system::RequestLifecycleObserver>,
+        );
         let ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>> =
             Arc::new(PgDao::<kong_ai::models::AiProviderConfig>::new(
                 db.clone(),
@@ -970,9 +1295,12 @@ async fn init_proxy_and_admin(
                 db.clone(),
                 ai_model_schema(),
             ));
+        // Virtual Key 同时承载配额与预算策略。Admin 写入后认证热路径必须立即读到
+        // primary 的新值，不能因只读副本延迟重新缓存旧策略。
+        let ai_virtual_key_primary_db = Database::from_pool(db.pool().clone());
         let ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>> =
             Arc::new(PgDao::<kong_ai::models::AiVirtualKey>::new(
-                db.clone(),
+                ai_virtual_key_primary_db,
                 ai_virtual_key_schema(),
             ));
         // Shared by the ai-key-auth plugin and the Admin API (cache invalidation)
@@ -985,47 +1313,107 @@ async fn init_proxy_and_admin(
             Arc::clone(&ai_models),
             Arc::clone(&ai_providers),
             Arc::clone(&virtual_key_auth),
+            Arc::clone(&enforcement_runtime),
         );
 
-        let routes_page = routes_dao.page(&all_params).await?;
-        let services_page = services_dao.page(&all_params).await?;
-        let upstreams_page = upstreams_dao.page(&all_params).await?;
-        let targets_page = targets_dao.page(&all_params).await?;
-        let plugins_page = plugins_dao.page(&all_params).await?;
-        let certificates_page = certificates_dao.page(&all_params).await?;
-        let snis_page = snis_dao.page(&all_params).await?;
-        let ca_certificates_page = ca_certificates_dao.page(&all_params).await?;
+        let (routes, services, upstreams, targets, plugins, certificates, snis, ca_certificates) =
+            tokio::try_join!(
+                load_all_entities(&routes_dao),
+                load_all_entities(&services_dao),
+                load_all_entities(&upstreams_dao),
+                load_all_entities(&targets_dao),
+                load_all_entities(&plugins_dao),
+                load_all_entities(&certificates_dao),
+                load_all_entities(&snis_dao),
+                load_all_entities(&ca_certificates_dao),
+            )?;
 
         tracing::info!(
             "从数据库加载: {} routes, {} services, {} upstreams, {} targets, {} plugins, {} certs, {} CAs",
-            routes_page.data.len(),
-            services_page.data.len(),
-            upstreams_page.data.len(),
-            targets_page.data.len(),
-            plugins_page.data.len(),
-            certificates_page.data.len(),
-            ca_certificates_page.data.len(),
+            routes.len(),
+            services.len(),
+            upstreams.len(),
+            targets.len(),
+            plugins.len(),
+            certificates.len(),
+            ca_certificates.len(),
         );
+        let ai_policy_coverage = Arc::new(std::sync::RwLock::new(
+            kong_admin::ai_policy_coverage::AiPolicyCoverageIndex::build(
+                &routes,
+                &services,
+                &plugins,
+                default_workspace_id,
+            ),
+        ));
 
         // Build CertificateManager and load certificates — 构建 CertificateManager 并加载证书
         let cert_manager = kong_proxy::tls::CertificateManager::new();
-        cert_manager.load_certificates(&certificates_page.data, &snis_page.data);
+        cert_manager.load_certificates(&certificates, &snis);
+
+        let mut dispatch_hooks: Vec<Arc<dyn kong_plugin_system::RequestDispatchHook>> = Vec::new();
+        let mut dispatch_abort_handlers: Vec<
+            Arc<dyn kong_plugin_system::RequestDispatchAbortHandler>,
+        > = Vec::new();
+        let mut request_finalizers: Vec<Arc<dyn kong_plugin_system::RequestFinalizer>> = Vec::new();
+        if pg_budget_store.is_some() {
+            dispatch_hooks.push(Arc::new(kong_ai::enforcement::AiBudgetDispatchHook::new(
+                Arc::clone(&enforcement_runtime),
+            )));
+            dispatch_abort_handlers.push(Arc::new(
+                kong_ai::enforcement::AiBudgetDispatchAbortCompensator::new(Arc::clone(
+                    &enforcement_runtime,
+                )),
+            ));
+            request_finalizers.push(Arc::new(kong_ai::enforcement::AiBudgetFinalizer::new(
+                Arc::clone(&enforcement_runtime),
+            )));
+        }
+        dispatch_abort_handlers.push(Arc::new(
+            kong_ai::enforcement::AiQuotaDispatchAbortCompensator::new(Arc::clone(
+                &enforcement_runtime,
+            )),
+        ));
+        request_finalizers.push(Arc::new(kong_ai::enforcement::AiRateLimitFinalizer::new(
+            Arc::clone(&enforcement_runtime),
+        )));
 
         // Build KongProxy and populate data — 构建 KongProxy 并填充数据
         let kong_proxy = kong_proxy::KongProxy::new(
-            &routes_page.data,
+            &routes,
             &config.router_flavor,
             plugin_registry,
             cert_manager,
-            ca_certificates_page.data.clone(),
+            ca_certificates.clone(),
             dns_resolver,
             Arc::clone(config),
         )
-        .with_lifecycle_observers(lifecycle_observers);
-        kong_proxy.update_services(services_page.data);
-        kong_proxy.update_upstreams(upstreams_page.data, targets_page.data);
-        kong_proxy.update_plugins(plugins_page.data);
+        .with_lifecycle_observers(lifecycle_observers)
+        .try_with_async_lifecycle_hooks(
+            dispatch_hooks,
+            dispatch_abort_handlers,
+            request_finalizers,
+            kong_plugin_system::LifecycleHookTimeouts {
+                dispatch: std::time::Duration::from_millis(config.ai_lifecycle_dispatch_timeout_ms),
+                abort_compensation: std::time::Duration::from_millis(
+                    config.ai_lifecycle_abort_timeout_ms,
+                ),
+                finalizer: std::time::Duration::from_millis(
+                    config.ai_lifecycle_finalizer_timeout_ms,
+                ),
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        kong_proxy.update_services(services);
+        kong_proxy.update_upstreams(upstreams, targets);
+        kong_proxy.update_plugins(plugins);
 
+        let ai_budget_governance = pg_budget_admin_store
+            .as_ref()
+            .map(|store| Arc::clone(store) as Arc<dyn kong_ai::budget::BudgetAccountGovernance>);
+        let ai_budget_admin = pg_budget_admin_store
+            .as_ref()
+            .map(|store| Arc::clone(store) as Arc<dyn kong_ai::budget::BudgetAdminStore>);
         let admin_state = kong_admin::AdminState {
             services: Arc::new(PgDao::<Service>::new(db.clone(), service_schema())),
             routes: Arc::new(PgDao::<Route>::new(db.clone(), route_schema())),
@@ -1045,6 +1433,11 @@ async fn init_proxy_and_admin(
             ai_providers,
             ai_models,
             ai_virtual_keys,
+            ai_enforcement: Arc::clone(&enforcement_runtime),
+            ai_policy_coverage,
+            default_workspace_id,
+            ai_budget_governance,
+            ai_budget_admin,
             virtual_key_auth,
             node_id,
             config: Arc::clone(config),
@@ -1062,7 +1455,13 @@ async fn init_proxy_and_admin(
             ai_usage,
         };
 
-        Ok((kong_proxy, admin_state, refresh_rx, usage_writer_runner))
+        Ok((
+            kong_proxy,
+            admin_state,
+            refresh_rx,
+            usage_writer_runner,
+            budget_background,
+        ))
     }
 }
 
@@ -1080,6 +1479,257 @@ impl pingora_core::services::background::BackgroundService for AiUsageWriterBgSe
             runner.run(shutdown).await;
             tracing::info!("AI usage writer 已停止");
         }
+    }
+}
+
+struct AiBudgetOwnerBgService {
+    enforcement: Arc<kong_ai::enforcement::AiEnforcementRuntime>,
+    store: Arc<kong_ai::budget::PgBudgetStore>,
+    owner_store: Arc<kong_ai::budget::PgBudgetStore>,
+    catalog: Arc<kong_ai::usage::PriceCatalog>,
+    node_id: uuid::Uuid,
+    registry_capacity: usize,
+    stale_after: std::time::Duration,
+    owner_lease: std::time::Duration,
+    max_concurrent_admissions: usize,
+    operation_timeout: std::time::Duration,
+    heartbeat_interval: std::time::Duration,
+    recovery_scan_batch: usize,
+    checkpoint_interval: std::time::Duration,
+    checkpoint_soft_tail_events: i64,
+}
+
+impl AiBudgetOwnerBgService {
+    async fn register_owner_runtime(
+        &self,
+    ) -> anyhow::Result<kong_ai::enforcement::SupportedBudgetRuntime> {
+        let session_id = uuid::Uuid::now_v7();
+        kong_ai::budget::BudgetStore::register_owner(
+            self.owner_store.as_ref(),
+            kong_ai::budget::RegisterBudgetOwner {
+                session_id,
+                node_id: self.node_id,
+                lease_duration: self.owner_lease,
+            },
+        )
+        .await?;
+        let registry =
+            kong_ai::enforcement::ActiveBudgetIntentRegistry::new(self.registry_capacity)
+                .map_err(|error| anyhow::anyhow!("无法创建预算活动 intent registry: {error}"))?;
+        let store: Arc<dyn kong_ai::budget::BudgetStore> = self.store.clone();
+        let owner_store: Arc<dyn kong_ai::budget::BudgetStore> = self.owner_store.clone();
+        kong_ai::enforcement::SupportedBudgetRuntime::new(
+            store,
+            owner_store,
+            Arc::clone(&self.catalog),
+            registry,
+            self.node_id,
+            session_id,
+            self.stale_after,
+            self.owner_lease,
+            self.max_concurrent_admissions,
+            self.operation_timeout,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
+    async fn ensure_owner_runtime(
+        &self,
+    ) -> Option<Arc<kong_ai::enforcement::SupportedBudgetRuntime>> {
+        if let Some(runtime) = self.enforcement.budget_runtime_any() {
+            if runtime.owner_available() {
+                return Some(runtime);
+            }
+            // 旧 session 的活动 intent 必须先由 maintenance 收口；不能把尚未完成的
+            // guard 直接换到新 session，避免同一请求出现双 owner。
+            if !runtime.registry.is_empty() {
+                return None;
+            }
+        }
+
+        match self.register_owner_runtime().await {
+            Ok(runtime) => {
+                let runtime = self.enforcement.install_supported_budget(runtime);
+                tracing::info!(
+                    owner_session_id = %runtime.owner_session_id,
+                    "AI budget owner 已重新注册并恢复预算准入"
+                );
+                Some(runtime)
+            }
+            Err(error) => {
+                tracing::error!("AI budget owner 重注册失败，预算请求继续 fail closed: {error}");
+                None
+            }
+        }
+    }
+
+    async fn run_owner_heartbeat(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        let mut heartbeat = tokio::time::interval(self.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    let Some(runtime) = self.ensure_owner_runtime().await else {
+                        continue;
+                    };
+                    let result = runtime.owner_store.heartbeat_owner(
+                        kong_ai::budget::HeartbeatBudgetOwner {
+                            session_id: runtime.owner_session_id,
+                            node_id: runtime.node_id,
+                            lease_duration: runtime.owner_lease,
+                        }
+                    ).await;
+                    match result {
+                        Ok(_) => runtime.set_owner_available(true),
+                        Err(error) => {
+                            runtime.set_owner_available(false);
+                            tracing::error!(
+                                owner_session_id = %runtime.owner_session_id,
+                                "AI budget owner heartbeat 失败，新的预算准入已关闭: {error}"
+                            );
+                        }
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_maintenance(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        let mut recovery = tokio::time::interval(self.heartbeat_interval);
+        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut checkpoint = tokio::time::interval(self.checkpoint_interval);
+        checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = recovery.tick() => {
+                    if let Some(runtime) = self.enforcement.budget_runtime_any() {
+                        match tokio::time::timeout(
+                            self.heartbeat_interval,
+                            kong_ai::enforcement::recover_budget_registry_once(
+                                &runtime,
+                                self.recovery_scan_batch,
+                            ),
+                        ).await {
+                            Ok(batch) if batch.failed > 0 => tracing::error!(
+                                scanned = batch.scanned,
+                                settled = batch.settled,
+                                failed = batch.failed,
+                                "AI budget 本地 intent 恢复存在失败，将在下一轮重试"
+                            ),
+                            Ok(batch) if batch.scanned > 0 => tracing::info!(
+                                scanned = batch.scanned,
+                                settled = batch.settled,
+                                "AI budget 本地 intent 恢复完成"
+                            ),
+                            Ok(_) => {}
+                            Err(_) => tracing::warn!(
+                                timeout_ms = self.heartbeat_interval.as_millis(),
+                                "AI budget 本地 intent 恢复批次超时，剩余条目将在下一轮重试"
+                            ),
+                        }
+                    }
+
+                    match kong_ai::budget::BudgetStore::recover_stale(
+                        self.store.as_ref(),
+                        kong_ai::budget::RecoverStaleBudgetIntents {
+                            max_intents: self.recovery_scan_batch as u32,
+                        },
+                    ).await {
+                        Ok(batch) if batch.scanned > 0 => tracing::info!(
+                            scanned = batch.scanned,
+                            settled_not_incurred = batch.settled_not_incurred,
+                            marked_unresolved = batch.marked_unresolved,
+                            "AI budget 失联 owner intent 恢复完成"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => tracing::error!("AI budget stale recovery 失败: {error}"),
+                    }
+                }
+                _ = checkpoint.tick() => {
+                    match self.store.checkpoint_due_accounts(
+                        self.checkpoint_soft_tail_events,
+                        self.recovery_scan_batch as u32,
+                    ).await {
+                        Ok(batch) if batch.scanned > 0 => tracing::info!(
+                            scanned = batch.scanned,
+                            checkpointed = batch.checkpointed,
+                            skipped = batch.skipped_below_soft_tail,
+                            failed = batch.failed,
+                            "AI budget checkpoint 批次完成"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => tracing::error!("AI budget checkpoint runner 失败: {error}"),
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown_owner(&self) {
+        let Some(runtime) = self.enforcement.budget_runtime_any() else {
+            return;
+        };
+        for _ in 0..3 {
+            let recovery = tokio::time::timeout(
+                self.heartbeat_interval,
+                kong_ai::enforcement::recover_budget_registry_once(
+                    &runtime,
+                    self.recovery_scan_batch,
+                ),
+            )
+            .await;
+            match recovery {
+                Ok(batch) if batch.scanned == 0 => break,
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        "关闭时 AI budget 本地 intent 恢复超时，将等待 owner lease 自然过期"
+                    );
+                    break;
+                }
+            }
+        }
+        if runtime.registry.is_empty() {
+            if let Err(error) = runtime
+                .owner_store
+                .stop_owner(kong_ai::budget::StopBudgetOwner {
+                    session_id: runtime.owner_session_id,
+                    node_id: runtime.node_id,
+                })
+                .await
+            {
+                tracing::warn!("停止 AI budget owner 失败，将等待 lease 自然过期: {error}");
+            }
+        } else {
+            tracing::warn!(
+                active_intents = runtime.registry.len(),
+                "关闭时仍有活动预算 intent，不提前停止 owner，将等待 lease 自然过期"
+            );
+        }
+        runtime.set_owner_available(false);
+    }
+}
+
+#[async_trait::async_trait]
+impl pingora_core::services::background::BackgroundService for AiBudgetOwnerBgService {
+    async fn start(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
+        // heartbeat 使用独立 owner pool 和独立调度 loop。慢 recovery/checkpoint
+        // 不能延后续租，否则长流请求会被其他节点误判为失联 intent。
+        tokio::join!(
+            self.run_owner_heartbeat(shutdown.clone()),
+            self.run_maintenance(shutdown),
+        );
+        self.shutdown_owner().await;
     }
 }
 
@@ -2094,7 +2744,6 @@ async fn start_tls_server(
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use hyper_util::server::conn::auto::Builder as HttpBuilder;
     use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
-    use tower::ServiceExt;
 
     // Build OpenSSL acceptor with ALPN h2 — 构建带 ALPN h2 的 OpenSSL acceptor
     let mut acceptor_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;

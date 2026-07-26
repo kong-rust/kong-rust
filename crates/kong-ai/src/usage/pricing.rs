@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::models::AiModel;
 
 use super::model::{CostStatus, PriceSnapshot, PricingStatus, TokenField, UsageSource};
 
@@ -253,6 +255,51 @@ pub fn model_override_version(
     format!("model:{model_id}:{revision}:{direction}:{price_hash}")
 }
 
+/// 从实际选中的 Model 冻结覆盖价及其稳定版本。
+pub fn model_price_overrides(
+    model: &AiModel,
+    provider_type: &str,
+    actual_model: &str,
+    fallback_effective_from: DateTime<Utc>,
+) -> ModelPriceOverrides {
+    let model_id = (!model.id.is_nil()).then(|| model.id.to_string());
+    let effective_from = model
+        .updated_at
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
+        .or_else(|| {
+            model
+                .created_at
+                .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
+        })
+        .unwrap_or(fallback_effective_from);
+    ModelPriceOverrides {
+        input: model.input_cost,
+        output: model.output_cost,
+        input_version: model.input_cost.map(|rate| {
+            model_override_version(
+                model_id.as_deref(),
+                Some(effective_from),
+                provider_type,
+                actual_model,
+                PriceDirection::Input,
+                rate,
+            )
+        }),
+        output_version: model.output_cost.map(|rate| {
+            model_override_version(
+                model_id.as_deref(),
+                Some(effective_from),
+                provider_type,
+                actual_model,
+                PriceDirection::Output,
+                rate,
+            )
+        }),
+        version: None,
+        effective_from: Some(effective_from),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PricingFeatures {
     pub provider_cache_tokens: bool,
@@ -379,6 +426,29 @@ impl PriceCatalog {
             };
         }
 
+        self.resolve_snapshot(
+            provider_type,
+            model,
+            started_at,
+            prompt_tokens,
+            overrides,
+            features,
+        )
+    }
+
+    /// 在真正尝试上游之前冻结计价快照。
+    ///
+    /// 是否已经发生上游调用只影响最终成本状态，不应阻止预算 preflight
+    /// 验证当前模型是否具备可安全结算的价格。
+    pub fn resolve_snapshot(
+        &self,
+        provider_type: &str,
+        model: &str,
+        started_at: DateTime<Utc>,
+        prompt_tokens: Option<i64>,
+        overrides: &ModelPriceOverrides,
+        features: &PricingFeatures,
+    ) -> ResolvedPricing {
         let entry = self.find_entry(provider_type, model, started_at);
         let input_override_version = overrides
             .input_version
@@ -1010,6 +1080,34 @@ mod tests {
         );
         assert_eq!(pricing.status, PricingStatus::Unmatched);
         assert!(pricing.input.is_none());
+    }
+
+    #[test]
+    fn pre_dispatch_snapshot_resolves_without_claiming_cost_was_incurred() {
+        let catalog = PriceCatalog::builtin().unwrap();
+        let snapshot = catalog.resolve_snapshot(
+            "openai",
+            "gpt-5.6-sol",
+            started_at(),
+            Some(100),
+            &ModelPriceOverrides::default(),
+            &PricingFeatures::default(),
+        );
+        let final_pricing = catalog.resolve(
+            "openai",
+            "gpt-5.6-sol",
+            started_at(),
+            Some(100),
+            &ModelPriceOverrides::default(),
+            &PricingFeatures::default(),
+            false,
+        );
+
+        assert_eq!(snapshot.status, PricingStatus::Matched);
+        assert!(snapshot.input.is_some());
+        assert!(snapshot.output.is_some());
+        assert_eq!(final_pricing.status, PricingStatus::NotApplicable);
+        assert!(final_pricing.input.is_none());
     }
 
     #[test]

@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 rust_decimal = { workspace = true }
+num-bigint = { workspace = true }
 url = { workspace = true }
 gethostname = { workspace = true }
 mime = { workspace = true }
@@ -33,3 +34,6 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 serde_yaml = { workspace = true }
 openssl = "0.10"
+
+[dev-dependencies]
+async-trait = { workspace = true }

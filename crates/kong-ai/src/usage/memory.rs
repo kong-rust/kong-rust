@@ -343,6 +343,7 @@ mod tests {
             usage_unavailable_reasons: vec!["not_attempted".to_string()],
             input_price: None,
             output_price: None,
+            pricing_fingerprint: None,
             pricing_status: PricingStatus::NotApplicable,
             pricing_unsupported_reasons: Vec::new(),
             cost_usd: Some(Decimal::ZERO),

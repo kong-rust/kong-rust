@@ -70,6 +70,36 @@ impl Database {
         Ok(Self { pool, ro_pool })
     }
 
+    /// 为需要资源隔离的强一致子系统创建独立 primary pool。
+    pub async fn connect_primary_pool(
+        config: &KongConfig,
+        pool_size: u32,
+        acquire_timeout_ms: u64,
+    ) -> Result<PgPool> {
+        if config.is_dbless() {
+            return Err(KongError::DatabaseError(
+                "database=off 模式下不应创建数据库连接".to_string(),
+            ));
+        }
+        if pool_size == 0 || acquire_timeout_ms == 0 {
+            return Err(KongError::ConfigError(
+                "独立 PostgreSQL pool 的容量与 acquire timeout 必须为正数".to_string(),
+            ));
+        }
+        create_pool(
+            &config.pg_host,
+            config.pg_port,
+            &config.pg_database,
+            &config.pg_user,
+            config.pg_password.as_deref(),
+            config.pg_schema.as_deref(),
+            config.pg_ssl,
+            pool_size,
+            acquire_timeout_ms,
+        )
+        .await
+    }
+
     /// Get the read-write connection pool — 获取读写连接池
     pub fn pool(&self) -> &PgPool {
         &self.pool

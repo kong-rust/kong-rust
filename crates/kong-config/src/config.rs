@@ -246,6 +246,37 @@ pub struct KongConfig {
     /// DB-less 本节点内存事实 ring 容量。
     pub ai_usage_dbless_capacity: usize,
 
+    // ========== AI Enforcement — AI 配额与预算执行 ==========
+    /// 配额/预算后端共享的部署命名空间，不包含节点 ID。
+    pub ai_enforcement_namespace: String,
+    pub ai_quota_memory_max_buckets: usize,
+    pub ai_quota_memory_max_records: usize,
+    pub ai_quota_memory_max_records_per_bucket: usize,
+    pub ai_quota_memory_max_live_reservations: usize,
+    pub ai_quota_memory_recovery_headroom: usize,
+    pub ai_quota_max_request_lifetime_ms: u64,
+    pub ai_quota_settlement_retry_grace_ms: u64,
+    pub ai_quota_cleanup_interval_ms: u64,
+    pub ai_quota_cleanup_scan_batch: usize,
+    pub ai_lifecycle_dispatch_timeout_ms: u64,
+    pub ai_lifecycle_abort_timeout_ms: u64,
+    pub ai_lifecycle_finalizer_timeout_ms: u64,
+    pub ai_budget_pg_pool_size: u32,
+    pub ai_budget_heartbeat_pg_pool_size: u32,
+    pub ai_budget_admin_pg_pool_size: u32,
+    pub ai_budget_max_concurrent_ops: u32,
+    pub ai_budget_recovery_reserved_ops: u32,
+    pub ai_budget_recovery_scan_batch: u32,
+    pub ai_budget_operation_timeout_ms: u64,
+    pub ai_budget_lock_timeout_ms: u64,
+    pub ai_budget_owner_lease_seconds: u64,
+    pub ai_budget_owner_heartbeat_ms: u64,
+    pub ai_budget_intent_stale_grace_seconds: u64,
+    pub ai_budget_active_intent_capacity: usize,
+    pub ai_budget_checkpoint_interval_seconds: u64,
+    pub ai_budget_checkpoint_soft_tail_events: i64,
+    pub ai_budget_checkpoint_hard_tail_events: i64,
+
     // ========== Raw configuration data (for custom access) — 原始配置数据（用于自定义访问） ==========
     pub raw: HashMap<String, String>,
 }
@@ -468,6 +499,36 @@ impl Default for KongConfig {
             ai_usage_flush_interval_ms: 500,
             ai_usage_shutdown_timeout_ms: 5000,
             ai_usage_dbless_capacity: 10_000,
+
+            // AI Enforcement
+            ai_enforcement_namespace: "default".to_string(),
+            ai_quota_memory_max_buckets: 100_000,
+            ai_quota_memory_max_records: 2_000_000,
+            ai_quota_memory_max_records_per_bucket: 100_000,
+            ai_quota_memory_max_live_reservations: 200_000,
+            ai_quota_memory_recovery_headroom: 50_000,
+            ai_quota_max_request_lifetime_ms: 15 * 60 * 1_000,
+            ai_quota_settlement_retry_grace_ms: 5 * 60 * 1_000,
+            ai_quota_cleanup_interval_ms: 30_000,
+            ai_quota_cleanup_scan_batch: 4_096,
+            ai_lifecycle_dispatch_timeout_ms: 2_000,
+            ai_lifecycle_abort_timeout_ms: 2_000,
+            ai_lifecycle_finalizer_timeout_ms: 5_000,
+            ai_budget_pg_pool_size: 10,
+            ai_budget_heartbeat_pg_pool_size: 1,
+            ai_budget_admin_pg_pool_size: 2,
+            ai_budget_max_concurrent_ops: 8,
+            ai_budget_recovery_reserved_ops: 2,
+            ai_budget_recovery_scan_batch: 100,
+            ai_budget_operation_timeout_ms: 2_000,
+            ai_budget_lock_timeout_ms: 500,
+            ai_budget_owner_lease_seconds: 30,
+            ai_budget_owner_heartbeat_ms: 5_000,
+            ai_budget_intent_stale_grace_seconds: 60,
+            ai_budget_active_intent_capacity: 50_000,
+            ai_budget_checkpoint_interval_seconds: 60,
+            ai_budget_checkpoint_soft_tail_events: 10_000,
+            ai_budget_checkpoint_hard_tail_events: 100_000,
 
             // Raw data — 原始数据
             raw: HashMap::new(),
@@ -759,6 +820,88 @@ impl KongConfig {
                 self.ai_usage_dbless_capacity = value.parse().unwrap_or(0)
             }
 
+            // AI Enforcement
+            "ai_enforcement_namespace" => self.ai_enforcement_namespace = value.to_string(),
+            "ai_quota_memory_max_buckets" => {
+                self.ai_quota_memory_max_buckets = value.parse().unwrap_or(100_000)
+            }
+            "ai_quota_memory_max_records" => {
+                self.ai_quota_memory_max_records = value.parse().unwrap_or(2_000_000)
+            }
+            "ai_quota_memory_max_records_per_bucket" => {
+                self.ai_quota_memory_max_records_per_bucket = value.parse().unwrap_or(100_000)
+            }
+            "ai_quota_memory_max_live_reservations" => {
+                self.ai_quota_memory_max_live_reservations = value.parse().unwrap_or(200_000)
+            }
+            "ai_quota_memory_recovery_headroom" => {
+                self.ai_quota_memory_recovery_headroom = value.parse().unwrap_or(50_000)
+            }
+            "ai_quota_max_request_lifetime_ms" => {
+                self.ai_quota_max_request_lifetime_ms = value.parse().unwrap_or(15 * 60 * 1_000)
+            }
+            "ai_quota_settlement_retry_grace_ms" => {
+                self.ai_quota_settlement_retry_grace_ms = value.parse().unwrap_or(5 * 60 * 1_000)
+            }
+            "ai_quota_cleanup_interval_ms" => {
+                self.ai_quota_cleanup_interval_ms = value.parse().unwrap_or(30_000)
+            }
+            "ai_quota_cleanup_scan_batch" => {
+                self.ai_quota_cleanup_scan_batch = value.parse().unwrap_or(4_096)
+            }
+            "ai_lifecycle_dispatch_timeout_ms" => {
+                self.ai_lifecycle_dispatch_timeout_ms = value.parse().unwrap_or(2_000)
+            }
+            "ai_lifecycle_abort_timeout_ms" => {
+                self.ai_lifecycle_abort_timeout_ms = value.parse().unwrap_or(2_000)
+            }
+            "ai_lifecycle_finalizer_timeout_ms" => {
+                self.ai_lifecycle_finalizer_timeout_ms = value.parse().unwrap_or(5_000)
+            }
+            "ai_budget_pg_pool_size" => self.ai_budget_pg_pool_size = value.parse().unwrap_or(10),
+            "ai_budget_heartbeat_pg_pool_size" => {
+                self.ai_budget_heartbeat_pg_pool_size = value.parse().unwrap_or(1)
+            }
+            "ai_budget_admin_pg_pool_size" => {
+                self.ai_budget_admin_pg_pool_size = value.parse().unwrap_or(2)
+            }
+            "ai_budget_max_concurrent_ops" => {
+                self.ai_budget_max_concurrent_ops = value.parse().unwrap_or(8)
+            }
+            "ai_budget_recovery_reserved_ops" => {
+                self.ai_budget_recovery_reserved_ops = value.parse().unwrap_or(2)
+            }
+            "ai_budget_recovery_scan_batch" => {
+                self.ai_budget_recovery_scan_batch = value.parse().unwrap_or(100)
+            }
+            "ai_budget_operation_timeout_ms" => {
+                self.ai_budget_operation_timeout_ms = value.parse().unwrap_or(2_000)
+            }
+            "ai_budget_lock_timeout_ms" => {
+                self.ai_budget_lock_timeout_ms = value.parse().unwrap_or(500)
+            }
+            "ai_budget_owner_lease_seconds" => {
+                self.ai_budget_owner_lease_seconds = value.parse().unwrap_or(30)
+            }
+            "ai_budget_owner_heartbeat_ms" => {
+                self.ai_budget_owner_heartbeat_ms = value.parse().unwrap_or(5_000)
+            }
+            "ai_budget_intent_stale_grace_seconds" => {
+                self.ai_budget_intent_stale_grace_seconds = value.parse().unwrap_or(60)
+            }
+            "ai_budget_active_intent_capacity" => {
+                self.ai_budget_active_intent_capacity = value.parse().unwrap_or(50_000)
+            }
+            "ai_budget_checkpoint_interval_seconds" => {
+                self.ai_budget_checkpoint_interval_seconds = value.parse().unwrap_or(60)
+            }
+            "ai_budget_checkpoint_soft_tail_events" => {
+                self.ai_budget_checkpoint_soft_tail_events = value.parse().unwrap_or(10_000)
+            }
+            "ai_budget_checkpoint_hard_tail_events" => {
+                self.ai_budget_checkpoint_hard_tail_events = value.parse().unwrap_or(100_000)
+            }
+
             // nginx_* dynamic directives — nginx_* 动态指令
             _ if key.starts_with("nginx_") => {
                 self.nginx_directives
@@ -883,6 +1026,8 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "ai-prompt-guard",
     // Kong-Rust native — virtual key authentication — Kong-Rust 原生 — 虚拟密钥认证
     "ai-key-auth",
+    // Kong-Rust native — AI request/token rate limiting — Kong-Rust 原生 — AI 请求/Token 限流
+    "ai-rate-limit",
     "ai-request-transformer",
     "ai-response-transformer",
     "proxy-cache",
@@ -1027,12 +1172,44 @@ mod tests {
     }
 
     #[test]
+    fn test_ai_enforcement_bounded_config_parsing() {
+        let mut config = KongConfig::default();
+        assert_eq!(config.ai_enforcement_namespace, "default");
+        assert_eq!(config.ai_quota_memory_max_records, 2_000_000);
+
+        config.set("ai_enforcement_namespace", "prod-cn");
+        config.set("ai_quota_memory_max_buckets", "2048");
+        config.set("ai_quota_memory_max_records", "4096");
+        config.set("ai_lifecycle_finalizer_timeout_ms", "9000");
+        config.set("ai_budget_owner_lease_seconds", "45");
+        config.set("ai_budget_owner_heartbeat_ms", "7000");
+        config.set("ai_budget_active_intent_capacity", "8192");
+        config.set("ai_budget_pg_pool_size", "20");
+        config.set("ai_budget_max_concurrent_ops", "16");
+        config.set("ai_budget_recovery_reserved_ops", "4");
+        config.set("ai_budget_checkpoint_soft_tail_events", "20000");
+
+        assert_eq!(config.ai_enforcement_namespace, "prod-cn");
+        assert_eq!(config.ai_quota_memory_max_buckets, 2048);
+        assert_eq!(config.ai_quota_memory_max_records, 4096);
+        assert_eq!(config.ai_lifecycle_finalizer_timeout_ms, 9000);
+        assert_eq!(config.ai_budget_owner_lease_seconds, 45);
+        assert_eq!(config.ai_budget_owner_heartbeat_ms, 7000);
+        assert_eq!(config.ai_budget_active_intent_capacity, 8192);
+        assert_eq!(config.ai_budget_pg_pool_size, 20);
+        assert_eq!(config.ai_budget_max_concurrent_ops, 16);
+        assert_eq!(config.ai_budget_recovery_reserved_ops, 4);
+        assert_eq!(config.ai_budget_checkpoint_soft_tail_events, 20_000);
+    }
+
+    #[test]
     fn test_loaded_plugins() {
         let mut config = KongConfig::default();
         config.plugins = vec!["bundled".to_string(), "my-custom-plugin".to_string()];
         let plugins = config.loaded_plugins();
         assert!(plugins.contains(&"cors".to_string()));
         assert!(plugins.contains(&"key-auth".to_string()));
+        assert!(plugins.contains(&"ai-rate-limit".to_string()));
         assert!(plugins.contains(&"my-custom-plugin".to_string()));
     }
 
