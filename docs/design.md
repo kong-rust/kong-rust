@@ -1028,11 +1028,16 @@ match config.role {
 
 ### 组件 10：kong-ai — AI Gateway
 
-**职责：** 提供 Rust 原生的 LLM 请求代理、provider 适配、协议转换、流式事件处理、模型组路由和 token 统计基础设施。`kong-server` 将 AI 插件与 Lua 插件并列注册到 `kong-plugin-system`；AI 热路径不经过 Lua 桥接。
+**职责：** 提供 Rust 原生的 LLM 请求代理、provider 适配、协议转换、流式事件处理、模型组路由、token 归一化与调用统计。`kong-server` 将 AI 插件与 Lua 插件并列注册到 `kong-plugin-system`；AI 热路径不经过 Lua 桥接。
 
 #### 10.1 数据实体与关系
 
-AI 实体使用通用 `Dao<T>` / `PgDao<T>` 和 DB-less DAO。PostgreSQL 表由 migration `002_ai_gateway` 创建，`004_ai_model_max_input_tokens` 为模型补充输入 token 上限。
+AI 配置实体使用通用 `Dao<T>` / `PgDao<T>` 和 DB-less DAO。PostgreSQL 表由
+migration `002_ai_gateway` 创建，`004_ai_model_max_input_tokens` 为模型补充输入
+token 上限；migration `006_ai_usage_logs` 将 Model 价格迁移到
+`NUMERIC(28,12)`，并新增独立的请求级事实表 `ai_usage_logs`。事实表不对 Route、
+Service、Provider、Model、Virtual Key 或 Consumer 建外键，删除配置实体不会级联
+删除历史事实。
 
 | 实体 | 当前字段 | 关系与用途 |
 |------|----------|------------|
@@ -1114,7 +1119,7 @@ driver.transform_stream_event()
 
 Token usage 优先采用 provider 响应值。选定 provider/model 后，`TokenizerRegistry` 可使用远端 count API、HuggingFace tokenizer 或 tiktoken，并受单请求 deadline 约束；不可用或超时时降级为字符估算，该结果用于 TPM 预扣和请求上下文。数据库 model group 必须在 provider 选定前完成候选过滤，因此 `max_input_tokens` 当前使用规范化 `ChatRequest` 的 provider 无关字符估值。
 
-#### 10.4 插件顺序与当前生命周期
+#### 10.4 插件顺序与请求生命周期
 
 同名插件配置先按关联范围解析，再按 handler priority 降序执行。当前 AI 插件顺序为：
 
@@ -1126,7 +1131,22 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 | 771 | `ai-rate-limit` | `access`：内存 60 秒窗口的 RPM/TPM 原子预扣；`log`：用实际 usage 修正 TPM |
 | 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
 
-插件间通过 `RequestCtx.extensions` 传递类型化的 `AiAuthContext`、`AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
+插件间通过 `RequestCtx.extensions` 传递类型化的 `AiAuthContext`、
+`AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、
+model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
+
+代理同时维护与插件无关的 `RequestLifecycle`，以单一 request ID、UTC 起点和单调
+时钟覆盖 Route/Service 快照、策略短路、上游尝试、上下游状态、transport error
+与最终发送结果。`kong-plugin-system::RequestLifecycleObserver` 在有效插件链解析后
+和请求 finalizing 时同步回调；traditional 模式下
+`kong-ai::usage::AiUsageCollector` 作为 observer，仅为包含启用 `ai-proxy` 的链
+建立草稿。该收口不依赖普通插件 `log` 的执行顺序，因此 access 早期拒绝、解析/
+选模失败、上游错误、客户端断开和流中断也可生成一条事实。
+
+collector 的 finalize 幂等且不执行 I/O：它归一化 usage、解析请求时价格、用
+Decimal 计算成本，把最终 `AiUsageFact` 放回 extensions 供 `ai-proxy.log` 复用，
+随后只执行一次有界 `try_send`。`ai-proxy.logging.log_statistics=false` 仍只关闭
+Kong 兼容序列化日志，不关闭调用事实采集。
 
 `kong-plugin-system` 的解析器支持 Global / Service / Route / Consumer 关联，同名配置由更具体关联覆盖；但是当前代理链在 Consumer 身份可用前以 `consumer_id=None` 构建，因此运行时实际生效的是 Global / Service / Route 配置，Consumer 级 AI 插件配置尚未接入动态重解析。`ai-key-auth` 会在 access 阶段写入 `ctx.consumer_id`，因此同一请求内的下游插件（如 `ai-rate-limit` 的 `limit_by=consumer`）能读到 Consumer 身份，但插件链本身不会因此重新解析。
 
@@ -1137,21 +1157,39 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 | Provider | `GET/POST /ai-providers`; `GET/PATCH/PUT/DELETE /ai-providers/{id_or_name}`; `GET /ai-providers/{id}/ai-models` |
 | Model | `GET/POST /ai-models`; `GET/PATCH/PUT/DELETE /ai-models/{id}`; `GET /ai-model-groups` |
 | Virtual Key | `GET/POST /ai-virtual-keys`; `GET/PATCH/DELETE /ai-virtual-keys/{id_or_name}`; `POST /ai-virtual-keys/{id}/rotate` |
+| Usage | `GET /ai-usage`; `GET /ai-usage/summary` |
 
-创建或轮换 virtual key 时生成 `sk-kr-...` 明文，只在该次响应返回；持久化内容是 SHA-256 `key_hash` 和可识别的 `key_prefix`。列表、查询和更新响应不返回 `key_hash`。AI 实体在 PostgreSQL 和 DB-less 启动路径中都注入 Admin state；`ai-proxy` 共享相同的 model/provider DAO。
+创建或轮换 virtual key 时生成 `sk-kr-...` 明文，只在该次响应返回；持久化内容是
+SHA-256 `key_hash` 和可识别的 `key_prefix`。列表、查询和更新响应不返回
+`key_hash`。AI 实体在 PostgreSQL 和 DB-less 启动路径中都注入 Admin state；
+`ai-proxy` 共享相同的 model/provider DAO。
+
+`/ai-usage` 与 `/ai-usage/summary` 使用严格的独立 query parser，不接受未知或
+重复参数，也不允许调用方选择 workspace。两者共享 `[start,end)`、精确过滤器与
+snapshot 水位；明细以 `(started_at,id)` 倒序复合游标分页，summary 每次只允许一种
+时间或分类 breakdown。`AiUsageRuntime::UnsupportedHybrid` 在 query 解析前固定
+返回 501，避免 Hybrid 被表示为一组伪造的零值。
+
+Model 公共响应保持原有 number 类型的 `input_cost/output_cost`，同时新增 12 位
+字符串 `input_cost_decimal/output_cost_decimal` 与服务端解析的
+`effective_pricing`；Manager 不复制价表匹配算法。
 
 #### 10.6 Kong Manager 管理页面
 
 Kong Manager 主菜单将 **AI Gateway** 作为左侧第一个入口，Overview 紧随其后。
 `/ai-gateway` 默认展示
-AI Endpoint 聚合视图，二级导航提供 AI 接口、服务商连接、高级模型和虚拟密钥：
+AI Endpoint 聚合视图，二级导航提供 AI 接口、服务商连接、调用统计、高级模型和
+虚拟密钥：
 
 - AI 接口页面以单页表单编排 Provider、Model、Service、Route 和 route-scoped
   `ai-proxy` Plugin，提供完整地址、状态、模型流量摘要、配置、删除和测试操作。
 - Provider 和 Model 页面使用结构化字段管理类型、地址、凭据、模型、权重、成本和
   token 上限；常规创建和编辑页面不显示可编辑 JSON。
-- Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并明确标注
-  它当前只是管理元数据，尚未接入代理认证和配额执行。
+- Virtual Key 页面显示一次性明文、要求先 dismiss 才能继续创建或轮换，并可按
+  `virtual_key_id` 下钻调用统计；预算扣减仍不由 analytics 事实执行。
+- 调用统计包含“用量分析”和“调用日志”：前者展示可计算成本、已知 token 小计与
+  覆盖率、原生 SVG 趋势和模型/Virtual Key 排行，后者展示可过滤、稳定分页的
+  元数据事实与详情。
 - Manager 顶部提供全局 English / 简体中文切换，侧栏、Overview、实体页面标题、
   提示、详情页签和 AI Gateway 共用同一语言状态。没有保存过选择时，
   `navigator.language` 以 `zh` 开头则默认中文，否则默认英文；用户选择以
@@ -1186,7 +1224,8 @@ AI Gateway 默认导航调整为：
 
 1. **AI 接口**：默认入口，列出已发布 Endpoint，并提供创建、测试、复制地址和查看配置操作。
 2. **服务商连接**：管理可复用的 Provider 连接和凭据，使用结构化表单。
-3. **调用统计**：在 AI analytics 能力交付后展示；未接入前不展示空壳入口。
+3. **调用统计**：展示真实 Admin API 数据，并明确区分 PostgreSQL、DB-less 与
+   Hybrid 能力状态。
 4. **高级资源**：容纳 Models、Virtual Keys 及相关 Routes/Plugins 的专家视图。
 
 Endpoint 列表卡片只突出用户决策所需的信息：名称、方法和完整调用路径、运行状态、模型池摘要以及测试/复制/配置操作。Provider ID、Plugin ID、`model_group` 等实现字段不出现在默认视图。
@@ -1296,24 +1335,110 @@ Provider 凭据遵循以下规则：
 - 发布后可以在同一页面复制地址并完成一次真实代理请求。
 - Providers、Models、Routes、Plugins 和 AI 运行时职责保持不变；Endpoint 层只提供投影、表单适配和发布编排。
 
-#### 10.7 可观测性
+#### 10.7 调用事实、计价与专用 Store
+
+`kong-ai::usage` 是 analytics 领域边界，包含：
+
+```text
+collector       生命周期草稿、结果分类与事实定稿
+normalizer      OpenAI / Anthropic / Gemini usage 标准化
+pricing         版本化静态价表、Model 分方向覆盖与 Decimal 成本
+cursor          snapshot / offset 编解码、filter hash 与严格校验
+store           AiUsageStore、共享汇总口径与时区桶计划
+postgres        批量持久化、稳定读取与 PostgreSQL 查询
+memory          DB-less 有界 ring、淘汰 generation 与本节点查询
+writer          bounded mpsc、定时/按量 flush、重试、关闭 drain 与指标
+```
+
+配置实体继续使用通用 `Dao<T>`；usage 不复用该抽象，因为事实查询需要时间窗、
+倒序复合游标、批写、稳定 snapshot、高精度聚合和 breakdown。`AiUsageStore`
+统一 `snapshot/list/summary/insert_batch` 契约，PG 与 Memory 返回同一 API DTO。
+
+一次 AI 客户端请求只有一条事实，当前 `attempt_count` 为 0 或 1。事实保存
+Route/Service、provider/model、Virtual Key/Consumer 的请求时快照，标准化
+prompt/completion/total usage 及来源，reasoning/cache breakdown，分方向价格
+快照、最终成本、状态/outcome、E2E、TTFT、stream 与 cache status。无 Route 的
+404 和不含 `ai-proxy` 的普通代理请求不创建事实。
+
+Provider 官方 usage 优先，未知字段保持 null；只有 prompt 与 completion 均已知时
+才派生 total。OpenAI 保留官方 total 和 cached/reasoning 明细；Anthropic prompt
+包含 input/cache-creation/cache-read，stream output 取最后累计值；Gemini
+completion 包含 candidate + thinking 并另存 thinking/cache breakdown。请求级
+`usage_source` 区分 `provider/estimated/mixed/unavailable`。
+
+价格以 USD / 1M tokens 表示，input/output 分方向执行 Model 显式覆盖 > 内置价表 >
+unmatched；`openai_compat` 不继承 OpenAI 价格。价表以
+`crates/kong-ai/src/usage/data/model_prices.json` 编译进二进制，包含版本、官方
+来源、快照日、有效期与条件。单价和成本全程使用 `Decimal`，PG 使用
+`NUMERIC(28,12)`，新增 API 返回固定 12 位字符串。事实固化每个方向的来源、版本、
+快照日与有效期，历史成本不随配置或价表更新漂移。
+
+定价状态为 `matched/unmatched/unsupported/not_applicable`，成本状态为
+`calculated/estimated/not_incurred/unavailable`。Provider cache、非标准 service
+tier、内置工具、非文本模态、附加计价以及未覆盖的长上下文阶梯不会按基础价格伪装
+成完整成本；usage 仍保存，pricing 标为 unsupported，cost 保持 unavailable 并带
+机器可读原因。
+
+summary 同时返回 token 已知小计、known/unknown 请求数与 coverage，可计算成本
+小计、完整状态计数、outcome、平均/P95 延迟及可选 breakdown。金额和可能超过
+`i64` 的 token 聚合使用 BigDecimal/BigInt 语义，避免浏览器或数据库浮点求和。
+时间桶由 `chrono-tz` 生成真实 IANA 时区边界，覆盖 DST 的 23/25 小时日与重复小时。
+
+运行模式明确分叉：
+
+| 模式 | collector / writer | Store 与 API |
+|---|---|---|
+| traditional + PostgreSQL | 启用，后台批写 | 持久 `ai_usage_logs`，`ephemeral=false` |
+| traditional + DB-less | 启用 | 本节点有界内存 ring，容量淘汰、重启清空 |
+| control plane / data plane | 禁用 | 不上传、不聚合；Admin 可达时返回 501 |
+
+PG writer 在代理热路径之外按 256 条或 500ms flush，有界队列默认 8192；批写事务
+使用 advisory lock 使已提交 `MAX(ingest_seq)` 成为安全 snapshot 水位，并以
+`UNIQUE(request_id)` 提供落库幂等。失败采用有界重试，队列满或 receiver 关闭时
+立即丢弃事实而不背压代理。DB-less 默认保留 10000 条，snapshot 同时绑定写入水位、
+淘汰 generation 和 Store instance；淘汰或重启后返回 409，不继续提供可能缺页的
+结果。
+
+五项 `kong.conf` 配置为
+`ai_usage_queue_capacity=8192`、`ai_usage_batch_size=256`、
+`ai_usage_flush_interval_ms=500`、`ai_usage_shutdown_timeout_ms=5000` 和
+`ai_usage_dbless_capacity=10000`。所有值必须大于 0，且 batch 不得大于 queue；
+校验失败会中止启动。
+
+analytics 事实、API、cursor、Manager 和 writer 日志只包含元数据，不保存 prompt、
+响应正文、请求/响应 header、Authorization、`x-api-key`、Provider auth、
+Virtual Key 明文或 `key_hash`。首版 PG 表没有自动 retention、partition、archive、
+export 或 delete API，会持续增长；查询窗口上限 90 天不等于数据保留期。
+
+#### 10.8 可观测性
 
 - `ai-proxy.log` 合并 `ai.proxy.{provider,model,route_type,stream}`、`ai.usage.{prompt_tokens,completion_tokens,total_tokens}` 和 `ai.latency.e2e_ms` 到 `ctx.log_serialize`，供现有日志插件消费。
 - Responses 路径返回 `X-Kong-AI-Route-Type: responses-pass-through|responses-translation`；成功转换的非流式 Chat 响应返回 `X-Kong-LLM-Model`。
-- 流式状态记录 TTFT 供请求内使用，但当前序列化日志尚未输出 TTFT/TPOT。
-- 当前没有 AI analytics Admin API、AI 专用持久化统计表或 `kong_ai_*` Prometheus 指标；不能把通用 `log_serialize` 集成视为这些能力已经交付。
+- 流式状态记录 TTFT 并固化到 usage fact；现有兼容序列化日志仍不承诺 TPOT。
+- `/status` 的 `ai_usage_writer` 暴露入队、写入、重复、丢失、写失败、重试、
+  DB-less 淘汰和队列深度；启用 Prometheus status endpoint 时追加
+  `kong_ai_usage_writer_*` counter/gauge。Provider 级 LLM 请求/延迟指标仍由
+  REQ-AI-004 单独交付。
 
-#### 10.8 当前限制与延期项
+#### 10.9 当前限制与延期项
 
 - `ai-cache` 只有 cache key/skip-header 基础设施；Redis 读写、命中短路、回写和语义缓存未实现。
 - `ai-rate-limit` 只有进程内窗口；`limit_by=virtual_key` 当前退化为 global，尚未查询实体级 TPM/RPM 或 budget。Redis 分布式限流未实现。
-- Virtual Key 的请求认证已由 `ai-key-auth` 插件（priority 774）接入：校验 enabled、expiry 和 allowed models（支持末尾 `*` 前缀通配），并注入 `AiAuthContext`、`consumer_id` 与 `authenticated_credential`。仍未接入的是预算扣减与成本追踪 —— `calculate_cost` 与 `AiVirtualKeyExt` 扩展 DAO trait 已定义，但未连接代理 log 生命周期。
+- Virtual Key 的请求认证已由 `ai-key-auth` 插件（priority 774）接入：校验
+  enabled、expiry 和 allowed models（支持末尾 `*` 前缀通配），并注入
+  `AiAuthContext`、`consumer_id` 与 `authenticated_credential`。调用统计可关联
+  Virtual Key，但 `budget_used` 累加、原子预算扣减与拒绝仍由 REQ-AI-003 交付；
+  best-effort usage fact 不能承担硬预算账本。
 - Hybrid 模式 CP→DP 配置同步不包含任何 AI 实体，因此 DP 节点上没有 Virtual Key 数据，`ai-key-auth` 在 DP 上无法认证。
 - Prompt Guard 当前只有正则/长度规则；语义 guard、embedding 检测和分类评分未实现。
 - Model balancer 已实现 priority、weight、token-size 过滤和健康冷却结构，但 `ai-proxy` 尚未回报成功/失败，也未使用插件配置中的 `retries`，因此运行时没有跨 provider 失败重试或健康 fallback。
 - 数据库 model group 的 `max_input_tokens` 预路由过滤使用 provider 无关字符估值；选定 provider/model 后才执行 `TokenizerRegistry` 的精细计数。临界阈值附近可能保守或乐观选模。
 - `ai-proxy` 接受 `timeout`、`model_name_header`、`log_payloads` 和 `log_statistics` 配置字段，但这些开关尚未完整驱动运行时行为；连接和读写超时仍主要服从 Service/Pingora 配置。
-- Workspace-scoped AI model/provider 解析、Consumer 级插件动态选择、专用 analytics/Prometheus、MCP Gateway 和 Agent Gateway 均为后续工作。
+- 调用统计首版仅查询 default workspace；DB-less 不跨节点聚合，Hybrid 不做
+  DP→CP 上传；provider 账单对账、自动保留/分区/归档/导出/删除、多币种和附加
+  计价均为后续工作。
+- Workspace-scoped AI model/provider 解析、Consumer 级插件动态选择、Provider 级
+  AI Prometheus、MCP Gateway 和 Agent Gateway 均为后续工作。
 
 ## 错误处理
 

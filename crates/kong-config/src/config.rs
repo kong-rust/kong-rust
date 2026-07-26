@@ -234,6 +234,18 @@ pub struct KongConfig {
     /// Gemini API key(为空时 Gemini 永远走字符估算)
     pub ai_tokenizer_gemini_api_key: Option<String>,
 
+    // ========== AI Usage Analytics — AI 调用统计 ==========
+    /// 请求热路径到后台 writer 的有界队列容量。
+    pub ai_usage_queue_capacity: usize,
+    /// 单次后台批写最大事实数。
+    pub ai_usage_batch_size: usize,
+    /// 未满批次的最大等待时间（毫秒）。
+    pub ai_usage_flush_interval_ms: u64,
+    /// 优雅关闭时 writer 的 drain 上限（毫秒）。
+    pub ai_usage_shutdown_timeout_ms: u64,
+    /// DB-less 本节点内存事实 ring 容量。
+    pub ai_usage_dbless_capacity: usize,
+
     // ========== Raw configuration data (for custom access) — 原始配置数据（用于自定义访问） ==========
     pub raw: HashMap<String, String>,
 }
@@ -450,6 +462,13 @@ impl Default for KongConfig {
             ai_tokenizer_gemini_endpoint: None,
             ai_tokenizer_gemini_api_key: None,
 
+            // AI Usage Analytics
+            ai_usage_queue_capacity: 8192,
+            ai_usage_batch_size: 256,
+            ai_usage_flush_interval_ms: 500,
+            ai_usage_shutdown_timeout_ms: 5000,
+            ai_usage_dbless_capacity: 10_000,
+
             // Raw data — 原始数据
             raw: HashMap::new(),
         }
@@ -539,15 +558,13 @@ impl KongConfig {
             // DB-less mode — 无数据库模式
             "declarative_config" => self.declarative_config = none_if_empty(value),
             "declarative_config_string" => self.declarative_config_string = none_if_empty(value),
-            "role" => {
-                match value.parse::<ClusterRole>() {
-                    Ok(role) => self.role = role,
-                    Err(e) => {
-                        tracing::error!("无效的 role 值: {} — Invalid role value: {}", e, e);
-                        return;
-                    }
+            "role" => match value.parse::<ClusterRole>() {
+                Ok(role) => self.role = role,
+                Err(e) => {
+                    tracing::error!("无效的 role 值: {} — Invalid role value: {}", e, e);
+                    return;
                 }
-            }
+            },
 
             // Cache — 缓存
             "mem_cache_size" => self.mem_cache_size = value.to_string(),
@@ -727,6 +744,19 @@ impl KongConfig {
             }
             "ai_tokenizer_gemini_api_key" => {
                 self.ai_tokenizer_gemini_api_key = none_if_empty(value)
+            }
+
+            // AI Usage Analytics — AI 调用统计
+            "ai_usage_queue_capacity" => self.ai_usage_queue_capacity = value.parse().unwrap_or(0),
+            "ai_usage_batch_size" => self.ai_usage_batch_size = value.parse().unwrap_or(0),
+            "ai_usage_flush_interval_ms" => {
+                self.ai_usage_flush_interval_ms = value.parse().unwrap_or(0)
+            }
+            "ai_usage_shutdown_timeout_ms" => {
+                self.ai_usage_shutdown_timeout_ms = value.parse().unwrap_or(0)
+            }
+            "ai_usage_dbless_capacity" => {
+                self.ai_usage_dbless_capacity = value.parse().unwrap_or(0)
             }
 
             // nginx_* dynamic directives — nginx_* 动态指令

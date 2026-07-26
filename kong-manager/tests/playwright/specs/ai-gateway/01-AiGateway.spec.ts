@@ -345,11 +345,33 @@ test.describe('AI Gateway manager', () => {
     })
     await page.getByLabel('Provider Model Name').fill('pw-model')
     await page.getByLabel('Max Input Tokens').fill('64000')
+    await page.getByLabel('Custom input override (USD / 1M tokens)').fill('0')
+    await page.getByLabel('Custom output override (USD / 1M tokens)').fill('1.250000000000')
+    await expect(page.getByText(
+      'Leave blank to use the current built-in price; enter 0 to make this direction free.',
+    )).toHaveCount(2)
     await page.getByRole('button', { name: 'Save Model' }).click()
 
-    const modelRow = page.getByRole('row').filter({ hasText: advancedModelGroup })
+    let modelRow = page.getByRole('row').filter({ hasText: advancedModelGroup })
     await expect(modelRow).toContainText('64000')
+    await expect(modelRow).toContainText('$0 / 1M tokens')
+    await expect(modelRow).toContainText('$1.25 / 1M tokens')
+    await expect(modelRow).toContainText('Custom override')
+
+    await modelRow.getByRole('button', { name: 'View Usage' }).click()
+    await expect(page).toHaveURL(/\/ai-gateway\/usage/)
+    const modelUsageQuery = new URL(page.url()).searchParams
+    expect(modelUsageQuery.get('model_group')).toBe(advancedModelGroup)
+    expect(modelUsageQuery.get('actual_model')).toBe('pw-model')
+    expect(modelUsageQuery.get('provider_id')).toBeTruthy()
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: 'AI Models' })).toBeVisible()
+
+    modelRow = page.getByRole('row').filter({ hasText: advancedModelGroup })
     await modelRow.getByRole('button', { name: 'Edit' }).click()
+    await expect(page.getByLabel('Custom input override (USD / 1M tokens)'))
+      .toHaveValue(/^0(?:\.0+)?$/)
+    await expect(page.getByText('Effective pricing', { exact: true })).toBeVisible()
     await page.getByLabel('Provider Model Name').fill('pw-model-v2')
     await page.getByLabel('Max Input Tokens').fill('128000')
     await page.getByRole('button', { name: 'Save Model' }).click()
@@ -375,7 +397,7 @@ test.describe('AI Gateway manager', () => {
 
   test('supports virtual-key CRUD and one-time secret rotation', async ({ page }) => {
     await page.goto('/ai-gateway/virtual-keys')
-    await expect(page.getByText(/management metadata only/)).toBeVisible()
+    await expect(page.getByText(/Keys authenticate proxy traffic/)).toBeVisible()
     await page.getByRole('button', { name: 'Create Virtual Key' }).click()
     await page.getByLabel('Name').fill(virtualKeyName)
     await page.getByLabel('Allowed Models').fill('model-a, model-b')
@@ -388,19 +410,26 @@ test.describe('AI Gateway manager', () => {
     await page.getByRole('button', { name: 'Dismiss' }).click()
 
     const keyRow = page.getByRole('row').filter({ hasText: virtualKeyName })
-    await keyRow.getByRole('button', { name: 'Edit' }).click()
+    await keyRow.getByRole('button', { name: 'View Usage' }).click()
+    await expect(page).toHaveURL(/\/ai-gateway\/usage/)
+    expect(new URL(page.url()).searchParams.get('virtual_key_id')).toBeTruthy()
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: 'AI Virtual Keys' })).toBeVisible()
+
+    const returnedKeyRow = page.getByRole('row').filter({ hasText: virtualKeyName })
+    await returnedKeyRow.getByRole('button', { name: 'Edit' }).click()
     await page.getByLabel('TPM Limit').fill('2000')
     await page.getByRole('button', { name: 'Save Virtual Key' }).click()
-    await expect(keyRow).toContainText('2000 TPM')
+    await expect(returnedKeyRow).toContainText('2000 TPM')
 
-    await keyRow.getByRole('button', { name: 'Rotate' }).click()
+    await returnedKeyRow.getByRole('button', { name: 'Rotate' }).click()
     const rotatedSecret = await page.locator('.ai-gateway-secret input').inputValue()
     expect(rotatedSecret).toMatch(/^sk-kr-/)
     expect(rotatedSecret).not.toBe(createdSecret)
 
     await page.getByRole('button', { name: 'Dismiss' }).click()
-    await keyRow.getByRole('button', { name: 'Delete' }).click()
-    await expect(keyRow).toBeHidden()
+    await returnedKeyRow.getByRole('button', { name: 'Delete' }).click()
+    await expect(returnedKeyRow).toBeHidden()
   })
 
   test('uses the Kong Rust brand and supports persistent bilingual switching on every page', async ({

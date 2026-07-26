@@ -53,6 +53,34 @@ const routes: RouteRecordRaw[] = [
       title: 'AI Virtual Keys',
     },
   },
+  {
+    path: '/ai-gateway/usage',
+    component: () => import('@/pages/ai-gateway/usage/Usage.vue'),
+    meta: {
+      entity: 'ai-gateway',
+      title: 'AI Usage',
+    },
+    children: [
+      {
+        name: 'ai-usage-overview',
+        path: '',
+        component: () => import('@/pages/ai-gateway/usage/UsageOverview.vue'),
+        meta: {
+          entity: 'ai-gateway',
+          title: 'AI Usage Overview',
+        },
+      },
+      {
+        name: 'ai-usage-logs',
+        path: 'logs',
+        component: () => import('@/pages/ai-gateway/usage/UsageLogs.vue'),
+        meta: {
+          entity: 'ai-gateway',
+          title: 'AI Usage Logs',
+        },
+      },
+    ],
+  },
 
   // service pages
   {

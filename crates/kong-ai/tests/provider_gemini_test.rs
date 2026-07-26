@@ -163,7 +163,9 @@ fn test_gemini_transform_response_candidates() {
         "modelVersion": "gemini-1.5-pro-001"
     }"#;
 
-    let response = driver.transform_response(200, &headers, body, &model).unwrap();
+    let response = driver
+        .transform_response(200, &headers, body, &model)
+        .unwrap();
 
     assert_eq!(response.object, "chat.completion");
     assert_eq!(response.model, "gemini-1.5-pro-001");
@@ -212,7 +214,10 @@ fn test_gemini_configure_upstream_path_with_model() {
     assert_eq!(upstream.port, 443);
     assert!(upstream.path.contains("gemini-1.5-pro"));
     assert!(upstream.path.contains("generateContent"));
-    assert!(!upstream.path.contains("stream"), "非流式请求不应使用 streamGenerateContent");
+    assert!(
+        !upstream.path.contains("stream"),
+        "非流式请求不应使用 streamGenerateContent"
+    );
 
     // 流式请求应使用 :streamGenerateContent?alt=sse 端点
     let upstream_stream = driver.configure_upstream(&model, &config, true).unwrap();
@@ -250,6 +255,49 @@ fn test_gemini_extract_usage() {
     assert_eq!(usage.prompt_tokens, Some(15));
     assert_eq!(usage.completion_tokens, Some(5));
     assert_eq!(usage.total_tokens, Some(20));
+}
+
+#[test]
+fn test_gemini_missing_candidates_does_not_treat_thoughts_as_completion() {
+    let driver = GeminiDriver;
+    let body = serde_json::json!({
+        "usageMetadata": {
+            "promptTokenCount": 15,
+            "thoughtsTokenCount": 4,
+            "cachedContentTokenCount": 3,
+            "totalTokenCount": 19
+        }
+    })
+    .to_string();
+
+    let usage = driver.extract_usage(&body).unwrap();
+    assert_eq!(usage.prompt_tokens, Some(15));
+    assert_eq!(usage.completion_tokens, None);
+    assert_eq!(usage.reasoning_tokens, Some(4));
+    assert_eq!(usage.cache_read_input_tokens, Some(3));
+    assert_eq!(usage.total_tokens, Some(19));
+    assert!(!usage.invalid);
+}
+
+#[test]
+fn test_gemini_candidates_and_thoughts_overflow_invalidates_whole_usage() {
+    let driver = GeminiDriver;
+    let body = serde_json::json!({
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": i64::MAX,
+            "thoughtsTokenCount": 1
+        }
+    })
+    .to_string();
+
+    let usage = driver.extract_usage(&body).unwrap();
+    assert!(usage.invalid);
+    assert_eq!(usage.prompt_tokens, None);
+    assert_eq!(usage.completion_tokens, None);
+    assert_eq!(usage.total_tokens, None);
+    assert_eq!(usage.reasoning_tokens, None);
+    assert_eq!(usage.cache_read_input_tokens, None);
 }
 
 #[test]
@@ -298,13 +346,23 @@ fn test_gemini_extract_stream_usage() {
         event_type: "message".to_string(),
         data: r#"{
             "candidates": [{"content": {"parts": [{"text": "Hi"}], "role": "model"}}],
-            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}
-        }"#.to_string(),
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 2,
+                "cachedContentTokenCount": 3,
+                "totalTokenCount": 17
+            }
+        }"#
+        .to_string(),
         id: None,
     };
 
     let usage = driver.extract_stream_usage(&event).unwrap();
     assert_eq!(usage.prompt_tokens, Some(10));
-    assert_eq!(usage.completion_tokens, Some(5));
-    assert_eq!(usage.total_tokens, Some(15));
+    assert_eq!(usage.completion_tokens, Some(7));
+    assert_eq!(usage.reasoning_tokens, Some(2));
+    assert_eq!(usage.cache_read_input_tokens, Some(3));
+    assert_eq!(usage.total_tokens, Some(17));
+    assert!(!usage.invalid);
 }

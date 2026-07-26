@@ -15,6 +15,8 @@ This document is the user-facing guide for Kong-Rust AI Gateway, covering quick 
 7. [Plugin Combination Examples](#7-plugin-combination-examples)
 8. [Intelligent Model Routing](#8-intelligent-model-routing)
 9. [Supported Providers](#9-supported-providers)
+10. [Precise Prompt-Token Counting](#10-precise-prompt-token-counting-tokenizer-registry)
+11. [Usage Analytics and Cost Estimation](#11-usage-analytics-and-cost-estimation)
 
 ---
 
@@ -1038,3 +1040,224 @@ ai_tokenizer_gemini_api_key = AIzaSy...
 ### 10.7 by_token_size routing
 
 Set `AiModel.max_input_tokens` per model and the balancer's `select_for(prompt_tokens)` filters candidates that don't fit. When the entire priority tier is filtered out, it falls back to the next tier — short prompts route to small models for cost, long prompts auto-escalate.
+
+## 11. Usage Analytics and Cost Estimation
+
+Kong-Rust records one metadata-only usage fact for every request whose resolved Route
+plugin chain contains an enabled `ai-proxy`. This includes successful requests, gateway
+rejections, gateway failures, upstream failures, client disconnects, and interrupted
+streams. A request that does not match a Route, or whose plugin chain does not contain
+`ai-proxy`, is not counted.
+
+Usage analytics is an operational estimate, not a provider invoice, a lossless audit
+ledger, or the accounting path used to enforce a Virtual Key budget. The proxy path only
+attempts a non-blocking enqueue. A full queue, prolonged database outage, or process crash
+can lose facts; these events are exposed through writer status and metrics.
+
+### 11.1 Usage and result semantics
+
+Provider-reported usage takes precedence. When an official field is absent, Kong-Rust can
+use the request-side tokenizer estimate, and it derives `total_tokens` only when both
+prompt and completion values are known. An unknown value is `null`, never a fabricated
+zero.
+
+Provider fields are normalized as follows:
+
+- OpenAI and OpenAI-compatible use prompt/completion usage directly, retain official
+  totals, and preserve cached/reasoning breakdowns when reported.
+- Anthropic prompt usage includes input, cache-creation input, and cache-read input;
+  output uses the final cumulative output value.
+- Gemini completion includes candidate and thinking tokens; the thinking and cached
+  token counts are also retained as breakdowns.
+
+`usage.source` is `provider`, `estimated`, `mixed`, or `unavailable`. Result
+`outcome` is one of `success`, `gateway_rejected`, `gateway_error`,
+`upstream_error`, `client_disconnected`, or `stream_interrupted`. E2E latency covers
+the complete gateway lifecycle. TTFT is available only when a parseable first streaming
+event was observed. `cache_status` describes the Kong-Rust AI response cache and is one of
+`not_configured`, `unavailable`, `bypass`, `miss`, or `hit`; it does not describe a
+provider prompt cache.
+
+### 11.2 Exact prices and cost states
+
+Prices are USD per one million tokens. Input and output are resolved independently in
+this order:
+
+1. the corresponding AI Model override (`input_cost` or `output_cost`), including an
+   explicit zero;
+2. an exact model ID or explicit alias in the built-in, versioned price catalog;
+3. no match.
+
+`openai_compat` never inherits OpenAI prices automatically. Model create/update accepts
+an exact decimal string (legacy finite JSON numbers remain accepted for compatibility).
+`GET /ai-models` keeps the legacy numeric `input_cost` and `output_cost`, adds
+`input_cost_decimal` and `output_cost_decimal`, and returns server-resolved
+`effective_pricing`. Leave an override empty to use the catalog.
+
+The standard cost formula is:
+
+```text
+(prompt_tokens × input_price + completion_tokens × output_price) / 1,000,000
+```
+
+Rates and costs are calculated as Decimal values and API responses use 12 fractional
+digits, for example `"0.001100000000"`. The price version, snapshot date, and effective
+period used by a request are stored with the fact, so later Model or catalog changes do
+not rewrite historical cost.
+
+The bundled catalog version `2026-07-26.1` contains:
+
+| Provider | Model / explicit alias | Effective UTC | Input | Output |
+|---|---|---|---:|---:|
+| OpenAI | `gpt-5.6-sol` / `gpt-5.6` | from 2026-07-26 | 5.00 | 30.00 |
+| OpenAI | `gpt-5.6-terra` | from 2026-07-26 | 2.50 | 15.00 |
+| OpenAI | `gpt-5.6-luna` | from 2026-07-26 | 1.00 | 6.00 |
+| Anthropic | `claude-fable-5` | from 2026-07-26 | 10.00 | 50.00 |
+| Anthropic | `claude-opus-4-8` | from 2026-07-26 | 5.00 | 25.00 |
+| Anthropic | `claude-sonnet-5` | 2026-07-26 to 2026-09-01 | 2.00 | 10.00 |
+| Anthropic | `claude-sonnet-5` | from 2026-09-01 | 3.00 | 15.00 |
+| Anthropic | `claude-haiku-4-5-20251001` / `claude-haiku-4-5` | from 2026-07-26 | 1.00 | 5.00 |
+| Gemini | `gemini-3.6-flash` | from 2026-07-26 | 1.50 | 7.50 |
+| Gemini | `gemini-3.5-flash` | from 2026-07-26 | 1.50 | 9.00 |
+| Gemini | `gemini-3.5-flash-lite` | from 2026-07-26 | 0.30 | 2.50 |
+
+The three GPT-5.6 catalog entries support prompt usage up to 272,000 tokens. A larger
+request is `unsupported` unless both Model directions are explicitly overridden.
+Provider prompt-cache charges, non-standard service tiers, built-in tools, non-text
+modalities, and other additional pricing also remain `unsupported`; available token
+usage is retained, but the gateway does not report a partial cost as complete.
+
+`pricing.status` is `matched`, `unmatched`, `unsupported`, or `not_applicable`.
+`cost.status` is `calculated`, `estimated`, `not_incurred`, or `unavailable`.
+Machine-readable reason arrays explain unsupported or unavailable results. Only a request
+known not to have reached a provider has a zero, `not_incurred` cost; unknown cost is
+`null`.
+
+### 11.3 Admin API
+
+List request facts with `GET /ai-usage`:
+
+```bash
+curl -G http://localhost:8001/ai-usage \
+  --data-urlencode 'start=2026-07-25T00:00:00Z' \
+  --data-urlencode 'end=2026-07-26T00:00:00Z' \
+  --data-urlencode 'provider_type=openai' \
+  --data-urlencode 'size=100'
+```
+
+The default window is the most recent 24 hours. Explicit `start` and `end` must be
+provided together, use RFC 3339, follow `[start, end)`, and span at most 90 days.
+`size` defaults to 100 and is limited to 1–1000. Results are ordered by
+`(started_at DESC, id DESC)`.
+
+The first response returns opaque `snapshot` and `offset` values. Pass `offset` to obtain
+the next stable page; concurrent writes are intentionally excluded from that snapshot.
+Do not decode or construct cursor values in clients.
+
+Common exact filters are:
+
+```text
+request_id, route_id, service_id, provider_id, provider_type,
+requested_model, model_group, actual_model, virtual_key_id, consumer_id,
+status_code, outcome, stream, cache_status, usage_source,
+pricing_status, cost_status
+```
+
+`request_id` is an exact, case-sensitive 32-character lowercase hexadecimal value. The
+API always queries the default workspace and rejects `workspace_id`.
+
+Get totals and one optional breakdown with `GET /ai-usage/summary`:
+
+```bash
+curl -G http://localhost:8001/ai-usage/summary \
+  --data-urlencode 'start=2026-07-19T00:00:00Z' \
+  --data-urlencode 'end=2026-07-26T00:00:00Z' \
+  --data-urlencode 'breakdown=day' \
+  --data-urlencode 'timezone=Asia/Shanghai'
+```
+
+Breakdowns are `hour`, `day`, `provider`, `actual_model`, `model_group`,
+`virtual_key`, `route`, or `service`. Time breakdowns accept an IANA `timezone`;
+categorical breakdowns accept `limit` (default 10, maximum 100) and
+`order_by=cost_usd|total_tokens|requests`. Hour breakdowns are limited to 31 days.
+
+Summary token values are known subtotals and include known/unknown request counts and
+coverage. `cost_usd_calculable_sum` is only the calculable subtotal. Pricing and cost
+status counts show how much data is absent or unsupported, so neither value should be
+presented as a complete provider bill. Summary and detail can share the same `snapshot`
+for reconciliation.
+
+Both endpoints return `meta.mode`, `meta.ephemeral`, capacity, node, earliest-record, and
+restart semantics as applicable. Stable errors include:
+
+| HTTP | `error_code` | Meaning |
+|---:|---|---|
+| 400 | `analytics_invalid_query` | Invalid parameter, range, filter, or cursor |
+| 409 | `analytics_snapshot_expired` | A DB-less ring changed while paging |
+| 501 | `analytics_unsupported_in_hybrid` | Analytics is unavailable in CP/DP Hybrid |
+| 503 | `analytics_query_timeout` | The five-second query limit was reached |
+| 503 | `analytics_query_unavailable` | The Store is temporarily unavailable |
+
+### 11.4 Kong Manager
+
+Open **AI Gateway → Usage Analytics**. **Usage Analysis** provides 24-hour, 7-day,
+30-day, and custom ranges; calculable cost, requests, known token subtotals and coverage;
+cost/token trends; and top actual-model and Virtual Key rankings. **Call Logs** provides
+the metadata facts, exact filters, stable paging, and a detail view.
+
+Filters are stored in the URL, including the browser IANA timezone, so refresh, history,
+and shared links preserve the view. Model and Virtual Key tables offer **View usage**
+drill-down links. Unknown values display as `—`; a real zero remains distinguishable
+from an unpriced or unavailable value. DB-less and Hybrid states are shown explicitly
+instead of being rendered as zero activity.
+
+### 11.5 Runtime modes and configuration
+
+| Mode | Storage and query behavior |
+|---|---|
+| Traditional + PostgreSQL | Batched persistence in `ai_usage_logs`; `ephemeral=false` |
+| Traditional + `database=off` | This node's bounded in-memory ring; eviction at capacity and reset on restart |
+| Hybrid control/data plane | Collection and upload are disabled; Admin query returns 501 where available |
+
+DB-less does not write usage facts to the declarative configuration Store and does not
+aggregate across nodes. Its snapshot is conservatively invalidated after eviction, which
+returns 409 rather than a partial page.
+
+Configure the writer and DB-less ring in `kong.conf`:
+
+```ini
+ai_usage_queue_capacity = 8192
+ai_usage_batch_size = 256
+ai_usage_flush_interval_ms = 500
+ai_usage_shutdown_timeout_ms = 5000
+ai_usage_dbless_capacity = 10000
+```
+
+All five values must be greater than zero. `ai_usage_queue_capacity` and
+`ai_usage_dbless_capacity` are capped at `1000000`; `ai_usage_batch_size` is capped at
+`1129` and must not exceed the queue capacity. The batch cap keeps one PostgreSQL INSERT
+below the protocol parameter limit. Invalid values fail startup. PostgreSQL writes retry
+with bounded backoff, and graceful shutdown drains only within the configured timeout.
+
+`GET /status` includes `ai_usage_writer`. When the Prometheus status endpoint is enabled,
+it also exposes `kong_ai_usage_writer_*` counters and the `queue_depth` /
+`queue_capacity` gauges. Monitor at least dropped facts, queue-full drops, write failures,
+retry exhaustion, shutdown-timeout drops, and DB-less evictions.
+
+### 11.6 Privacy, retention, and operational limits
+
+Usage facts store metadata only. They do not contain prompts, response bodies,
+request/response headers, Authorization or API keys, provider authentication
+configuration, Virtual Key plaintext, or `key_hash`. A Virtual Key name and non-secret
+prefix may be stored for diagnosis. Facts keep Route, Service, Provider, Model, and
+identity snapshots so deleting those configuration entities does not erase history.
+
+The initial PostgreSQL implementation has no automatic retention, partitioning, archive,
+export, or deletion API. `ai_usage_logs` therefore grows continuously. Monitor table and
+index growth, database capacity, writer failures, and query latency; define external
+operational controls until a dedicated retention feature is delivered. API query windows
+are capped at 90 days, but that cap does not delete older data.
+
+The initial release also does not provide cross-node DB-less aggregation, Hybrid DP-to-CP
+upload, provider invoice reconciliation, discounts/taxes/multi-currency, or hard budget
+enforcement.

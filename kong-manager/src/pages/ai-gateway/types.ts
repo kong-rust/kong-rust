@@ -18,6 +18,31 @@ export interface AiProvider {
   tags?: string[] | null
 }
 
+export interface AiModelEffectivePrice {
+  amount: string
+  source: 'builtin' | 'override' | string
+  version: string
+  snapshot_date: string
+  effective_from?: string | null
+  effective_to?: string | null
+}
+
+export interface AiModelPricingCondition {
+  type: string
+  value: number | string
+}
+
+export interface AiModelEffectivePricing {
+  currency: string
+  unit: string
+  status: 'matched' | 'unmatched' | 'unsupported' | 'not_applicable' | string
+  catalog_version?: string | null
+  catalog_snapshot_date?: string | null
+  input: AiModelEffectivePrice | null
+  output: AiModelEffectivePrice | null
+  conditions: AiModelPricingCondition[]
+}
+
 export interface AiModel {
   id: string
   name: string
@@ -27,6 +52,9 @@ export interface AiModel {
   weight: number
   input_cost?: number | null
   output_cost?: number | null
+  input_cost_decimal?: string | null
+  output_cost_decimal?: string | null
+  effective_pricing?: AiModelEffectivePricing | null
   max_tokens?: number | null
   max_input_tokens?: number | null
   config: Record<string, unknown>

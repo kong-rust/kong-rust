@@ -23,6 +23,8 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+rust_decimal = { workspace = true }
 url = { workspace = true }
 gethostname = { workspace = true }
 mime = { workspace = true }

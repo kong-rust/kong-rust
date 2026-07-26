@@ -10,6 +10,7 @@ pub mod codec;
 pub mod token;
 pub mod ratelimit;
 pub mod plugins;
+pub mod usage;
 
 /// 解析插件配置 JSON — 统一错误处理
 pub fn parse_plugin_config<T: serde::de::DeserializeOwned>(

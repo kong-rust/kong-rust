@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use kong_core::error::{KongError, Result};
 use kong_core::models::Plugin;
-use kong_core::traits::{Phase, PluginConfig, PluginHandler, RequestCtx};
+use kong_core::traits::{LifecyclePhase, Phase, PluginConfig, PluginHandler, RequestCtx};
 use uuid::Uuid;
 
 /// Resolved plugin instance for runtime use — 已解析的插件实例 — 运行时使用
@@ -29,6 +29,23 @@ pub struct ResolvedPlugin {
     /// Associated consumer — 关联的 consumer
     pub consumer_id: Option<Uuid>,
 }
+
+pub mod lifecycle {
+    use kong_core::traits::RequestCtx;
+
+    use crate::ResolvedPlugin;
+
+    /// 同步、不可阻塞的请求生命周期观察器。
+    ///
+    /// 实现方只能更新请求内存状态；数据库或网络 I/O 必须放到请求路径之外。
+    pub trait RequestLifecycleObserver: Send + Sync {
+        fn on_plugins_resolved(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx);
+
+        fn on_request_finalizing(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx);
+    }
+}
+
+pub use lifecycle::RequestLifecycleObserver;
 
 /// Plugin registry — manages all registered plugin handlers — 插件注册表 — 管理所有已注册的插件 handler
 pub struct PluginRegistry {
@@ -147,6 +164,8 @@ impl PluginExecutor {
                 break;
             }
 
+            let was_short_circuited = ctx.is_short_circuited();
+            let termination_hint_before = ctx.lifecycle.termination_hint.clone();
             let result = match phase {
                 Phase::InitWorker => plugin.handler.init_worker(&plugin.config).await,
                 Phase::Certificate => plugin.handler.certificate(&plugin.config, ctx).await,
@@ -162,6 +181,12 @@ impl PluginExecutor {
             };
 
             if let Err(e) = result {
+                if phase != Phase::Log {
+                    ctx.lifecycle.mark_gateway_error(
+                        LifecyclePhase::from(phase),
+                        plugin.config.name.clone(),
+                    );
+                }
                 tracing::error!(
                     "插件 {} 在 {:?} 阶段执行失败: {}",
                     plugin.config.name,
@@ -172,6 +197,14 @@ impl PluginExecutor {
                     plugin_name: plugin.config.name.clone(),
                     message: e.to_string(),
                 });
+            }
+
+            if !was_short_circuited
+                && ctx.is_short_circuited()
+                && ctx.lifecycle.termination_hint == termination_hint_before
+            {
+                ctx.lifecycle
+                    .mark_policy_rejected(phase, plugin.config.name.clone());
             }
         }
 
@@ -190,12 +223,16 @@ impl PluginExecutor {
                 break;
             }
 
+            let was_short_circuited = ctx.is_short_circuited();
+            let termination_hint_before = ctx.lifecycle.termination_hint.clone();
             let result = plugin
                 .handler
                 .body_filter(&plugin.config, ctx, body, end_of_stream)
                 .await;
 
             if let Err(e) = result {
+                ctx.lifecycle
+                    .mark_gateway_error(LifecyclePhase::BodyFilter, plugin.config.name.clone());
                 tracing::error!(
                     "插件 {} 在 BodyFilter 阶段执行失败: {}",
                     plugin.config.name,
@@ -205,6 +242,14 @@ impl PluginExecutor {
                     plugin_name: plugin.config.name.clone(),
                     message: e.to_string(),
                 });
+            }
+
+            if !was_short_circuited
+                && ctx.is_short_circuited()
+                && ctx.lifecycle.termination_hint == termination_hint_before
+            {
+                ctx.lifecycle
+                    .mark_policy_rejected(Phase::BodyFilter, plugin.config.name.clone());
             }
         }
 

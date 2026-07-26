@@ -457,9 +457,8 @@ onMounted(() => {
   router
     .isReady()
     .then(() => {
-      // Only greet first-time visitors inside the AI Gateway section
-      // 仅在 AI 网关分区内向首次访问的用户展示
-      if (router.currentRoute.value.meta?.entity === 'ai-gateway') {
+      // 仅在接口首页自动展示；直达模型、密钥或用量页时不得被引导劫持路由。
+      if (router.currentRoute.value.name === 'ai-endpoint-list') {
         openIfFirstVisit()
       }
     })

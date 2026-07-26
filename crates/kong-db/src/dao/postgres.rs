@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::Row;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 use kong_core::error::{KongError, Result};
@@ -41,6 +43,8 @@ pub enum ColumnType {
     Integer,
     /// Float type — 浮点类型
     Float,
+    /// Fixed-point decimal type — 定点十进制类型
+    Decimal,
     /// Boolean type — 布尔类型
     Boolean,
     /// Timestamp (stored as TIMESTAMP WITH TIME ZONE, API returns epoch seconds) — 时间戳（存储为 TIMESTAMP WITH TIME ZONE，API 返回 epoch 秒）
@@ -192,6 +196,16 @@ impl EntitySchema {
         self.column(name, name, ColumnType::Float, true)
     }
 
+    /// Shortcut: add decimal column — 快捷方法: 添加定点十进制列
+    pub fn decimal(self, name: &str) -> Self {
+        self.column(name, name, ColumnType::Decimal, false)
+    }
+
+    /// Shortcut: add optional decimal column — 快捷方法: 添加可空定点十进制列
+    pub fn decimal_opt(self, name: &str) -> Self {
+        self.column(name, name, ColumnType::Decimal, true)
+    }
+
     /// Find column definition by JSON name — 查找列定义
     fn find_column(&self, json_name: &str) -> Option<&ColumnDef> {
         self.columns.iter().find(|c| c.json_name == json_name)
@@ -205,6 +219,84 @@ impl EntitySchema {
 }
 
 // ============ Helper functions — 辅助函数 ============
+
+/// `NUMERIC(28,12)` 可表示金额的绝对上界（不包含）。
+const DECIMAL_28_12_UPPER_BOUND: i128 = 10_000_000_000_000_000;
+
+fn normalize_decimal_28_12(value: Decimal) -> Result<Decimal> {
+    if value < Decimal::ZERO {
+        return Err(KongError::ValidationError(
+            "十进制字段不能为负数".to_string(),
+        ));
+    }
+
+    let normalized = value.normalize();
+    if normalized.scale() > 12 {
+        return Err(KongError::ValidationError(
+            "十进制字段最多支持 12 位小数".to_string(),
+        ));
+    }
+
+    let upper_bound = Decimal::from_i128_with_scale(DECIMAL_28_12_UPPER_BOUND, 0);
+    if normalized >= upper_bound {
+        return Err(KongError::ValidationError(
+            "十进制字段超出 NUMERIC(28,12) 范围".to_string(),
+        ));
+    }
+
+    let mut fixed = normalized;
+    fixed.rescale(12);
+    Ok(fixed)
+}
+
+fn trim_decimal_fraction_zeros(value: &str) -> Cow<'_, str> {
+    let exponent_index = value.find(['e', 'E']).unwrap_or(value.len());
+    let mantissa = &value[..exponent_index];
+    if !mantissa.contains('.') {
+        return Cow::Borrowed(value);
+    }
+
+    let trimmed_mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+    if trimmed_mantissa.len() == mantissa.len() {
+        return Cow::Borrowed(value);
+    }
+
+    let mut normalized = String::with_capacity(value.len());
+    if trimmed_mantissa.is_empty() || matches!(trimmed_mantissa, "+" | "-") {
+        normalized.push_str(trimmed_mantissa);
+        normalized.push('0');
+    } else {
+        normalized.push_str(trimmed_mantissa);
+    }
+    normalized.push_str(&value[exponent_index..]);
+    Cow::Owned(normalized)
+}
+
+fn parse_decimal_text(value: &str) -> Result<Decimal> {
+    let normalized = trim_decimal_fraction_zeros(value);
+    let parsed = if normalized.contains(['e', 'E']) {
+        Decimal::from_scientific(&normalized)
+    } else {
+        Decimal::from_str_exact(&normalized)
+    }
+    .map_err(|error| KongError::ValidationError(format!("十进制字段格式无效: {error}")))?;
+
+    normalize_decimal_28_12(parsed)
+}
+
+fn parse_decimal_json(value: &Value) -> Result<Decimal> {
+    match value {
+        Value::String(value) => parse_decimal_text(value),
+        Value::Number(value) => parse_decimal_text(&value.to_string()),
+        _ => Err(KongError::ValidationError(
+            "十进制字段必须是字符串或数字".to_string(),
+        )),
+    }
+}
+
+fn decimal_to_json(value: Decimal) -> Result<Value> {
+    normalize_decimal_28_12(value).map(|value| Value::String(value.to_string()))
+}
 
 /// Build a JSON object from PgRow and deserialize into an entity — 从 PgRow 构建 JSON 对象，然后反序列化为实体
 fn row_to_entity<T: Entity>(row: &PgRow, schema: &EntitySchema) -> Result<T> {
@@ -265,6 +357,14 @@ fn extract_column_value(row: &PgRow, col: &ColumnDef) -> Result<Value> {
                     .unwrap_or(Value::Null),
                 None => Value::Null,
             })
+        }
+        ColumnType::Decimal => {
+            let val: Option<Decimal> = row
+                .try_get(db_col)
+                .map_err(|e| KongError::DatabaseError(format!("列 {} 读取失败: {}", db_col, e)))?;
+            val.map(decimal_to_json)
+                .transpose()
+                .map(|value| value.unwrap_or(Value::Null))
         }
         ColumnType::Boolean => {
             let val: Option<bool> = row
@@ -372,6 +472,7 @@ pub enum SqlParam {
     Text(Option<String>),
     Integer(Option<i64>),
     Float(Option<f64>),
+    Decimal(Option<Decimal>),
     Boolean(Option<bool>),
     Jsonb(Option<Value>),
     TextArray(Option<Vec<String>>),
@@ -390,6 +491,7 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
             ColumnType::Text => SqlParam::Text(None),
             ColumnType::Integer => SqlParam::Integer(None),
             ColumnType::Float => SqlParam::Float(None),
+            ColumnType::Decimal => SqlParam::Decimal(None),
             ColumnType::Boolean => SqlParam::Boolean(None),
             ColumnType::Timestamp => SqlParam::TimestampEpoch(None),
             ColumnType::TimestampMs => SqlParam::TimestampEpochMs(None),
@@ -448,6 +550,7 @@ fn json_to_sql_param(value: &Value, col_type: &ColumnType) -> Result<SqlParam> {
                 .ok_or_else(|| KongError::ValidationError("浮点字段必须是数字".to_string()))?;
             Ok(SqlParam::Float(Some(n)))
         }
+        ColumnType::Decimal => Ok(SqlParam::Decimal(Some(parse_decimal_json(value)?))),
         ColumnType::Boolean => {
             let b = value
                 .as_bool()
@@ -650,7 +753,9 @@ impl<T: Entity> Dao<T> for PgDao<T> {
             &["custom_id", "username", "name", "host", "key_hash"];
 
         // Validate filter field names — 验证过滤字段名
-        let valid_filters: Vec<&(String, String)> = params.filters.iter()
+        let valid_filters: Vec<&(String, String)> = params
+            .filters
+            .iter()
             .filter(|(field, _)| ALLOWED_FILTER_COLUMNS.contains(&field.as_str()))
             .collect();
 
@@ -1098,6 +1203,7 @@ fn bind_param<'q>(
         SqlParam::Text(v) => query.bind(v),
         SqlParam::Integer(v) => query.bind(v),
         SqlParam::Float(v) => query.bind(v),
+        SqlParam::Decimal(v) => query.bind(v),
         SqlParam::Boolean(v) => query.bind(v),
         SqlParam::Jsonb(v) => query.bind(v),
         SqlParam::TextArray(v) => query.bind(v),
@@ -1123,9 +1229,7 @@ fn map_sqlx_error(err: sqlx::Error, entity_type: &str) -> KongError {
                 "23505" => {
                     // PostgreSQL constraint name format: {table}_{field}_key
                     // e.g. "consumers_username_key" → field = "username"
-                    let constraint = db_err
-                        .constraint()
-                        .unwrap_or("");
+                    let constraint = db_err.constraint().unwrap_or("");
                     let field = if !constraint.is_empty() {
                         // Strip table prefix and "_key" suffix
                         let without_prefix = constraint
@@ -1377,8 +1481,8 @@ pub fn ai_model_schema() -> EntitySchema {
         .text("model_name")
         .integer("priority")
         .integer("weight")
-        .float_opt("input_cost")
-        .float_opt("output_cost")
+        .decimal_opt("input_cost")
+        .decimal_opt("output_cost")
         .integer_opt("max_tokens")
         .integer_opt("max_input_tokens")
         .jsonb("config")
@@ -1409,7 +1513,8 @@ pub fn ai_virtual_key_schema() -> EntitySchema {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_model_schema, ColumnType};
+    use super::{ai_model_schema, decimal_to_json, json_to_sql_param, ColumnType, SqlParam};
+    use rust_decimal::Decimal;
 
     #[test]
     fn ai_model_schema_includes_max_input_tokens() {
@@ -1421,5 +1526,45 @@ mod tests {
         assert_eq!(column.db_column, "max_input_tokens");
         assert_eq!(column.col_type, ColumnType::Integer);
         assert!(column.nullable);
+    }
+
+    #[test]
+    fn ai_model_schema_uses_decimal_cost_columns() {
+        let schema = ai_model_schema();
+
+        for name in ["input_cost", "output_cost"] {
+            let column = schema.find_column(name).expect("cost must be persisted");
+            assert_eq!(column.col_type, ColumnType::Decimal);
+            assert!(column.nullable);
+        }
+    }
+
+    #[test]
+    fn decimal_sql_param_accepts_string_and_legacy_number() {
+        for value in [
+            serde_json::json!("1.250000000000"),
+            serde_json::json!(1.25),
+            serde_json::json!("9999999999999999.9999999999990"),
+        ] {
+            let param = json_to_sql_param(&value, &ColumnType::Decimal).unwrap();
+            assert!(matches!(param, SqlParam::Decimal(Some(_))));
+        }
+    }
+
+    #[test]
+    fn decimal_sql_param_rejects_lossy_or_out_of_range_values() {
+        for value in [
+            serde_json::json!("0.0000000000001"),
+            serde_json::json!(-1),
+            serde_json::json!("10000000000000000"),
+        ] {
+            assert!(json_to_sql_param(&value, &ColumnType::Decimal).is_err());
+        }
+    }
+
+    #[test]
+    fn decimal_database_value_is_rendered_with_fixed_scale() {
+        let value = decimal_to_json(Decimal::from_i128_with_scale(125, 2)).unwrap();
+        assert_eq!(value, "1.250000000000");
     }
 }

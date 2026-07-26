@@ -53,6 +53,9 @@ pub struct AdminState {
     pub ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>>,
     pub ai_models: Arc<dyn Dao<kong_ai::models::AiModel>>,
     pub ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>>,
+    /// AI usage query store and writer health, or an explicit unsupported Hybrid marker.
+    /// AI usage 查询 Store 与 writer 健康状态，或明确的 Hybrid 不支持标记。
+    pub ai_usage: kong_ai::usage::AiUsageRuntime,
     /// Virtual key authenticator shared with the ai-key-auth plugin — invalidated after key mutations
     /// 与 ai-key-auth 插件共享的虚拟密钥认证器 — 密钥变更后失效其缓存
     pub virtual_key_auth: Arc<kong_ai::auth::VirtualKeyAuthenticator>,
@@ -262,6 +265,7 @@ fn is_known_route(path: &str) -> bool {
         "/certificates", "/snis", "/ca_certificates", "/vaults", "/tags",
         "/key-sets", "/keys",
         "/ai-providers", "/ai-models", "/ai-model-groups", "/ai-virtual-keys",
+        "/ai-usage", "/ai-usage/summary",
         "/ai-endpoint-test",
         "/clustering/data-planes", "/clustering/status",
         "/cache", "/debug/node/log-level", "/timers",
@@ -319,7 +323,8 @@ fn is_known_route(path: &str) -> bool {
 fn determine_allowed_methods(path: &str) -> &'static str {
     // Read-only endpoints — 只读端点
     match path {
-        "/" | "/status" | "/endpoints" | "/plugins/enabled" => return "GET, HEAD, OPTIONS",
+        "/" | "/status" | "/endpoints" | "/plugins/enabled"
+        | "/ai-usage" | "/ai-usage/summary" => return "GET, HEAD, OPTIONS",
         _ => {}
     }
 
@@ -620,6 +625,9 @@ pub fn build_admin_router(state: AdminState) -> Router {
                 .delete(handlers::ai_models::delete_one),
         )
         .route("/ai-model-groups", get(handlers::ai_models::list_groups))
+        // AI usage analytics
+        .route("/ai-usage", get(handlers::ai_usage::list))
+        .route("/ai-usage/summary", get(handlers::ai_usage::summary))
         // AI Virtual Keys
         .route("/ai-virtual-keys", get(handlers::ai_virtual_keys::list).post(handlers::ai_virtual_keys::create))
         .route(

@@ -6,6 +6,7 @@ use crate::codec::{
 };
 use crate::models::{AiModel, AiProviderConfig, AuthConfig};
 use crate::provider::{AiDriver, ProviderRequest, TokenUsage, UpstreamConfig};
+use crate::usage::normalizer::anthropic_observation;
 use kong_core::error::{KongError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -153,10 +154,9 @@ impl AiDriver for AnthropicDriver {
             )));
         }
 
-        let resp: AnthropicApiResponse =
-            serde_json::from_str(body).map_err(|e| {
-                KongError::SerializationError(format!("invalid Anthropic response: {}", e))
-            })?;
+        let resp: AnthropicApiResponse = serde_json::from_str(body).map_err(|e| {
+            KongError::SerializationError(format!("invalid Anthropic response: {}", e))
+        })?;
 
         // 提取文本内容
         let text = resp
@@ -199,7 +199,13 @@ impl AiDriver for AnthropicDriver {
             other => other.to_string(),
         });
 
-        let total = resp.usage.input_tokens + resp.usage.output_tokens;
+        let total = resp
+            .usage
+            .input_tokens
+            .checked_add(resp.usage.output_tokens)
+            .ok_or_else(|| {
+                KongError::SerializationError("Anthropic usage token 总量溢出".to_string())
+            })?;
 
         Ok(ChatResponse {
             id: resp.id,
@@ -210,8 +216,16 @@ impl AiDriver for AnthropicDriver {
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content: if text.is_empty() { None } else { Some(serde_json::Value::String(text)) },
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    content: if text.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::String(text))
+                    },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                     tool_call_id: None,
                     name: None,
                 },
@@ -462,9 +476,7 @@ impl AiDriver for AnthropicDriver {
                 )
             };
 
-        let mut headers = vec![
-            ("anthropic-version".to_string(), "2023-06-01".to_string()),
-        ];
+        let mut headers = vec![("anthropic-version".to_string(), "2023-06-01".to_string())];
 
         // 认证：Anthropic 使用 x-api-key header
         let auth: AuthConfig =
@@ -488,12 +500,9 @@ impl AiDriver for AnthropicDriver {
     }
 
     fn extract_usage(&self, body: &str) -> Option<TokenUsage> {
-        let resp: AnthropicApiResponse = serde_json::from_str(body).ok()?;
-        Some(TokenUsage {
-            prompt_tokens: Some(resp.usage.input_tokens),
-            completion_tokens: Some(resp.usage.output_tokens),
-            total_tokens: Some(resp.usage.input_tokens + resp.usage.output_tokens),
-        })
+        let data: serde_json::Value = serde_json::from_str(body).ok()?;
+        let usage = data.get("usage")?;
+        Some(TokenUsage::from_observation(anthropic_observation(usage)))
     }
 
     fn extract_stream_usage(&self, event: &SseEvent) -> Option<TokenUsage> {
@@ -504,22 +513,18 @@ impl AiDriver for AnthropicDriver {
             "message_start" => {
                 // message_start 携带初始 usage（input_tokens）
                 let usage = data.get("message")?.get("usage")?;
-                let input = usage.get("input_tokens")?.as_u64()?;
-                Some(TokenUsage {
-                    prompt_tokens: Some(input),
-                    completion_tokens: None,
-                    total_tokens: None,
-                })
+                let observation = anthropic_observation(usage).map(|mut observation| {
+                    // message_start 的 output_tokens 是初始值，不代表最终 completion。
+                    observation.completion_tokens = None;
+                    observation.total_tokens = None;
+                    observation
+                });
+                Some(TokenUsage::from_observation(observation))
             }
             "message_delta" => {
                 // message_delta 携带最终 output_tokens
                 let usage = data.get("usage")?;
-                let output = usage.get("output_tokens")?.as_u64()?;
-                Some(TokenUsage {
-                    prompt_tokens: None,
-                    completion_tokens: Some(output),
-                    total_tokens: None,
-                })
+                Some(TokenUsage::from_observation(anthropic_observation(usage)))
             }
             _ => None,
         }

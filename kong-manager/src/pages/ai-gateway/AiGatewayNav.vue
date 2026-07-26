@@ -16,6 +16,9 @@
     <RouterLink :to="{ name: 'ai-virtual-key-list' }">
       {{ t('Virtual Keys') }}
     </RouterLink>
+    <RouterLink :to="{ name: 'ai-usage-overview' }">
+      {{ t('Usage') }}
+    </RouterLink>
   </nav>
 </template>
 

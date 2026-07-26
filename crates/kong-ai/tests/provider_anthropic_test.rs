@@ -4,6 +4,7 @@ use kong_ai::codec::{ChatRequest, Message, SseEvent};
 use kong_ai::models::{AiModel, AiProviderConfig, AuthConfig};
 use kong_ai::provider::anthropic::AnthropicDriver;
 use kong_ai::provider::AiDriver;
+use kong_ai::usage::normalizer::{UsageAccumulator, UsageObservation};
 use std::collections::HashMap;
 
 fn make_chat_request(stream: bool) -> ChatRequest {
@@ -131,7 +132,9 @@ fn test_anthropic_transform_response() {
         }
     }"#;
 
-    let response = driver.transform_response(200, &headers, body, &model).unwrap();
+    let response = driver
+        .transform_response(200, &headers, body, &model)
+        .unwrap();
 
     assert_eq!(response.id, "msg_01XFDUDYJgAACzvnptvVoYEL");
     assert_eq!(response.object, "chat.completion");
@@ -250,7 +253,9 @@ fn test_anthropic_transform_stream_event_content_block_start() {
 
     let event = SseEvent {
         event_type: "content_block_start".to_string(),
-        data: r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+        data:
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+                .to_string(),
         id: None,
     };
 
@@ -301,7 +306,53 @@ fn test_anthropic_extract_usage() {
     let usage = driver.extract_usage(body).unwrap();
     assert_eq!(usage.prompt_tokens, Some(20));
     assert_eq!(usage.completion_tokens, Some(15));
-    assert_eq!(usage.total_tokens, Some(35));
+    assert_eq!(
+        usage.total_tokens, None,
+        "Anthropic 未返回官方 total，派生总量由统一累加器负责"
+    );
+}
+
+#[test]
+fn test_anthropic_extract_usage_includes_cache_tokens_in_prompt() {
+    let driver = AnthropicDriver;
+    let body = serde_json::json!({
+        "usage": {
+            "input_tokens": 20,
+            "cache_creation_input_tokens": 7,
+            "cache_read_input_tokens": 5,
+            "output_tokens": 15
+        }
+    })
+    .to_string();
+
+    let usage = driver.extract_usage(&body).unwrap();
+    assert_eq!(usage.prompt_tokens, Some(32));
+    assert_eq!(usage.completion_tokens, Some(15));
+    assert_eq!(usage.cache_write_input_tokens, Some(7));
+    assert_eq!(usage.cache_read_input_tokens, Some(5));
+    assert!(!usage.invalid);
+}
+
+#[test]
+fn test_anthropic_cache_token_sum_overflow_invalidates_whole_usage() {
+    let driver = AnthropicDriver;
+    let body = serde_json::json!({
+        "usage": {
+            "input_tokens": i64::MAX,
+            "cache_creation_input_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1
+        }
+    })
+    .to_string();
+
+    let usage = driver.extract_usage(&body).unwrap();
+    assert!(usage.invalid);
+    assert_eq!(usage.prompt_tokens, None);
+    assert_eq!(usage.completion_tokens, None);
+    assert_eq!(usage.total_tokens, None);
+    assert_eq!(usage.cache_write_input_tokens, None);
+    assert_eq!(usage.cache_read_input_tokens, None);
 }
 
 #[test]
@@ -316,6 +367,11 @@ fn test_anthropic_extract_stream_usage_message_start() {
 
     let usage = driver.extract_stream_usage(&event).unwrap();
     assert_eq!(usage.prompt_tokens, Some(25));
+    assert_eq!(
+        usage.completion_tokens, None,
+        "message_start 的初始 output_tokens 不是最终 completion"
+    );
+    assert_eq!(usage.total_tokens, None);
 }
 
 #[test]
@@ -330,4 +386,50 @@ fn test_anthropic_extract_stream_usage_message_delta() {
 
     let usage = driver.extract_stream_usage(&event).unwrap();
     assert_eq!(usage.completion_tokens, Some(42));
+}
+
+#[test]
+fn test_anthropic_stream_latest_message_delta_replaces_completion_snapshot() {
+    let driver = AnthropicDriver;
+    let start = SseEvent {
+        event_type: "message_start".to_string(),
+        data: r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":1}}}"#.to_string(),
+        id: None,
+    };
+    let first_delta = SseEvent {
+        event_type: "message_delta".to_string(),
+        data: r#"{"type":"message_delta","usage":{"output_tokens":15}}"#.to_string(),
+        id: None,
+    };
+    let final_delta = SseEvent {
+        event_type: "message_delta".to_string(),
+        data: r#"{"type":"message_delta","usage":{"output_tokens":42}}"#.to_string(),
+        id: None,
+    };
+
+    let mut accumulator = UsageAccumulator::default();
+    for event in [&start, &first_delta, &final_delta] {
+        let usage = driver.extract_stream_usage(event).unwrap();
+        assert!(!usage.invalid);
+        accumulator.observe_provider(UsageObservation {
+            prompt_tokens: usage.prompt_tokens.map(|value| value as i64),
+            completion_tokens: usage.completion_tokens.map(|value| value as i64),
+            total_tokens: usage.total_tokens.map(|value| value as i64),
+            reasoning_tokens: usage.reasoning_tokens.map(|value| value as i64),
+            cache_read_input_tokens: usage.cache_read_input_tokens.map(|value| value as i64),
+            cache_write_input_tokens: usage.cache_write_input_tokens.map(|value| value as i64),
+            ..Default::default()
+        });
+    }
+
+    let normalized = accumulator.finish(true, true);
+    assert_eq!(normalized.prompt_tokens.unwrap().value, 30);
+    assert_eq!(
+        normalized.completion_tokens.unwrap().value,
+        42,
+        "最后一个 message_delta 必须替换此前 completion 快照"
+    );
+    assert_eq!(normalized.total_tokens.unwrap().value, 72);
+    assert_eq!(normalized.cache_write_input_tokens, Some(2));
+    assert_eq!(normalized.cache_read_input_tokens, Some(3));
 }

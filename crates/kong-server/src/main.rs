@@ -274,9 +274,15 @@ fn build_plugin_registry(
             model_resolver,
         )),
     );
-    registry.register("ai-rate-limit", Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()));
+    registry.register(
+        "ai-rate-limit",
+        Arc::new(kong_ai::plugins::AiRateLimitPlugin::new()),
+    );
     registry.register("ai-cache", Arc::new(kong_ai::plugins::AiCachePlugin::new()));
-    registry.register("ai-prompt-guard", Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()));
+    registry.register(
+        "ai-prompt-guard",
+        Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()),
+    );
     registry.register(
         "ai-key-auth",
         Arc::new(kong_ai::plugins::AiKeyAuthPlugin::new(virtual_key_auth)),
@@ -459,7 +465,11 @@ fn start_gateway(
 ) -> anyhow::Result<()> {
     // Resolve cluster role — 解析集群角色
     let cluster_role = config.role;
-    tracing::info!("Cluster role: {} — 集群角色: {}", cluster_role, cluster_role);
+    tracing::info!(
+        "Cluster role: {} — 集群角色: {}",
+        cluster_role,
+        cluster_role
+    );
 
     tracing::info!("Kong-Rust API Gateway 启动中...");
     tracing::info!("数据库模式: {}", config.database);
@@ -469,12 +479,9 @@ fn start_gateway(
     // Note: rt must survive until run_forever(), otherwise the sqlx connection pool background tasks — 注意：rt 必须存活到 run_forever()，否则 sqlx 连接池后台任务会因 runtime drop 而终止，
     // will terminate when runtime is dropped, requiring connection rebuilds and causing slow startup responses. — 导致首次 DB 查询需要重建连接，造成启动后响应缓慢。
     let rt = tokio::runtime::Runtime::new()?;
-    let (mut kong_proxy, mut admin_state, refresh_rx) = rt.block_on(init_proxy_and_admin(
-        &config,
-        auto_migrate,
-        log_updater,
-        current_log_level,
-    ))?;
+    let (mut kong_proxy, mut admin_state, refresh_rx, usage_writer_runner) = rt.block_on(
+        init_proxy_and_admin(&config, auto_migrate, log_updater, current_log_level),
+    )?;
 
     // Initialize access log async writer (must be created inside tokio runtime since it needs spawn) — 初始化 access log 异步写入器（必须在 tokio runtime 内创建，因为需要 spawn）
     let access_log_writer = rt
@@ -630,18 +637,31 @@ fn start_gateway(
     // Phase 5: Register services — 阶段 5：注册服务
     server.add_service(proxy_service);
     server.add_service(admin_service);
+    if let Some(runner) = usage_writer_runner {
+        let usage_service = pingora_core::services::background::background_service(
+            "AI Usage Writer",
+            AiUsageWriterBgService {
+                runner: std::sync::Mutex::new(Some(runner)),
+            },
+        );
+        server.add_service(usage_service);
+    }
 
     // Phase 5.5: Role-specific startup — 阶段 5.5：角色特定启动逻辑
     if let Some(cp) = cp_arc {
         // CP mode: start WebSocket server on cluster_listen for DP connections
         // CP 模式：在 cluster_listen 上启动 WebSocket 服务，接受 DP 连接
-        let cluster_listen = config.cluster_listen.first()
+        let cluster_listen = config
+            .cluster_listen
+            .first()
             .map(|l| format!("{}:{}", l.ip, l.port))
             .unwrap_or_else(|| "0.0.0.0:8005".to_string());
 
         let cp_clone = Arc::clone(&cp);
         // Try to build TLS config from KongConfig — 尝试从 KongConfig 构建 TLS 配置
-        let cluster_tls_config = match kong_cluster::tls::ClusterTlsConfig::from_kong_config(&config) {
+        let cluster_tls_config = match kong_cluster::tls::ClusterTlsConfig::from_kong_config(
+            &config,
+        ) {
             Ok(tls) => Some(tls),
             Err(e) => {
                 tracing::error!(
@@ -658,10 +678,8 @@ fn start_gateway(
             cluster_listen,
             cluster_tls_config,
         };
-        let cp_service = pingora_core::services::background::background_service(
-            "CP WebSocket",
-            cp_bg,
-        );
+        let cp_service =
+            pingora_core::services::background::background_service("CP WebSocket", cp_bg);
         server.add_service(cp_service);
     }
 
@@ -687,10 +705,8 @@ fn start_gateway(
             refresh_tx: admin_state_refresh_tx.clone(),
             tls_config: dp_tls_config,
         };
-        let dp_service = pingora_core::services::background::background_service(
-            "DP WebSocket",
-            dp_bg,
-        );
+        let dp_service =
+            pingora_core::services::background::background_service("DP WebSocket", dp_bg);
         server.add_service(dp_service);
     }
 
@@ -713,6 +729,7 @@ async fn init_proxy_and_admin(
     kong_proxy::KongProxy,
     kong_admin::AdminState,
     tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+    Option<kong_ai::usage::AiUsageWriterRunner>,
 )> {
     use kong_core::models::*;
     use kong_core::traits::{Dao, PageParams};
@@ -742,11 +759,17 @@ async fn init_proxy_and_admin(
         }
 
         let ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>> =
-            Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(Arc::clone(&store)));
+            Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+                Arc::clone(&store),
+            ));
         let ai_models: Arc<dyn Dao<kong_ai::models::AiModel>> =
-            Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(&store)));
+            Arc::new(DblessDao::<kong_ai::models::AiModel>::new(Arc::clone(
+                &store,
+            )));
         let ai_virtual_keys: Arc<dyn Dao<kong_ai::models::AiVirtualKey>> =
-            Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(&store)));
+            Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(Arc::clone(
+                &store,
+            )));
         // Shared by the ai-key-auth plugin and the Admin API (cache invalidation)
         // 由 ai-key-auth 插件与 Admin API（缓存失效）共用
         let virtual_key_auth = Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::clone(
@@ -759,6 +782,47 @@ async fn init_proxy_and_admin(
             Arc::clone(&virtual_key_auth),
         );
 
+        let (ai_usage, usage_writer_runner, lifecycle_observers) = if config.role.is_traditional() {
+            let memory_store = Arc::new(
+                kong_ai::usage::MemoryAiUsageStore::new(node_id, config.ai_usage_dbless_capacity)
+                    .map_err(anyhow::Error::msg)?,
+            );
+            let usage_store: Arc<dyn kong_ai::usage::AiUsageStore> = memory_store.clone();
+            let (writer, runner) = kong_ai::usage::AiUsageWriter::channel_with_shutdown(
+                Arc::clone(&usage_store),
+                config.ai_usage_queue_capacity,
+                config.ai_usage_batch_size,
+                std::time::Duration::from_millis(config.ai_usage_flush_interval_ms),
+                std::time::Duration::from_millis(config.ai_usage_shutdown_timeout_ms),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let stats = writer.stats();
+            memory_store.attach_writer_stats(Arc::clone(&stats));
+            let catalog =
+                Arc::new(kong_ai::usage::PriceCatalog::builtin().map_err(anyhow::Error::msg)?);
+            let collector = Arc::new(kong_ai::usage::AiUsageCollector::new(
+                writer,
+                catalog,
+                node_id,
+                uuid::Uuid::nil(),
+            ));
+            (
+                kong_ai::usage::AiUsageRuntime::Supported {
+                    store: usage_store,
+                    default_workspace_id: uuid::Uuid::nil(),
+                    stats,
+                },
+                Some(runner),
+                vec![collector as Arc<dyn kong_plugin_system::RequestLifecycleObserver>],
+            )
+        } else {
+            (
+                kong_ai::usage::AiUsageRuntime::UnsupportedHybrid,
+                None,
+                Vec::new(),
+            )
+        };
+
         let kong_proxy = kong_proxy::KongProxy::new(
             &[],
             &config.router_flavor,
@@ -767,7 +831,8 @@ async fn init_proxy_and_admin(
             Vec::new(),
             dns_resolver,
             Arc::clone(config),
-        );
+        )
+        .with_lifecycle_observers(lifecycle_observers);
 
         let admin_state = kong_admin::AdminState {
             services: Arc::new(DblessDao::<Service>::new(Arc::clone(&store))),
@@ -791,16 +856,19 @@ async fn init_proxy_and_admin(
             proxy: kong_proxy.clone(),
             refresh_tx,
             stream_router: None, // Set as needed in start_gateway — start_gateway 中按需设置
-            configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+            configuration_hash: Arc::new(std::sync::RwLock::new(
+                "00000000000000000000000000000000".to_string(),
+            )),
             dbless_store: Some(Arc::clone(&store)),
             target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             cp: None, // Set in start_gateway if role=control_plane — start_gateway 中按需设置（仅 CP 模式）
             cache: Arc::clone(&kong_cache),
             log_updater: Some(Arc::clone(&log_updater)),
             current_log_level: Arc::clone(&current_log_level),
+            ai_usage,
         };
 
-        Ok((kong_proxy, admin_state, refresh_rx))
+        Ok((kong_proxy, admin_state, refresh_rx, usage_writer_runner))
     } else {
         // PostgreSQL mode — PostgreSQL 模式
         let db = Database::connect(config).await?;
@@ -850,6 +918,48 @@ async fn init_proxy_and_admin(
         let certificates_dao = PgDao::<Certificate>::new(db.clone(), certificate_schema());
         let snis_dao = PgDao::<Sni>::new(db.clone(), sni_schema());
         let ca_certificates_dao = PgDao::<CaCertificate>::new(db.clone(), ca_certificate_schema());
+        let (ai_usage, usage_writer_runner, lifecycle_observers) = if config.role.is_traditional() {
+            let default_workspace_id: uuid::Uuid = sqlx::query_scalar(
+                "SELECT id FROM workspaces WHERE name = 'default' ORDER BY id LIMIT 1",
+            )
+            .fetch_optional(db.pool())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("默认 workspace 不存在，无法启动 AI usage analytics"))?;
+            let pg_store = Arc::new(kong_ai::usage::PgAiUsageStore::new(db.pool().clone()));
+            let usage_store: Arc<dyn kong_ai::usage::AiUsageStore> = pg_store;
+            let (writer, runner) = kong_ai::usage::AiUsageWriter::channel_with_shutdown(
+                Arc::clone(&usage_store),
+                config.ai_usage_queue_capacity,
+                config.ai_usage_batch_size,
+                std::time::Duration::from_millis(config.ai_usage_flush_interval_ms),
+                std::time::Duration::from_millis(config.ai_usage_shutdown_timeout_ms),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let stats = writer.stats();
+            let catalog =
+                Arc::new(kong_ai::usage::PriceCatalog::builtin().map_err(anyhow::Error::msg)?);
+            let collector = Arc::new(kong_ai::usage::AiUsageCollector::new(
+                writer,
+                catalog,
+                node_id,
+                default_workspace_id,
+            ));
+            (
+                kong_ai::usage::AiUsageRuntime::Supported {
+                    store: usage_store,
+                    default_workspace_id,
+                    stats,
+                },
+                Some(runner),
+                vec![collector as Arc<dyn kong_plugin_system::RequestLifecycleObserver>],
+            )
+        } else {
+            (
+                kong_ai::usage::AiUsageRuntime::UnsupportedHybrid,
+                None,
+                Vec::new(),
+            )
+        };
         let ai_providers: Arc<dyn Dao<kong_ai::models::AiProviderConfig>> =
             Arc::new(PgDao::<kong_ai::models::AiProviderConfig>::new(
                 db.clone(),
@@ -910,7 +1020,8 @@ async fn init_proxy_and_admin(
             ca_certificates_page.data.clone(),
             dns_resolver,
             Arc::clone(config),
-        );
+        )
+        .with_lifecycle_observers(lifecycle_observers);
         kong_proxy.update_services(services_page.data);
         kong_proxy.update_upstreams(upstreams_page.data, targets_page.data);
         kong_proxy.update_plugins(plugins_page.data);
@@ -948,9 +1059,27 @@ async fn init_proxy_and_admin(
             cache: Arc::clone(&kong_cache),
             log_updater: Some(Arc::clone(&log_updater)),
             current_log_level: Arc::clone(&current_log_level),
+            ai_usage,
         };
 
-        Ok((kong_proxy, admin_state, refresh_rx))
+        Ok((kong_proxy, admin_state, refresh_rx, usage_writer_runner))
+    }
+}
+
+/// AI usage writer 后台服务，由 Pingora 统一传递关闭信号。
+struct AiUsageWriterBgService {
+    runner: std::sync::Mutex<Option<kong_ai::usage::AiUsageWriterRunner>>,
+}
+
+#[async_trait::async_trait]
+impl pingora_core::services::background::BackgroundService for AiUsageWriterBgService {
+    async fn start(&self, shutdown: tokio::sync::watch::Receiver<bool>) {
+        let runner = self.runner.lock().unwrap().take();
+        if let Some(runner) = runner {
+            tracing::info!("AI usage writer 已启动");
+            runner.run(shutdown).await;
+            tracing::info!("AI usage writer 已停止");
+        }
     }
 }
 
@@ -1040,26 +1169,34 @@ impl pingora_core::services::background::BackgroundService for AdminBgService {
                 if needs_tls {
                     // TLS + HTTP/2 mode for Status API — Status API 的 TLS + HTTP/2 模式
                     // If no explicit cert, generate self-signed — 如果没有显式证书，生成自签证书
-                    let (cert_path, key_path) = if let (Some(c), Some(k)) = (ssl_cert, ssl_cert_key) {
+                    let (cert_path, key_path) = if let (Some(c), Some(k)) = (ssl_cert, ssl_cert_key)
+                    {
                         (c, k)
                     } else {
                         // Generate self-signed cert — 生成自签证书
                         let cert_file = "/tmp/kong_status_self_signed.pem";
                         let key_file = "/tmp/kong_status_self_signed_key.pem";
                         let _ = std::process::Command::new("openssl")
-                            .args(["req", "-x509", "-newkey", "rsa:2048",
-                                   "-keyout", key_file, "-out", cert_file,
-                                   "-days", "365", "-nodes", "-subj", "/CN=localhost"])
+                            .args([
+                                "req",
+                                "-x509",
+                                "-newkey",
+                                "rsa:2048",
+                                "-keyout",
+                                key_file,
+                                "-out",
+                                cert_file,
+                                "-days",
+                                "365",
+                                "-nodes",
+                                "-subj",
+                                "/CN=localhost",
+                            ])
                             .output();
                         (cert_file.to_string(), key_file.to_string())
                     };
-                    match start_tls_server(
-                        &status_bind_addr,
-                        &cert_path,
-                        &key_path,
-                        status_app,
-                    )
-                    .await
+                    match start_tls_server(&status_bind_addr, &cert_path, &key_path, status_app)
+                        .await
                     {
                         Ok(()) => {}
                         Err(e) => tracing::error!("Status API TLS 异常退出: {e}"),
@@ -1137,37 +1274,54 @@ impl pingora_core::services::background::BackgroundService for CpBgService {
         }
 
         let app = axum::Router::new()
-            .route("/v1/outlet", axum::routing::get({
-                let cp = Arc::clone(&cp);
-                move |ws: axum::extract::WebSocketUpgrade,
-                      axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-                      query: axum::extract::Query<HashMap<String, String>>| {
+            .route(
+                "/v1/outlet",
+                axum::routing::get({
                     let cp = Arc::clone(&cp);
-                    async move {
-                        let ip = addr.ip().to_string();
-                        ws.on_upgrade(move |socket| handle_dp_connection(socket, cp, query.0, ip))
+                    move |ws: axum::extract::WebSocketUpgrade,
+                          axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<
+                        SocketAddr,
+                    >,
+                          query: axum::extract::Query<HashMap<String, String>>| {
+                        let cp = Arc::clone(&cp);
+                        async move {
+                            let ip = addr.ip().to_string();
+                            ws.on_upgrade(move |socket| {
+                                handle_dp_connection(socket, cp, query.0, ip)
+                            })
+                        }
                     }
-                }
-            }))
-            .route("/v2/outlet", axum::routing::get({
-                let cp = Arc::clone(&cp);
-                move |ws: axum::extract::WebSocketUpgrade,
-                      axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-                      query: axum::extract::Query<HashMap<String, String>>| {
+                }),
+            )
+            .route(
+                "/v2/outlet",
+                axum::routing::get({
                     let cp = Arc::clone(&cp);
-                    async move {
-                        let ip = addr.ip().to_string();
-                        ws.on_upgrade(move |socket| handle_v2_dp_connection(socket, cp, query.0, ip))
+                    move |ws: axum::extract::WebSocketUpgrade,
+                          axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<
+                        SocketAddr,
+                    >,
+                          query: axum::extract::Query<HashMap<String, String>>| {
+                        let cp = Arc::clone(&cp);
+                        async move {
+                            let ip = addr.ip().to_string();
+                            ws.on_upgrade(move |socket| {
+                                handle_v2_dp_connection(socket, cp, query.0, ip)
+                            })
+                        }
                     }
-                }
-            }));
+                }),
+            );
 
         let listener = match tokio::net::TcpListener::bind(&self.cluster_listen).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!(
                     "CP WebSocket bind failed {}: {} — CP WebSocket 绑定失败 {}: {}",
-                    self.cluster_listen, e, self.cluster_listen, e
+                    self.cluster_listen,
+                    e,
+                    self.cluster_listen,
+                    e
                 );
                 return;
             }
@@ -1285,7 +1439,10 @@ fn build_dp_tls_connector(
 async fn cp_serve_tls(
     listener: tokio::net::TcpListener,
     acceptor: openssl::ssl::SslAcceptor,
-    mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<axum::Router, SocketAddr>,
+    mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        SocketAddr,
+    >,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     use tower::Service;
@@ -1367,7 +1524,8 @@ async fn handle_dp_connection(
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
 
-    let dp_id = query.get("node_id")
+    let dp_id = query
+        .get("node_id")
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4);
     let dp_hostname = query.get("node_hostname").cloned().unwrap_or_default();
@@ -1393,7 +1551,8 @@ async fn handle_dp_connection(
         if let Message::Binary(_data) = msg {
             tracing::debug!(
                 "Received basic_info from DP {} — 收到 DP {} 的 basic_info",
-                dp_id, dp_id
+                dp_id,
+                dp_id
             );
         }
     }
@@ -1408,7 +1567,8 @@ async fn handle_dp_connection(
         }
         tracing::info!(
             "Sent current config to newly connected DP {} — 已向新连接的 DP {} 推送当前配置",
-            dp_id, dp_id
+            dp_id,
+            dp_id
         );
     }
 
@@ -1466,11 +1626,12 @@ async fn handle_v2_dp_connection(
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
     use kong_cluster::protocol::{
-        self, JsonRpcRequest, V2_METHOD_INIT, V2_METHOD_GET_DELTA,
-        build_v2_init_response, build_v2_delta_response, build_v2_notify_new_version,
+        self, build_v2_delta_response, build_v2_init_response, build_v2_notify_new_version,
+        JsonRpcRequest, V2_METHOD_GET_DELTA, V2_METHOD_INIT,
     };
 
-    let dp_id = query.get("node_id")
+    let dp_id = query
+        .get("node_id")
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4);
     let dp_hostname = query.get("node_hostname").cloned().unwrap_or_default();
@@ -1478,7 +1639,10 @@ async fn handle_v2_dp_connection(
 
     tracing::info!(
         "V2 DP {} connected (hostname={}, version={}) — V2 DP {} 已连接",
-        dp_id, dp_hostname, dp_version, dp_id
+        dp_id,
+        dp_hostname,
+        dp_version,
+        dp_id
     );
 
     let dp_info = kong_cluster::DataPlaneInfo {
@@ -1713,10 +1877,7 @@ impl pingora_core::services::background::BackgroundService for DpBgService {
                 break;
             }
 
-            tracing::info!(
-                "Connecting to CP at {} — 正在连接 CP",
-                self.dp.cp_addr()
-            );
+            tracing::info!("Connecting to CP at {} — 正在连接 CP", self.dp.cp_addr());
 
             // Try to connect with timeout — 带超时连接
             let ws_url = self.dp.ws_url_v1();
@@ -1725,7 +1886,11 @@ impl pingora_core::services::background::BackgroundService for DpBgService {
                 let tls_connector = match build_dp_tls_connector(tls_cfg) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!("Failed to build DP TLS connector: {} — 构建 DP TLS 连接器失败: {}", e, e);
+                        tracing::error!(
+                            "Failed to build DP TLS connector: {} — 构建 DP TLS 连接器失败: {}",
+                            e,
+                            e
+                        );
                         self.wait_reconnect(&mut shutdown).await;
                         continue;
                     }
@@ -1734,7 +1899,10 @@ impl pingora_core::services::background::BackgroundService for DpBgService {
                 tokio::time::timeout(
                     kong_cluster::dp::DataPlane::connect_timeout(),
                     tokio_tungstenite::connect_async_tls_with_config(
-                        &ws_url, None, false, Some(connector),
+                        &ws_url,
+                        None,
+                        false,
+                        Some(connector),
                     ),
                 )
                 .await
@@ -1954,19 +2122,22 @@ async fn start_tls_server(
         tokio::spawn(async move {
             let io = TokioIo::new(tls_stream);
             let builder = HttpBuilder::new(TokioExecutor::new());
-            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let app = app.clone();
-                async move {
-                    use tower::ServiceExt as _;
-                    let req = req.map(axum::body::Body::new);
-                    Ok::<_, std::convert::Infallible>(app.oneshot(req).await.unwrap_or_else(|e| {
-                        axum::response::IntoResponse::into_response((
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Internal error: {e}"),
+            let svc =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move {
+                        use tower::ServiceExt as _;
+                        let req = req.map(axum::body::Body::new);
+                        Ok::<_, std::convert::Infallible>(app.oneshot(req).await.unwrap_or_else(
+                            |e| {
+                                axum::response::IntoResponse::into_response((
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    format!("Internal error: {e}"),
+                                ))
+                            },
                         ))
-                    }))
-                }
-            });
+                    }
+                });
             let _ = builder.serve_connection_with_upgrades(io, svc).await;
         });
     }

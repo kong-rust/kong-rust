@@ -46,6 +46,8 @@ pub struct AiAuthContext {
     pub virtual_key_id: Uuid,
     /// Virtual key name — 虚拟密钥名称
     pub key_name: String,
+    /// 可安全展示的虚拟密钥前缀，不包含原始密钥。
+    pub key_prefix: String,
     /// Bound consumer, if any — 绑定的 Consumer（如有）
     pub consumer_id: Option<Uuid>,
 }

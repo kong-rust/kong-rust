@@ -16,6 +16,7 @@ pub use router::ModelRouter;
 
 use crate::codec::{ChatRequest, ChatResponse, SseEvent};
 use crate::models::{AiModel, AiProviderConfig};
+use crate::usage::normalizer::UsageObservation;
 use kong_core::error::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +46,57 @@ pub struct TokenUsage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    /// provider 数值或分项求和溢出，collector 必须令整组 usage 不可用。
+    pub invalid: bool,
+}
+
+impl TokenUsage {
+    pub(crate) fn from_observation(
+        observation: std::result::Result<UsageObservation, &'static str>,
+    ) -> Self {
+        let Ok(observation) = observation else {
+            return Self {
+                invalid: true,
+                ..Default::default()
+            };
+        };
+        let values = [
+            observation.prompt_tokens,
+            observation.completion_tokens,
+            observation.total_tokens,
+            observation.reasoning_tokens,
+            observation.cache_read_input_tokens,
+            observation.cache_write_input_tokens,
+        ];
+        let converted: Option<Vec<u64>> = values
+            .into_iter()
+            .flatten()
+            .map(u64::try_from)
+            .collect::<std::result::Result<_, _>>()
+            .ok();
+        if converted.is_none() {
+            return Self {
+                invalid: true,
+                ..Default::default()
+            };
+        }
+        Self {
+            prompt_tokens: observation.prompt_tokens.map(|value| value as u64),
+            completion_tokens: observation.completion_tokens.map(|value| value as u64),
+            total_tokens: observation.total_tokens.map(|value| value as u64),
+            reasoning_tokens: observation.reasoning_tokens.map(|value| value as u64),
+            cache_read_input_tokens: observation
+                .cache_read_input_tokens
+                .map(|value| value as u64),
+            cache_write_input_tokens: observation
+                .cache_write_input_tokens
+                .map(|value| value as u64),
+            invalid: false,
+        }
+    }
 }
 
 /// AI Driver trait — 每个 provider 必须实现
@@ -71,11 +123,8 @@ pub trait AiDriver: Send + Sync {
     ) -> Result<ChatResponse>;
 
     /// 转换流式 SSE 事件（返回 None 表示终止事件如 [DONE]）
-    fn transform_stream_event(
-        &self,
-        event: &SseEvent,
-        model: &AiModel,
-    ) -> Result<Option<SseEvent>>;
+    fn transform_stream_event(&self, event: &SseEvent, model: &AiModel)
+        -> Result<Option<SseEvent>>;
 
     /// 生成上游连接配置（scheme、host、port、path、auth headers）
     /// stream 参数指示是否为流式请求（Gemini 需要据此选择不同的 API 端点）
@@ -107,7 +156,10 @@ impl DriverRegistry {
         r.register("openai", Arc::new(openai::OpenAiDriver));
         r.register("anthropic", Arc::new(anthropic::AnthropicDriver));
         r.register("gemini", Arc::new(gemini::GeminiDriver));
-        r.register("openai_compat", Arc::new(openai_compat::OpenAiCompatDriver::new()));
+        r.register(
+            "openai_compat",
+            Arc::new(openai_compat::OpenAiCompatDriver::new()),
+        );
         r
     }
 

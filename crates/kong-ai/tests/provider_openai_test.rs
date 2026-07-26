@@ -113,7 +113,9 @@ fn test_openai_transform_response() {
         }
     }"#;
 
-    let response = driver.transform_response(200, &headers, body, &model).unwrap();
+    let response = driver
+        .transform_response(200, &headers, body, &model)
+        .unwrap();
 
     assert_eq!(response.id, "chatcmpl-abc123");
     assert_eq!(response.object, "chat.completion");
@@ -122,7 +124,9 @@ fn test_openai_transform_response() {
     assert_eq!(response.choices[0].message.role, "assistant");
     assert_eq!(
         response.choices[0].message.content,
-        Some(serde_json::Value::String("Hello! How can I help?".to_string()))
+        Some(serde_json::Value::String(
+            "Hello! How can I help?".to_string()
+        ))
     );
     assert_eq!(response.choices[0].finish_reason, Some("stop".to_string()));
 
@@ -210,13 +214,86 @@ fn test_openai_extract_usage() {
         "object": "chat.completion",
         "model": "gpt-4",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 15, "completion_tokens": 20, "total_tokens": 35}
+        "usage": {
+            "prompt_tokens": 15,
+            "completion_tokens": 20,
+            "total_tokens": 35,
+            "prompt_tokens_details": {"cached_tokens": 6},
+            "completion_tokens_details": {"reasoning_tokens": 8}
+        }
     }"#;
 
     let usage = driver.extract_usage(body).unwrap();
     assert_eq!(usage.prompt_tokens, Some(15));
     assert_eq!(usage.completion_tokens, Some(20));
     assert_eq!(usage.total_tokens, Some(35));
+    assert_eq!(usage.cache_read_input_tokens, Some(6));
+    assert_eq!(usage.reasoning_tokens, Some(8));
+    assert!(!usage.invalid);
+}
+
+#[test]
+fn test_openai_responses_invalid_token_values_invalidate_whole_usage() {
+    let driver = OpenAiDriver;
+    let cases = [
+        (
+            "负数 input_tokens",
+            serde_json::json!({
+                "input_tokens": -1,
+                "output_tokens": 2,
+                "total_tokens": 1
+            }),
+        ),
+        (
+            "浮点 output_tokens",
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 1.5,
+                "total_tokens": 2
+            }),
+        ),
+        (
+            "超过 i64 的 total_tokens",
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 9_223_372_036_854_775_808_u64
+            }),
+        ),
+        (
+            "超过 i64 的 cached_tokens",
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "input_tokens_details": {
+                    "cached_tokens": 9_223_372_036_854_775_808_u64
+                }
+            }),
+        ),
+        (
+            "浮点 reasoning_tokens",
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "output_tokens_details": {"reasoning_tokens": 0.5}
+            }),
+        ),
+    ];
+
+    for (case, response_usage) in cases {
+        let body = serde_json::json!({"usage": response_usage}).to_string();
+        let usage = driver
+            .extract_usage(&body)
+            .unwrap_or_else(|| panic!("{case} 应返回无效 usage"));
+
+        assert!(usage.invalid, "{case} 应令整组 usage 无效");
+        assert_eq!(usage.prompt_tokens, None, "{case}");
+        assert_eq!(usage.completion_tokens, None, "{case}");
+        assert_eq!(usage.total_tokens, None, "{case}");
+        assert_eq!(usage.reasoning_tokens, None, "{case}");
+        assert_eq!(usage.cache_read_input_tokens, None, "{case}");
+        assert_eq!(usage.cache_write_input_tokens, None, "{case}");
+    }
 }
 
 #[test]

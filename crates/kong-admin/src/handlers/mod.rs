@@ -9,6 +9,7 @@ pub mod schemas;
 pub mod ai_endpoint_test;
 pub mod ai_providers;
 pub mod ai_models;
+pub mod ai_usage;
 pub mod ai_virtual_keys;
 pub mod clustering;
 pub mod cache;
@@ -791,6 +792,8 @@ pub async fn status_info(
         // In DB mode, include database reachable status — DB 模式下包含数据库可达状态
         body["database"] = json!({ "reachable": true });
     }
+    body["ai_usage_writer"] =
+        ai_usage::writer_stats_snapshot(&state.ai_usage).map_or(Value::Null, |stats| json!(stats));
 
     Json(body).into_response()
 }
@@ -1057,6 +1060,8 @@ pub async fn list_endpoints() -> impl IntoResponse {
         "/ai-virtual-keys",
         "/ai-virtual-keys/{ai_virtual_keys}",
         "/ai-virtual-keys/{ai_virtual_keys}/rotate",
+        "/ai-usage",
+        "/ai-usage/summary",
     ];
 
     Json(json!({ "data": endpoints }))
@@ -1192,7 +1197,14 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
     }
 
     match kong_lua_bridge::metrics::collect_prometheus_metrics(&state.config, &prometheus_configs) {
-        Ok(metrics) => {
+        Ok(mut metrics) => {
+            let writer_metrics = ai_usage::writer_prometheus_metrics(&state.ai_usage);
+            if !writer_metrics.is_empty() {
+                if !metrics.ends_with('\n') {
+                    metrics.push('\n');
+                }
+                metrics.push_str(&writer_metrics);
+            }
             let mut response = metrics.into_response();
             response.headers_mut().insert(
                 header::CONTENT_TYPE,

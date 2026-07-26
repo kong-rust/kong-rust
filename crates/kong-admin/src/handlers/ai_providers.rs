@@ -123,7 +123,15 @@ pub async fn list_models(
         .select_by_foreign_key("provider_id", &provider.id, &params.to_page_params())
         .await
     {
-        Ok(page) => (StatusCode::OK, Json(build_page_response(&page))),
+        Ok(page) => {
+            let body = super::ai_models::project_model_response(
+                &state,
+                StatusCode::OK,
+                build_page_response(&page),
+            )
+            .await;
+            (StatusCode::OK, Json(body))
+        }
         Err(e) => {
             let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status, Json(json!({"message": e.to_string()})))

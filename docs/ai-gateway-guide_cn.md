@@ -15,6 +15,8 @@
 7. [插件组合示例](#7-插件组合示例)
 8. [智能模型路由](#8-智能模型路由)
 9. [支持的 Provider](#9-支持的-provider)
+10. [精确 prompt-token 计数](#10-精确-prompt-token-计数tokenizer-registry)
+11. [调用统计与成本估算](#11-调用统计与成本估算)
 
 ---
 
@@ -1049,3 +1051,205 @@ INSERT INTO ai_models (name, model_name, priority, weight, max_input_tokens) VAL
   ('chat-group', 'gpt-3.5-turbo',  20, 1, 4096),       -- 短 prompt 优先
   ('chat-group', 'gpt-4o',         10, 1, 128000);     -- 长 prompt 升档
 ```
+
+## 11. 调用统计与成本估算
+
+Kong-Rust 会为最终 Route 插件链中包含已启用 `ai-proxy` 的每个请求记录一条仅含
+元数据的调用事实。正常请求、网关拒绝、网关错误、上游错误、客户端断开和流中断
+均纳入统计；未匹配 Route 或插件链不含 `ai-proxy` 的请求不计入。
+
+调用统计面向运营分析，不是供应商账单、零丢失审计账本，也不是 Virtual Key
+预算执行的记账路径。代理热路径只尝试一次非阻塞入队；队列满、数据库长期不可用
+或进程崩溃时可能丢失事实，writer 状态和指标会暴露这些降级。
+
+### 11.1 Usage 与结果口径
+
+Provider 官方 usage 优先。官方字段缺失时，Kong-Rust 可使用请求侧 tokenizer
+估值；只有 prompt 和 completion 都已知时才派生 `total_tokens`。未知值返回
+`null`，不会伪造为 0。
+
+各 Provider 的标准化规则如下：
+
+- OpenAI 和 OpenAI-compatible 直接使用 prompt/completion usage，保留官方
+  total，并在 Provider 返回时保留 cached/reasoning 明细；
+- Anthropic 的 prompt 包含 input、cache-creation input 与 cache-read input，
+  output 使用最终累计值；
+- Gemini 的 completion 包含 candidate 与 thinking token，同时单独保留 thinking
+  和 cached token 明细。
+
+`usage.source` 取值为 `provider`、`estimated`、`mixed` 或 `unavailable`。
+结果 `outcome` 取值为 `success`、`gateway_rejected`、`gateway_error`、
+`upstream_error`、`client_disconnected` 或 `stream_interrupted`。E2E 包含
+完整网关生命周期；只有观察到首个可解析流事件时才有 TTFT。`cache_status` 描述
+Kong-Rust AI 响应缓存，取值为 `not_configured`、`unavailable`、`bypass`、
+`miss` 或 `hit`，不表示 Provider prompt cache。
+
+### 11.2 精确价格与成本状态
+
+单价单位是 USD / 1M tokens。Input 和 output 分方向按以下顺序解析：
+
+1. AI Model 对应方向的显式覆盖价（`input_cost` 或 `output_cost`），显式 0 合法；
+2. 内置版本化价表中的精确模型 ID 或显式 alias；
+3. 未匹配。
+
+`openai_compat` 不会自动套用 OpenAI 价格。Model 创建/更新接受精确十进制字符串，
+并兼容既有有限 JSON number 输入。`GET /ai-models` 保留原有 number 类型的
+`input_cost`、`output_cost`，新增 `input_cost_decimal`、
+`output_cost_decimal`，并返回由服务端解析的 `effective_pricing`。覆盖价留空即
+回退内置价。
+
+标准成本公式为：
+
+```text
+(prompt_tokens × input_price + completion_tokens × output_price) / 1,000,000
+```
+
+单价和成本均使用 Decimal 计算，API 固定返回 12 位小数字符串，例如
+`"0.001100000000"`。事实会固化请求时使用的价格版本、快照日期和有效期，因此后续
+修改 Model 或内置价表不会改写历史成本。
+
+内置价表版本 `2026-07-26.1` 包含：
+
+| Provider | 模型 / 显式 alias | UTC 生效时间 | Input | Output |
+|---|---|---|---:|---:|
+| OpenAI | `gpt-5.6-sol` / `gpt-5.6` | 2026-07-26 起 | 5.00 | 30.00 |
+| OpenAI | `gpt-5.6-terra` | 2026-07-26 起 | 2.50 | 15.00 |
+| OpenAI | `gpt-5.6-luna` | 2026-07-26 起 | 1.00 | 6.00 |
+| Anthropic | `claude-fable-5` | 2026-07-26 起 | 10.00 | 50.00 |
+| Anthropic | `claude-opus-4-8` | 2026-07-26 起 | 5.00 | 25.00 |
+| Anthropic | `claude-sonnet-5` | 2026-07-26 至 2026-09-01 | 2.00 | 10.00 |
+| Anthropic | `claude-sonnet-5` | 2026-09-01 起 | 3.00 | 15.00 |
+| Anthropic | `claude-haiku-4-5-20251001` / `claude-haiku-4-5` | 2026-07-26 起 | 1.00 | 5.00 |
+| Gemini | `gemini-3.6-flash` | 2026-07-26 起 | 1.50 | 7.50 |
+| Gemini | `gemini-3.5-flash` | 2026-07-26 起 | 1.50 | 9.00 |
+| Gemini | `gemini-3.5-flash-lite` | 2026-07-26 起 | 0.30 | 2.50 |
+
+价表中的三款 GPT-5.6 仅支持不超过 272,000 prompt tokens；超过阈值时，除非
+Model 同时覆盖两个方向，否则标记为 `unsupported`。Provider prompt-cache
+计价、非标准 service tier、内置工具、非文本模态和其他附加价格同样暂不支持：
+可用 usage 仍会保存，但不会把基础项的部分成本冒充为完整成本。
+
+`pricing.status` 取值为 `matched`、`unmatched`、`unsupported` 或
+`not_applicable`；`cost.status` 取值为 `calculated`、`estimated`、
+`not_incurred` 或 `unavailable`。机器可读原因数组会解释“不支持”或“不可计算”。
+只有确认没有调用 Provider 的请求才返回 0 且为 `not_incurred`；未知成本为
+`null`。
+
+### 11.3 Admin API
+
+使用 `GET /ai-usage` 查询请求事实：
+
+```bash
+curl -G http://localhost:8001/ai-usage \
+  --data-urlencode 'start=2026-07-25T00:00:00Z' \
+  --data-urlencode 'end=2026-07-26T00:00:00Z' \
+  --data-urlencode 'provider_type=openai' \
+  --data-urlencode 'size=100'
+```
+
+默认时间窗为最近 24 小时。显式 `start` 与 `end` 必须同时提供、使用 RFC 3339、
+遵循 `[start, end)`，且最长 90 天。`size` 默认 100，范围为 1～1000。结果固定按
+`(started_at DESC, id DESC)` 排序。
+
+首个响应会返回不透明的 `snapshot` 和 `offset`。下一页传入 `offset`；并发新增
+事实不会混入既定 snapshot。客户端不应解码或自行构造游标。
+
+通用精确过滤器包括：
+
+```text
+request_id, route_id, service_id, provider_id, provider_type,
+requested_model, model_group, actual_model, virtual_key_id, consumer_id,
+status_code, outcome, stream, cache_status, usage_source,
+pricing_status, cost_status
+```
+
+`request_id` 必须是大小写敏感的 32 位小写十六进制精确值。API 固定查询默认
+workspace，并拒绝 `workspace_id` 参数。
+
+使用 `GET /ai-usage/summary` 查询总计和一种可选 breakdown：
+
+```bash
+curl -G http://localhost:8001/ai-usage/summary \
+  --data-urlencode 'start=2026-07-19T00:00:00Z' \
+  --data-urlencode 'end=2026-07-26T00:00:00Z' \
+  --data-urlencode 'breakdown=day' \
+  --data-urlencode 'timezone=Asia/Shanghai'
+```
+
+Breakdown 支持 `hour`、`day`、`provider`、`actual_model`、`model_group`、
+`virtual_key`、`route` 或 `service`。时间 breakdown 接受 IANA `timezone`；
+分类 breakdown 接受 `limit`（默认 10，最大 100）和
+`order_by=cost_usd|total_tokens|requests`。Hour breakdown 最长 31 天。
+
+汇总 token 是“已知小计”，同时返回已知/未知请求数和覆盖率；
+`cost_usd_calculable_sum` 也只是“可计算成本小计”。Pricing/cost 状态计数用于
+揭示缺失或不支持的数据，因此两者都不应标成完整供应商账单。明细和汇总可共享同一
+`snapshot` 对账。
+
+两个端点都会按运行模式返回 `meta.mode`、`meta.ephemeral`，以及适用时的节点、
+容量、最早记录和重启语义。稳定错误包括：
+
+| HTTP | `error_code` | 含义 |
+|---:|---|---|
+| 400 | `analytics_invalid_query` | 参数、时间范围、过滤或游标非法 |
+| 409 | `analytics_snapshot_expired` | DB-less ring 在翻页期间发生变化 |
+| 501 | `analytics_unsupported_in_hybrid` | CP/DP Hybrid 不支持 analytics |
+| 503 | `analytics_query_timeout` | 查询达到 5 秒上限 |
+| 503 | `analytics_query_unavailable` | Store 暂时不可用 |
+
+### 11.4 Kong Manager
+
+进入 **AI Gateway → 调用统计**。“用量分析”提供 24 小时、7 天、30 天和自定义
+时间范围，展示可计算成本、请求数、已知 token 小计及覆盖率、成本/token 趋势、
+实际模型与 Virtual Key 排行；“调用日志”提供元数据事实、精确过滤、稳定翻页和
+详情视图。
+
+过滤条件和浏览器 IANA 时区会写入 URL，刷新、前进后退和分享链接后仍能保留。
+Models 与 Virtual Keys 表格提供“查看用量”下钻。未知值显示为 `—`，真实 0 与
+“未定价/不可计算”明确区分。DB-less 与 Hybrid 会展示专用状态，不会伪装成零调用。
+
+### 11.5 运行模式与配置
+
+| 模式 | 存储与查询行为 |
+|---|---|
+| Traditional + PostgreSQL | 批量持久化到 `ai_usage_logs`，`ephemeral=false` |
+| Traditional + `database=off` | 本节点有界内存 ring，满容量淘汰，重启清空 |
+| Hybrid control/data plane | 禁用采集和上传；Admin 查询可达时返回 501 |
+
+DB-less 不会把事实写入声明式配置 Store，也不会跨节点聚合。发生淘汰后会保守地
+让既定 snapshot 失效并返回 409，而不是返回不完整页面。
+
+在 `kong.conf` 中配置 writer 和 DB-less ring：
+
+```ini
+ai_usage_queue_capacity = 8192
+ai_usage_batch_size = 256
+ai_usage_flush_interval_ms = 500
+ai_usage_shutdown_timeout_ms = 5000
+ai_usage_dbless_capacity = 10000
+```
+
+五项配置都必须大于 0；`ai_usage_queue_capacity` 和
+`ai_usage_dbless_capacity` 最大为 `1000000`，`ai_usage_batch_size` 最大为
+`1129` 且不得大于队列容量。批量上限确保单条 PostgreSQL INSERT 不超过协议参数
+数量限制；非法值会导致启动失败。PostgreSQL 写入使用有界退避重试，优雅关闭只在
+配置的超时内 drain。
+
+`GET /status` 包含 `ai_usage_writer`。启用 Prometheus status 端点后，还会暴露
+`kong_ai_usage_writer_*` counters，以及 `queue_depth` / `queue_capacity`
+gauges。至少监控丢失事实、队列满、写入失败、重试耗尽、关闭超时和 DB-less 淘汰。
+
+### 11.6 隐私、保留与运维限制
+
+调用事实只保存元数据，不包含 prompt、响应正文、请求/响应 header、Authorization
+或 API Key、Provider 认证配置、Virtual Key 明文或 `key_hash`。为便于诊断，可以
+保存 Virtual Key 名称和非敏感 prefix。事实固化 Route、Service、Provider、Model
+和身份快照，因此删除这些配置实体不会删除历史事实。
+
+首版 PostgreSQL 实现没有自动 retention、分区、归档、导出或删除 API，
+`ai_usage_logs` 会持续增长。请监控表/索引大小、数据库容量、writer 失败和查询
+延迟；在专用保留功能交付前，应建立外部运维治理。API 查询窗口最多 90 天，但该
+限制不会删除更早数据。
+
+首版也不提供 DB-less 跨节点聚合、Hybrid DP→CP 上传、供应商账单对账、折扣/税费/
+多币种或硬预算执行。

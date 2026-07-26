@@ -226,6 +226,13 @@
           <KButton
             appearance="secondary"
             size="small"
+            @click="viewUsage(row)"
+          >
+            {{ t('View Usage') }}
+          </KButton>
+          <KButton
+            appearance="secondary"
+            size="small"
             :disabled="mutationPending"
             @click="startEdit(row)"
           >
@@ -256,6 +263,7 @@
 <script setup lang="ts">
 import type { TableDataFetcherParams } from '@kong/kongponents'
 import { computed, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import AiGatewayNav from './AiGatewayNav.vue'
 import { apiService } from '@/services/apiService'
 import { useToaster } from '@/composables/useToaster'
@@ -290,6 +298,7 @@ defineOptions({
 })
 
 const toaster = useToaster()
+const router = useRouter()
 const { l, locale, t } = useAiGatewayI18n()
 const tableKey = ref(0)
 const formVisible = ref(false)
@@ -333,6 +342,17 @@ const resetForm = () => {
   form.expiresAt = ''
   form.enabled = true
   form.tags = ''
+}
+
+const viewUsage = (virtualKey: AiVirtualKey) => {
+  void router.push({
+    name: 'ai-usage-overview',
+    query: {
+      range: '24h',
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      virtual_key_id: virtualKey.id,
+    },
+  })
 }
 
 const fetchVirtualKeys = async (props: TableDataFetcherParams) => {

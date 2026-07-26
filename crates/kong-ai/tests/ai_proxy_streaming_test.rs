@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use kong_ai::plugins::ai_proxy::AiProxyPlugin;
 use kong_ai::plugins::context::AiRequestState;
+use kong_ai::usage::StreamTerminalState;
 use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
 use serde_json::json;
 
@@ -120,7 +121,10 @@ async fn test_ai_proxy_header_filter_detects_ndjson_streaming() {
     plugin.access(&config, &mut ctx).await.unwrap();
 
     ctx.response_headers
-        .insert("content-type".to_string(), "application/x-ndjson".to_string());
+        .insert(
+            "content-type".to_string(),
+            "Application/X-NDJSON; Charset=UTF-8".to_string(),
+        );
 
     plugin.header_filter(&config, &mut ctx).await.unwrap();
 
@@ -208,12 +212,20 @@ async fn test_ai_proxy_header_filter_non_streaming_unchanged() {
 
 /// 辅助函数：设置流式模式并运行 access + header_filter
 async fn setup_streaming_ctx(plugin: &AiProxyPlugin, config: &PluginConfig) -> RequestCtx {
+    setup_streaming_ctx_with_content_type(plugin, config, "text/event-stream").await
+}
+
+async fn setup_streaming_ctx_with_content_type(
+    plugin: &AiProxyPlugin,
+    config: &PluginConfig,
+    content_type: &str,
+) -> RequestCtx {
     let mut ctx = RequestCtx::new();
     ctx.request_body = Some(openai_stream_body("gpt-4"));
     plugin.access(config, &mut ctx).await.unwrap();
 
     ctx.response_headers
-        .insert("content-type".to_string(), "text/event-stream".to_string());
+        .insert("content-type".to_string(), content_type.to_string());
     plugin.header_filter(config, &mut ctx).await.unwrap();
 
     ctx
@@ -320,6 +332,98 @@ async fn test_ai_proxy_body_filter_streaming_done() {
         "输出应包含 [DONE]，实际：{}",
         output
     );
+}
+
+/// 测试：独立的 body=None + EOS 也会 flush 上一个 chunk 的残留终态
+#[tokio::test]
+async fn test_ai_proxy_body_filter_flushes_done_on_separate_eos() {
+    let plugin = AiProxyPlugin::new();
+    let config = make_plugin_config(inline_provider_config("gpt-4"));
+    let mut ctx = setup_streaming_ctx(&plugin, &config).await;
+
+    let mut partial: Option<Bytes> = Some(Bytes::from("data: [DONE]"));
+    plugin
+        .body_filter(&config, &mut ctx, &mut partial, false)
+        .await
+        .unwrap();
+    assert_eq!(partial.as_ref().map(Bytes::len), Some(0));
+
+    let mut eos: Option<Bytes> = None;
+    plugin
+        .body_filter(&config, &mut ctx, &mut eos, true)
+        .await
+        .unwrap();
+
+    let output = String::from_utf8_lossy(eos.as_ref().expect("flush 应输出终态事件"));
+    assert!(output.contains("data: [DONE]"), "实际输出：{output}");
+    let state = ctx.extensions.get::<AiRequestState>().unwrap();
+    assert_eq!(state.stream_terminal, StreamTerminalState::Complete);
+}
+
+/// 测试：NDJSON 响应按行解析，不会被标准 SSE parser 吞掉
+#[tokio::test]
+async fn test_ai_proxy_body_filter_parses_ndjson_lines() {
+    let plugin = AiProxyPlugin::new();
+    let config = make_plugin_config(inline_provider_config("gpt-4"));
+    let mut ctx =
+        setup_streaming_ctx_with_content_type(
+            &plugin,
+            &config,
+            "Application/X-NDJSON; Charset=UTF-8",
+        )
+        .await;
+
+    let ndjson = format!(
+        "{}\n",
+        make_sse_chunk("NDJSON", None)
+            .trim()
+            .strip_prefix("data: ")
+            .unwrap()
+    );
+    let mut body: Option<Bytes> = Some(Bytes::from(ndjson));
+    plugin
+        .body_filter(&config, &mut ctx, &mut body, false)
+        .await
+        .unwrap();
+
+    let output = String::from_utf8_lossy(body.as_ref().unwrap());
+    assert!(output.contains("NDJSON"), "实际输出：{output}");
+    let state = ctx.extensions.get::<AiRequestState>().unwrap();
+    assert!(state.valid_stream_event_seen);
+    assert!(state.ttft.is_some());
+}
+
+/// 测试：UTF-8 多字节字符跨 HTTP chunk 时会被增量重组
+#[tokio::test]
+async fn test_ai_proxy_body_filter_reassembles_split_utf8() {
+    let plugin = AiProxyPlugin::new();
+    let config = make_plugin_config(inline_provider_config("gpt-4"));
+    let mut ctx = setup_streaming_ctx(&plugin, &config).await;
+
+    let event = make_sse_chunk("你", None).into_bytes();
+    let utf8 = "你".as_bytes();
+    let character_start = event
+        .windows(utf8.len())
+        .position(|window| window == utf8)
+        .unwrap();
+    let split = character_start + 1;
+
+    let mut first = Some(Bytes::copy_from_slice(&event[..split]));
+    plugin
+        .body_filter(&config, &mut ctx, &mut first, false)
+        .await
+        .unwrap();
+    assert_eq!(first.as_ref().map(Bytes::len), Some(0));
+
+    let mut second = Some(Bytes::copy_from_slice(&event[split..]));
+    plugin
+        .body_filter(&config, &mut ctx, &mut second, false)
+        .await
+        .unwrap();
+    let output = String::from_utf8_lossy(second.as_ref().unwrap());
+    assert!(output.contains('你'), "实际输出：{output}");
+    let state = ctx.extensions.get::<AiRequestState>().unwrap();
+    assert!(!state.completion_observation_invalid);
 }
 
 /// 测试：多个事件的 token usage 正确累积

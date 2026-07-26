@@ -15,10 +15,36 @@ use kong_admin::{build_admin_router, build_status_router, AdminState};
 use kong_core::models::*;
 use kong_db::{DblessDao, DblessStore};
 
+fn test_usage_runtime() -> kong_ai::usage::AiUsageRuntime {
+    let store: Arc<dyn kong_ai::usage::AiUsageStore> =
+        Arc::new(kong_ai::usage::MemoryAiUsageStore::new(Uuid::new_v4(), 100).unwrap());
+    kong_ai::usage::AiUsageRuntime::Supported {
+        store,
+        default_workspace_id: Uuid::nil(),
+        stats: Arc::new(kong_ai::usage::AiUsageWriterStats::default()),
+    }
+}
+
 /// Create a test Admin API application — 创建测试用的 Admin API 应用
 fn create_test_app() -> axum::Router {
-    let store = Arc::new(DblessStore::new());
+    create_test_app_with_usage_runtime(test_usage_runtime())
+}
 
+fn create_test_app_with_usage_runtime(ai_usage: kong_ai::usage::AiUsageRuntime) -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+    create_test_app_with_store(store, ai_usage)
+}
+
+fn create_test_app_with_declarative_config(value: Value) -> axum::Router {
+    let store = Arc::new(DblessStore::new());
+    store.load_from_json(&value).unwrap();
+    create_test_app_with_store(store, test_usage_runtime())
+}
+
+fn create_test_app_with_store(
+    store: Arc<DblessStore>,
+    ai_usage: kong_ai::usage::AiUsageRuntime,
+) -> axum::Router {
     let config = Arc::new(kong_config::KongConfig::default());
 
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -46,9 +72,14 @@ fn create_test_app() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage,
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -57,7 +88,9 @@ fn create_test_app() -> axum::Router {
         proxy,
         refresh_tx,
         stream_router: None,
-        configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        configuration_hash: Arc::new(std::sync::RwLock::new(
+            "00000000000000000000000000000000".to_string(),
+        )),
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
@@ -102,9 +135,14 @@ fn create_test_status_app() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -113,7 +151,9 @@ fn create_test_status_app() -> axum::Router {
         proxy,
         refresh_tx,
         stream_router: None,
-        configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        configuration_hash: Arc::new(std::sync::RwLock::new(
+            "00000000000000000000000000000000".to_string(),
+        )),
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
@@ -179,9 +219,14 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -190,7 +235,9 @@ fn create_test_status_app_with_prometheus() -> axum::Router {
         proxy,
         refresh_tx,
         stream_router: None,
-        configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        configuration_hash: Arc::new(std::sync::RwLock::new(
+            "00000000000000000000000000000000".to_string(),
+        )),
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
@@ -331,9 +378,14 @@ fn create_test_app_with_data() -> axum::Router {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -342,7 +394,9 @@ fn create_test_app_with_data() -> axum::Router {
         proxy,
         refresh_tx,
         stream_router: None,
-        configuration_hash: Arc::new(std::sync::RwLock::new("00000000000000000000000000000000".to_string())),
+        configuration_hash: Arc::new(std::sync::RwLock::new(
+            "00000000000000000000000000000000".to_string(),
+        )),
         dbless_store: None,
         target_health: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         cp: None,
@@ -390,6 +444,85 @@ async fn test_ai_model_weight_must_be_between_zero_and_10000() {
         let response_body: Value = serde_json::from_slice(&body).unwrap();
         assert!(response_body["fields"]["weight"].is_string());
     }
+}
+
+#[tokio::test]
+async fn test_ai_model_pricing_projection_is_consistent_on_nested_endpoint() {
+    let provider_id = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
+    let model_id = Uuid::parse_str("20000000-0000-0000-0000-000000000001").unwrap();
+    let app = create_test_app_with_declarative_config(json!({
+        "_format_version": "3.0",
+        "ai_providers": [{
+            "id": provider_id,
+            "name": "pricing-provider",
+            "provider_type": "openai",
+            "auth_config": {},
+            "config": {},
+            "enabled": true
+        }],
+        "ai_models": [{
+            "id": model_id,
+            "name": "priced-group",
+            "provider_id": provider_id,
+            "model_name": "gpt-5.6-sol",
+            "priority": 0,
+            "weight": 100,
+            "input_cost": "1.250000000000",
+            "output_cost": 2.5,
+            "config": {},
+            "enabled": true
+        }]
+    }));
+
+    let model_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ai-models/{model_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let model_status = model_response.status();
+    let model_body = axum::body::to_bytes(model_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        model_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&model_body)
+    );
+    let model: Value = serde_json::from_slice(&model_body).unwrap();
+    assert_eq!(model["input_cost"], json!(1.25));
+    assert_eq!(model["input_cost_decimal"], "1.250000000000");
+    assert_eq!(model["output_cost_decimal"], "2.500000000000");
+    assert_eq!(
+        model["effective_pricing"]["input"]["source"],
+        "model_override"
+    );
+
+    let nested_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ai-providers/{provider_id}/ai-models"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nested_response.status(), StatusCode::OK);
+    let nested_body = axum::body::to_bytes(nested_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let nested: Value = serde_json::from_slice(&nested_body).unwrap();
+    assert_eq!(nested["data"][0]["input_cost"], json!(1.25));
+    assert_eq!(nested["data"][0]["input_cost_decimal"], "1.250000000000");
+    assert_eq!(
+        nested["data"][0]["effective_pricing"]["output"]["source"],
+        "model_override"
+    );
 }
 
 #[tokio::test]
@@ -469,6 +602,8 @@ async fn test_status_endpoint() {
     assert!(json.get("server").is_some());
     assert!(json.get("database").is_some());
     assert!(json.get("memory").is_some());
+    assert_eq!(json["ai_usage_writer"]["enqueued"], 0);
+    assert_eq!(json["ai_usage_writer"]["queue_depth"], 0);
 
     let db = json.get("database").unwrap();
     assert!(db.get("reachable").is_some());
@@ -517,6 +652,141 @@ async fn test_status_metrics_with_prometheus_plugin() {
     let metrics = String::from_utf8(body.to_vec()).unwrap();
     assert!(metrics.contains("# HELP kong_node_info"));
     assert!(metrics.contains("kong_memory_lua_shared_dict_total_bytes"));
+    assert!(metrics.contains("kong_ai_usage_writer_enqueued_total"));
+    assert!(metrics.contains("# TYPE kong_ai_usage_writer_queue_depth gauge"));
+}
+
+#[tokio::test]
+async fn test_ai_usage_list_summary_and_strict_query_contract() {
+    let app = create_test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ai-usage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let page: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page["data"], json!([]));
+    assert_eq!(page["meta"]["mode"], "dbless");
+    assert!(page["snapshot"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ai-usage/summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let summary: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(summary["totals"]["requests"], 0);
+    assert!(summary["snapshot"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+
+    for uri in [
+        "/ai-usage?workspace_id=00000000-0000-0000-0000-000000000000",
+        "/ai-usage?size=1&size=2",
+        "/ai-usage?request_id=ABCDEF0123456789abcdef0123456789",
+        "/ai-usage/summary?timezone=UTC",
+        "/ai-usage/summary?breakdown=provider&timezone=UTC",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error_code"], "analytics_invalid_query");
+        assert_eq!(error["code"], 5);
+    }
+}
+
+#[tokio::test]
+async fn test_ai_usage_hybrid_precedes_query_parsing() {
+    let app =
+        create_test_app_with_usage_runtime(kong_ai::usage::AiUsageRuntime::unsupported_hybrid());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ai-usage?size=not-a-number&workspace_id=forbidden")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error_code"], "analytics_unsupported_in_hybrid");
+}
+
+#[tokio::test]
+async fn test_ai_usage_routes_are_discoverable_and_read_only() {
+    let app = create_test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(http::Method::OPTIONS)
+                .uri("/ai-usage/summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response.headers().get(http::header::ALLOW).unwrap(),
+        "GET, HEAD, OPTIONS"
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/endpoints")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let endpoints: Value = serde_json::from_slice(&body).unwrap();
+    assert!(endpoints["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "/ai-usage"));
+    assert!(endpoints["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "/ai-usage/summary"));
 }
 
 // ========== Service CRUD tests — Service CRUD 测试 ==========
@@ -998,9 +1268,14 @@ fn create_test_app_with_cache() -> (axum::Router, Arc<kong_db::KongCache>) {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -1267,9 +1542,14 @@ fn create_test_app_with_keys() -> (axum::Router, String, String) {
         vaults: Arc::new(DblessDao::<Vault>::new(store.clone())),
         key_sets: Arc::new(DblessDao::<KeySet>::new(store.clone())),
         keys: Arc::new(DblessDao::<Key>::new(store.clone())),
-        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
+        ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(
+            store.clone(),
+        )),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
-        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(
+            store.clone(),
+        )),
+        ai_usage: test_usage_runtime(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone()),
         ))),
@@ -1286,7 +1566,11 @@ fn create_test_app_with_keys() -> (axum::Router, String, String) {
         log_updater: None,
         current_log_level: Arc::new(std::sync::RwLock::new("info".to_string())),
     };
-    (build_admin_router(state), set_id.to_string(), key_id.to_string())
+    (
+        build_admin_router(state),
+        set_id.to_string(),
+        key_id.to_string(),
+    )
 }
 
 #[tokio::test]
@@ -1296,11 +1580,18 @@ async fn test_key_sets_list_and_get() {
     // List — 列表
     let response = app
         .clone()
-        .oneshot(Request::builder().uri("/key-sets").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/key-sets")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let list: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(list["data"].as_array().unwrap().len(), 1);
     assert_eq!(list["data"][0]["name"], "primary");
@@ -1317,7 +1608,9 @@ async fn test_key_sets_list_and_get() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let got: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(got["id"], set_id);
 
@@ -1345,7 +1638,9 @@ async fn test_keys_list_and_get() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let list: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(list["data"].as_array().unwrap().len(), 1);
     assert_eq!(list["data"][0]["kid"], "kid-1");
@@ -1361,7 +1656,9 @@ async fn test_keys_list_and_get() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let got: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(got["kid"], "kid-1");
 }
@@ -1380,7 +1677,9 @@ async fn test_keys_nested_under_key_set() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let list: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(list["data"].as_array().unwrap().len(), 1);
     assert_eq!(list["data"][0]["set"]["id"], set_id);
@@ -1419,7 +1718,9 @@ async fn test_keys_create_requires_kid() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let err: Value = serde_json::from_slice(&body).unwrap();
     assert!(err["message"]
         .as_str()
@@ -1437,7 +1738,9 @@ async fn test_keys_create_requires_jwk_or_pem() {
                 .method(http::Method::POST)
                 .uri("/keys")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({"kid": "kid-1"})).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"kid": "kid-1"})).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1460,6 +1763,11 @@ async fn test_keys_schemas_endpoint() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "schema {} should exist", entity);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "schema {} should exist",
+            entity
+        );
     }
 }

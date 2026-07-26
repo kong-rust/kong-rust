@@ -250,7 +250,23 @@ impl PluginHandler for AiKeyAuthPlugin {
             }
         };
 
-        // 4. Model allow list — 模型白名单
+        // 4. 先注入已认证身份，使后续 model allow-list 拒绝也能进入 usage 事实。
+        ctx.extensions.insert(AiAuthContext {
+            virtual_key_id: key.id,
+            key_name: key.name.clone(),
+            key_prefix: key.key_prefix.clone(),
+            consumer_id: key.consumer_id,
+        });
+        if let Some(consumer_id) = key.consumer_id {
+            ctx.consumer_id = Some(consumer_id);
+            ctx.authenticated_consumer = Some(serde_json::json!({ "id": consumer_id }));
+        }
+        ctx.authenticated_credential = Some(serde_json::json!({
+            "id": key.id,
+            "name": key.name.clone(),
+        }));
+
+        // 5. Model allow list — 模型白名单
         if let Some(allowed) = key.allowed_models.as_ref() {
             if let Some(model) = Self::requested_model(ctx) {
                 if !model_allowed(allowed, &model) {
@@ -272,27 +288,6 @@ impl PluginHandler for AiKeyAuthPlugin {
                 }
             }
         }
-
-        // 5. Inject identity — 注入身份
-        // Primary channel for downstream AI plugins — 下游 AI 插件的主通道
-        ctx.extensions.insert(AiAuthContext {
-            virtual_key_id: key.id,
-            key_name: key.name.clone(),
-            consumer_id: key.consumer_id,
-        });
-
-        // Enables ai-rate-limit limit_by=consumer and consumer hashing
-        // 激活 ai-rate-limit 的 limit_by=consumer 与 consumer 一致性哈希
-        if let Some(consumer_id) = key.consumer_id {
-            ctx.consumer_id = Some(consumer_id);
-            ctx.authenticated_consumer = Some(serde_json::json!({ "id": consumer_id }));
-        }
-
-        // Consumed by access-log serialization — 由 access log 序列化消费
-        ctx.authenticated_credential = Some(serde_json::json!({
-            "id": key.id,
-            "name": key.name,
-        }));
 
         Ok(())
     }

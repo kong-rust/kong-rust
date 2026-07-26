@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026-07-26.1",
+  "snapshot_date": "2026-07-26",
+  "entries": [
+    {
+      "provider_type": "openai",
+      "model_ids": ["gpt-5.6-sol"],
+      "aliases": ["gpt-5.6"],
+      "prefixes": [],
+      "input_usd_per_million": "5.000000000000",
+      "output_usd_per_million": "30.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {"max_prompt_tokens": 272000},
+      "source_url": "https://developers.openai.com/api/docs/models"
+    },
+    {
+      "provider_type": "openai",
+      "model_ids": ["gpt-5.6-terra"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "2.500000000000",
+      "output_usd_per_million": "15.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {"max_prompt_tokens": 272000},
+      "source_url": "https://developers.openai.com/api/docs/models"
+    },
+    {
+      "provider_type": "openai",
+      "model_ids": ["gpt-5.6-luna"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "1.000000000000",
+      "output_usd_per_million": "6.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {"max_prompt_tokens": 272000},
+      "source_url": "https://developers.openai.com/api/docs/models"
+    },
+    {
+      "provider_type": "anthropic",
+      "model_ids": ["claude-fable-5"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "10.000000000000",
+      "output_usd_per_million": "50.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider_type": "anthropic",
+      "model_ids": ["claude-opus-4-8"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "5.000000000000",
+      "output_usd_per_million": "25.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider_type": "anthropic",
+      "model_ids": ["claude-sonnet-5"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "2.000000000000",
+      "output_usd_per_million": "10.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": "2026-09-01T00:00:00Z",
+      "conditions": {},
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider_type": "anthropic",
+      "model_ids": ["claude-sonnet-5"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "3.000000000000",
+      "output_usd_per_million": "15.000000000000",
+      "effective_from": "2026-09-01T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider_type": "anthropic",
+      "model_ids": ["claude-haiku-4-5-20251001"],
+      "aliases": ["claude-haiku-4-5"],
+      "prefixes": [],
+      "input_usd_per_million": "1.000000000000",
+      "output_usd_per_million": "5.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider_type": "gemini",
+      "model_ids": ["gemini-3.6-flash"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "1.500000000000",
+      "output_usd_per_million": "7.500000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "provider_type": "gemini",
+      "model_ids": ["gemini-3.5-flash"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "1.500000000000",
+      "output_usd_per_million": "9.000000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "provider_type": "gemini",
+      "model_ids": ["gemini-3.5-flash-lite"],
+      "aliases": [],
+      "prefixes": [],
+      "input_usd_per_million": "0.300000000000",
+      "output_usd_per_million": "2.500000000000",
+      "effective_from": "2026-07-26T00:00:00Z",
+      "effective_to": null,
+      "conditions": {},
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing"
+    }
+  ]
+}

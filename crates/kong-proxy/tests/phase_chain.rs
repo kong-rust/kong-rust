@@ -11,7 +11,11 @@ mod helpers;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use kong_core::traits::RequestCtx;
+use async_trait::async_trait;
+use kong_core::error::{KongError, Result};
+use kong_core::traits::{
+    LifecyclePhase, Phase, PluginConfig, PluginHandler, RequestCtx, RequestTerminationHint,
+};
 use kong_proxy::phases::PhaseRunner;
 
 use helpers::{make_resolved_plugin, TestPlugin};
@@ -63,6 +67,13 @@ async fn test_access_short_circuit_skips_header_filter() {
     let _ = PhaseRunner::run_access(&resolved, &mut ctx).await;
     assert!(ctx.is_short_circuited());
     assert_eq!(ctx.exit_status, Some(403));
+    assert_eq!(
+        ctx.lifecycle.termination_hint,
+        Some(RequestTerminationHint::PolicyRejected {
+            phase: Phase::Access,
+            plugin: "auth-blocker".to_string(),
+        })
+    );
 
     // Execute header_filter — should still run after short-circuit (Kong compatibility) — 短路后仍应执行 header_filter（Kong 兼容）
     // In Kong, response phases (header_filter, body_filter, log) always execute — 在 Kong 中，响应阶段总是执行
@@ -248,4 +259,85 @@ async fn test_full_phase_chain() {
 
     // Verify all phases were called — 验证所有阶段都被调用了
     assert_eq!(plugin.call_count.load(Ordering::SeqCst), 5);
+}
+
+#[derive(Clone)]
+struct ExplicitGatewayShortCircuitPlugin;
+
+#[async_trait]
+impl PluginHandler for ExplicitGatewayShortCircuitPlugin {
+    fn priority(&self) -> i32 {
+        1000
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0-test"
+    }
+
+    fn name(&self) -> &str {
+        "explicit-gateway-error"
+    }
+
+    async fn access(&self, _config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        ctx.lifecycle
+            .mark_gateway_error(LifecyclePhase::Access, "request_decode");
+        ctx.short_circuited = true;
+        ctx.exit_status = Some(400);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn explicit_gateway_hint_is_not_rewritten_as_policy_rejection() {
+    let resolved = vec![make_resolved_plugin(Arc::new(
+        ExplicitGatewayShortCircuitPlugin,
+    ))];
+    let mut ctx = RequestCtx::new();
+
+    PhaseRunner::run_access(&resolved, &mut ctx).await.unwrap();
+
+    assert_eq!(
+        ctx.lifecycle.termination_hint,
+        Some(RequestTerminationHint::GatewayError {
+            phase: LifecyclePhase::Access,
+            component: "request_decode".to_string(),
+        })
+    );
+}
+
+#[derive(Clone)]
+struct FailingPlugin;
+
+#[async_trait]
+impl PluginHandler for FailingPlugin {
+    fn priority(&self) -> i32 {
+        1000
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0-test"
+    }
+
+    fn name(&self) -> &str {
+        "failing-plugin"
+    }
+
+    async fn rewrite(&self, _config: &PluginConfig, _ctx: &mut RequestCtx) -> Result<()> {
+        Err(KongError::ConfigError("invalid test config".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn plugin_error_marks_gateway_error_with_phase_and_component() {
+    let resolved = vec![make_resolved_plugin(Arc::new(FailingPlugin))];
+    let mut ctx = RequestCtx::new();
+
+    assert!(PhaseRunner::run_rewrite(&resolved, &mut ctx).await.is_err());
+    assert_eq!(
+        ctx.lifecycle.termination_hint,
+        Some(RequestTerminationHint::GatewayError {
+            phase: LifecyclePhase::Rewrite,
+            component: "failing-plugin".to_string(),
+        })
+    );
 }

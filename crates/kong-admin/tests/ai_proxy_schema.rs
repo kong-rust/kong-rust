@@ -41,6 +41,7 @@ fn create_test_app() -> axum::Router {
         ai_providers: Arc::new(DblessDao::<kong_ai::models::AiProviderConfig>::new(store.clone())),
         ai_models: Arc::new(DblessDao::<kong_ai::models::AiModel>::new(store.clone())),
         ai_virtual_keys: Arc::new(DblessDao::<kong_ai::models::AiVirtualKey>::new(store.clone())),
+        ai_usage: kong_ai::usage::AiUsageRuntime::unsupported_hybrid(),
         virtual_key_auth: Arc::new(kong_ai::auth::VirtualKeyAuthenticator::new(Arc::new(
             DblessDao::<kong_ai::models::AiVirtualKey>::new(store),
         ))),

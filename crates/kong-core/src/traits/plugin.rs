@@ -1,14 +1,289 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use std::time::Instant;
+use uuid::Uuid;
 
 use crate::error::Result;
 
+/// 网关请求生命周期中的框架阶段。
+///
+/// 插件阶段继续使用 [`Phase`]；该枚举补充路由、请求体、上游等非插件阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LifecyclePhase {
+    Initialization,
+    Certificate,
+    Routing,
+    Service,
+    RequestBody,
+    Rewrite,
+    Access,
+    Upstream,
+    Response,
+    HeaderFilter,
+    BodyFilter,
+    Logging,
+    Internal,
+}
+
+impl From<Phase> for LifecyclePhase {
+    fn from(phase: Phase) -> Self {
+        match phase {
+            Phase::InitWorker => Self::Initialization,
+            Phase::Certificate => Self::Certificate,
+            Phase::Rewrite => Self::Rewrite,
+            Phase::Access => Self::Access,
+            Phase::Response => Self::Response,
+            Phase::HeaderFilter => Self::HeaderFilter,
+            Phase::BodyFilter => Self::BodyFilter,
+            Phase::Log => Self::Logging,
+        }
+    }
+}
+
+/// 请求结束原因的结构化提示。
+///
+/// 这里只保存分类和组件名，不携带请求正文、上游响应或完整错误文本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTerminationHint {
+    PolicyRejected {
+        phase: Phase,
+        plugin: String,
+    },
+    GatewayError {
+        phase: LifecyclePhase,
+        component: String,
+    },
+    UpstreamSemanticError {
+        provider_type: Option<String>,
+    },
+}
+
+impl RequestTerminationHint {
+    fn priority(&self) -> u8 {
+        match self {
+            Self::PolicyRejected { .. } => 3,
+            Self::GatewayError { .. } => 2,
+            Self::UpstreamSemanticError { .. } => 1,
+        }
+    }
+}
+
+/// 传输错误发生的一侧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequestTransportSource {
+    Upstream,
+    Downstream,
+    Internal,
+    Unknown,
+}
+
+impl RequestTransportSource {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Downstream => 4,
+            Self::Upstream => 3,
+            Self::Internal => 2,
+            Self::Unknown => 1,
+        }
+    }
+}
+
+/// 与具体代理实现解耦的传输错误类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequestTransportErrorKind {
+    ConnectTimeout,
+    ConnectRefused,
+    ConnectNoRoute,
+    Tls,
+    Connect,
+    Bind,
+    Accept,
+    Socket,
+    Protocol,
+    Read,
+    Write,
+    ReadTimeout,
+    WriteTimeout,
+    ConnectionClosed,
+    HttpStatus(u16),
+    File,
+    Internal,
+    Unknown,
+    Custom,
+}
+
+/// 请求级结构化传输错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestTransportError {
+    pub source: RequestTransportSource,
+    pub kind: RequestTransportErrorKind,
+}
+
+impl RequestTransportError {
+    pub const fn new(source: RequestTransportSource, kind: RequestTransportErrorKind) -> Self {
+        Self { source, kind }
+    }
+
+    pub const fn upstream(kind: RequestTransportErrorKind) -> Self {
+        Self::new(RequestTransportSource::Upstream, kind)
+    }
+
+    pub const fn downstream(kind: RequestTransportErrorKind) -> Self {
+        Self::new(RequestTransportSource::Downstream, kind)
+    }
+
+    pub const fn internal(kind: RequestTransportErrorKind) -> Self {
+        Self::new(RequestTransportSource::Internal, kind)
+    }
+
+    pub const fn unknown(kind: RequestTransportErrorKind) -> Self {
+        Self::new(RequestTransportSource::Unknown, kind)
+    }
+
+    pub const fn is_upstream(self) -> bool {
+        matches!(self.source, RequestTransportSource::Upstream)
+    }
+
+    pub const fn is_downstream(self) -> bool {
+        matches!(self.source, RequestTransportSource::Downstream)
+    }
+}
+
+/// 从接收请求到最终日志回调的通用生命周期。
+#[derive(Debug, Clone)]
+pub struct RequestLifecycle {
+    pub request_id: String,
+    pub started_at: DateTime<Utc>,
+    pub started_mono: Instant,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub final_status: Option<u16>,
+    pub upstream_status: Option<u16>,
+    pub upstream_attempted: bool,
+    pub upstream_response_started: bool,
+    pub downstream_send_attempted: bool,
+    pub downstream_response_completed: bool,
+    pub termination_hint: Option<RequestTerminationHint>,
+    pub transport_error: Option<RequestTransportError>,
+}
+
+impl RequestLifecycle {
+    pub fn new() -> Self {
+        Self {
+            request_id: Uuid::new_v4().simple().to_string(),
+            started_at: Utc::now(),
+            started_mono: Instant::now(),
+            finished_at: None,
+            final_status: None,
+            upstream_status: None,
+            upstream_attempted: false,
+            upstream_response_started: false,
+            downstream_send_attempted: false,
+            downstream_response_completed: false,
+            termination_hint: None,
+            transport_error: None,
+        }
+    }
+
+    pub fn mark_policy_rejected(&mut self, phase: Phase, plugin: impl Into<String>) {
+        self.set_termination_hint(RequestTerminationHint::PolicyRejected {
+            phase,
+            plugin: plugin.into(),
+        });
+    }
+
+    pub fn mark_gateway_error(&mut self, phase: LifecyclePhase, component: impl Into<String>) {
+        self.set_termination_hint(RequestTerminationHint::GatewayError {
+            phase,
+            component: component.into(),
+        });
+    }
+
+    pub fn mark_upstream_semantic_error(&mut self, provider_type: Option<String>) {
+        self.set_termination_hint(RequestTerminationHint::UpstreamSemanticError { provider_type });
+    }
+
+    fn set_termination_hint(&mut self, hint: RequestTerminationHint) {
+        let should_replace = self
+            .termination_hint
+            .as_ref()
+            .map(|current| hint.priority() > current.priority())
+            .unwrap_or(true);
+        if should_replace {
+            self.termination_hint = Some(hint);
+        }
+    }
+
+    pub fn mark_upstream_attempted(&mut self) {
+        self.upstream_attempted = true;
+    }
+
+    pub fn mark_upstream_started(&mut self) {
+        self.upstream_attempted = true;
+        self.upstream_response_started = true;
+    }
+
+    pub fn mark_upstream_status(&mut self, status: u16) {
+        self.mark_upstream_started();
+        self.upstream_status = Some(status);
+    }
+
+    pub fn mark_downstream_send_attempted(&mut self) {
+        self.downstream_send_attempted = true;
+    }
+
+    pub fn mark_downstream_completed(&mut self) {
+        self.downstream_send_attempted = true;
+        self.downstream_response_completed = true;
+    }
+
+    pub fn mark_transport_error(&mut self, error: RequestTransportError) {
+        let should_replace = self
+            .transport_error
+            .map(|current| error.source.priority() > current.source.priority())
+            .unwrap_or(true);
+        if should_replace {
+            self.transport_error = Some(error);
+        }
+    }
+
+    /// 在最终日志回调中收口 wall clock 与最终状态。
+    pub fn finish(&mut self, final_status: Option<u16>) {
+        if self.finished_at.is_some() {
+            return;
+        }
+
+        self.final_status = final_status;
+        let elapsed =
+            ChronoDuration::from_std(self.started_mono.elapsed()).unwrap_or(ChronoDuration::MAX);
+        self.finished_at = Some(
+            self.started_at
+                .checked_add_signed(elapsed)
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+        );
+    }
+}
+
+impl Default for RequestLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Request context — passed throughout the request lifecycle for plugins to read and write — 请求上下文 — 在整个请求生命周期中传递，供插件读写
 pub struct RequestCtx {
+    /// Request lifecycle shared by proxy and observers — 代理与观察器共享的请求生命周期
+    pub lifecycle: RequestLifecycle,
     /// Matched route ID — 匹配的路由 ID
     pub route_id: Option<uuid::Uuid>,
+    /// Matched route name snapshot — 匹配时的 Route 名称快照
+    pub route_name: Option<String>,
     /// Matched service ID — 匹配的服务 ID
     pub service_id: Option<uuid::Uuid>,
+    /// Matched service name snapshot — 匹配时的 Service 名称快照
+    pub service_name: Option<String>,
+    /// Matched workspace snapshot — 匹配时的 Workspace 快照
+    pub workspace_id: Option<uuid::Uuid>,
     /// Matched consumer ID — 匹配的消费者 ID
     pub consumer_id: Option<uuid::Uuid>,
     /// Request-level shared data (corresponds to kong.ctx.shared) — 请求级别的共享数据（对应 kong.ctx.shared）
@@ -96,8 +371,12 @@ impl RequestCtx {
     /// Create a new request context — 创建新的请求上下文
     pub fn new() -> Self {
         Self {
+            lifecycle: RequestLifecycle::new(),
             route_id: None,
+            route_name: None,
             service_id: None,
+            service_name: None,
+            workspace_id: None,
             consumer_id: None,
             shared: std::collections::HashMap::new(),
             short_circuited: false,
@@ -252,4 +531,96 @@ pub trait PluginFactory: Send + Sync {
     fn create(&self) -> Box<dyn PluginHandler>;
     /// Plugin name — 插件名称
     fn name(&self) -> &str;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LifecyclePhase, Phase, RequestLifecycle, RequestTerminationHint, RequestTransportError,
+        RequestTransportErrorKind,
+    };
+
+    #[test]
+    fn lifecycle_uses_one_lowercase_simple_uuid() {
+        let lifecycle = RequestLifecycle::new();
+
+        assert_eq!(lifecycle.request_id.len(), 32);
+        assert!(lifecycle
+            .request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+
+    #[test]
+    fn lifecycle_finish_is_idempotent_and_uses_monotonic_elapsed_time() {
+        let mut lifecycle = RequestLifecycle::new();
+        lifecycle.finish(Some(204));
+        let finished_at = lifecycle.finished_at;
+
+        lifecycle.finish(Some(500));
+
+        assert_eq!(lifecycle.final_status, Some(204));
+        assert_eq!(lifecycle.finished_at, finished_at);
+        assert!(lifecycle.finished_at.unwrap() >= lifecycle.started_at);
+    }
+
+    #[test]
+    fn lifecycle_finish_does_not_fill_status_after_finalization() {
+        let mut lifecycle = RequestLifecycle::new();
+        lifecycle.finish(None);
+        let finished_at = lifecycle.finished_at;
+
+        lifecycle.finish(Some(200));
+
+        assert_eq!(lifecycle.final_status, None);
+        assert_eq!(lifecycle.finished_at, finished_at);
+    }
+
+    #[test]
+    fn stronger_termination_hint_is_preserved() {
+        let mut lifecycle = RequestLifecycle::new();
+        lifecycle.mark_upstream_semantic_error(Some("openai".to_string()));
+        lifecycle.mark_gateway_error(LifecyclePhase::BodyFilter, "response_transform");
+        lifecycle.mark_policy_rejected(Phase::Access, "ai-key-auth");
+        lifecycle.mark_gateway_error(LifecyclePhase::Internal, "late_error");
+
+        assert_eq!(
+            lifecycle.termination_hint,
+            Some(RequestTerminationHint::PolicyRejected {
+                phase: Phase::Access,
+                plugin: "ai-key-auth".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn downstream_transport_error_overrides_upstream_error() {
+        let mut lifecycle = RequestLifecycle::new();
+        lifecycle.mark_transport_error(RequestTransportError::upstream(
+            RequestTransportErrorKind::ConnectTimeout,
+        ));
+        lifecycle.mark_transport_error(RequestTransportError::downstream(
+            RequestTransportErrorKind::ConnectionClosed,
+        ));
+        lifecycle.mark_transport_error(RequestTransportError::upstream(
+            RequestTransportErrorKind::Read,
+        ));
+
+        assert_eq!(
+            lifecycle.transport_error,
+            Some(RequestTransportError::downstream(
+                RequestTransportErrorKind::ConnectionClosed,
+            ))
+        );
+    }
+
+    #[test]
+    fn upstream_status_implies_attempt_and_response_start() {
+        let mut lifecycle = RequestLifecycle::new();
+        lifecycle.mark_upstream_status(429);
+
+        assert!(lifecycle.upstream_attempted);
+        assert!(lifecycle.upstream_response_started);
+        assert_eq!(lifecycle.upstream_status, Some(429));
+    }
 }

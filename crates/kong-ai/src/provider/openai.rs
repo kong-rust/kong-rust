@@ -4,6 +4,7 @@
 use crate::codec::{ChatRequest, ChatResponse, ChatStreamChunk, SseEvent, StreamOptions};
 use crate::models::{AiModel, AiProviderConfig, AuthConfig};
 use crate::provider::{AiDriver, ProviderRequest, TokenUsage, UpstreamConfig};
+use crate::usage::normalizer::openai_observation;
 use kong_core::error::{KongError, Result};
 use std::collections::HashMap;
 
@@ -126,24 +127,18 @@ impl AiDriver for OpenAiDriver {
     }
 
     fn extract_usage(&self, body: &str) -> Option<TokenUsage> {
-        let response: ChatResponse = serde_json::from_str(body).ok()?;
-        response.usage.map(|u| TokenUsage {
-            prompt_tokens: Some(u.prompt_tokens),
-            completion_tokens: Some(u.completion_tokens),
-            total_tokens: Some(u.total_tokens),
-        })
+        let raw: serde_json::Value = serde_json::from_str(body).ok()?;
+        let usage = raw.get("usage")?;
+        Some(TokenUsage::from_observation(openai_observation(usage)))
     }
 
     fn extract_stream_usage(&self, event: &SseEvent) -> Option<TokenUsage> {
         if event.is_done() {
             return None;
         }
-        let chunk: ChatStreamChunk = serde_json::from_str(&event.data).ok()?;
-        chunk.usage.map(|u| TokenUsage {
-            prompt_tokens: Some(u.prompt_tokens),
-            completion_tokens: Some(u.completion_tokens),
-            total_tokens: Some(u.total_tokens),
-        })
+        let raw: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+        let usage = raw.get("usage")?;
+        Some(TokenUsage::from_observation(openai_observation(usage)))
     }
 }
 

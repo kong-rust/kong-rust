@@ -11,7 +11,9 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 use kong_core::error::{KongError, Result};
-use kong_core::traits::{PluginConfig, PluginHandler, RequestCtx};
+use kong_core::traits::{
+    LifecyclePhase, PluginConfig, PluginHandler, RequestCtx, RequestLifecycle,
+};
 
 use crate::codec::anthropic_format::AnthropicCodec;
 use crate::codec::responses_format::{self, ResponsesEventState, ResponsesRequest};
@@ -99,9 +101,7 @@ impl<'de> Deserialize<'de> for ModelField {
                 Ok(ModelField::Kong(cfg))
             }
             serde_json::Value::Null => Ok(ModelField::Simple(String::new())),
-            _ => Err(de::Error::custom(
-                "model must be a string or object",
-            )),
+            _ => Err(de::Error::custom("model must be a string or object")),
         }
     }
 }
@@ -218,8 +218,7 @@ impl AiProxyConfig {
 
     /// 获取非空模型组名称 — get a non-empty model group name
     pub fn model_group_name(&self) -> Option<&str> {
-        self
-            .model_group
+        self.model_group
             .as_deref()
             .map(str::trim)
             .filter(|model_group| !model_group.is_empty())
@@ -250,19 +249,34 @@ impl AiProxyConfig {
         let auth_config = if let Some(ref auth) = self.auth {
             let mut map = serde_json::Map::new();
             if let Some(ref hn) = auth.header_name {
-                map.insert("header_name".to_string(), serde_json::Value::String(hn.clone()));
+                map.insert(
+                    "header_name".to_string(),
+                    serde_json::Value::String(hn.clone()),
+                );
             }
             if let Some(ref hv) = auth.header_value {
-                map.insert("header_value".to_string(), serde_json::Value::String(hv.clone()));
+                map.insert(
+                    "header_value".to_string(),
+                    serde_json::Value::String(hv.clone()),
+                );
             }
             if let Some(ref pn) = auth.param_name {
-                map.insert("param_name".to_string(), serde_json::Value::String(pn.clone()));
+                map.insert(
+                    "param_name".to_string(),
+                    serde_json::Value::String(pn.clone()),
+                );
             }
             if let Some(ref pv) = auth.param_value {
-                map.insert("param_value".to_string(), serde_json::Value::String(pv.clone()));
+                map.insert(
+                    "param_value".to_string(),
+                    serde_json::Value::String(pv.clone()),
+                );
             }
             if let Some(ref pl) = auth.param_location {
-                map.insert("param_location".to_string(), serde_json::Value::String(pl.clone()));
+                map.insert(
+                    "param_location".to_string(),
+                    serde_json::Value::String(pl.clone()),
+                );
             }
             serde_json::Value::Object(map)
         } else {
@@ -328,12 +342,14 @@ impl AiProxyPlugin {
             hasher.update(route_id.as_bytes());
         }
         hasher.update(
-            serde_json::to_vec(raw_config.get("model_routes").unwrap_or(&serde_json::Value::Null))
-                .map_err(|error| {
-                    KongError::InternalError(format!(
-                        "failed to fingerprint AI model routes: {error}"
-                    ))
-                })?,
+            serde_json::to_vec(
+                raw_config
+                    .get("model_routes")
+                    .unwrap_or(&serde_json::Value::Null),
+            )
+            .map_err(|error| {
+                KongError::InternalError(format!("failed to fingerprint AI model routes: {error}"))
+            })?,
         );
         let key: [u8; 32] = hasher.finalize().into();
 
@@ -395,6 +411,290 @@ fn remap_tool_call_index(data: &str, counter: &mut u32) -> Option<String> {
     }
 }
 
+fn merge_token_usage(current: &mut TokenUsage, observation: TokenUsage) {
+    if observation.prompt_tokens.is_some() {
+        current.prompt_tokens = observation.prompt_tokens;
+    }
+    if observation.completion_tokens.is_some() {
+        current.completion_tokens = observation.completion_tokens;
+    }
+    if observation.total_tokens.is_some() {
+        current.total_tokens = observation.total_tokens;
+    }
+    if observation.reasoning_tokens.is_some() {
+        current.reasoning_tokens = observation.reasoning_tokens;
+    }
+    if observation.cache_read_input_tokens.is_some() {
+        current.cache_read_input_tokens = observation.cache_read_input_tokens;
+    }
+    if observation.cache_write_input_tokens.is_some() {
+        current.cache_write_input_tokens = observation.cache_write_input_tokens;
+    }
+    current.invalid |= observation.invalid;
+}
+
+fn derive_total_if_missing(usage: &mut TokenUsage) {
+    if usage.total_tokens.is_some() {
+        return;
+    }
+    if let (Some(prompt), Some(completion)) = (usage.prompt_tokens, usage.completion_tokens) {
+        match prompt.checked_add(completion) {
+            Some(total) => usage.total_tokens = Some(total),
+            None => usage.invalid = true,
+        }
+    }
+}
+
+fn responses_token_usage(usage: &serde_json::Value) -> TokenUsage {
+    TokenUsage::from_observation(crate::usage::normalizer::openai_observation(usage))
+}
+
+fn mark_response_transform_error(
+    lifecycle: &mut RequestLifecycle,
+    response_status: Option<u16>,
+    component: &'static str,
+) {
+    let upstream_status = lifecycle.upstream_status.or(response_status);
+    if matches!(upstream_status, Some(200..=299)) {
+        lifecycle.mark_gateway_error(LifecyclePhase::BodyFilter, component);
+    }
+}
+
+/// 增量解码流式响应，保留跨 chunk 的不完整 UTF-8 尾字节。
+///
+/// 返回 `(可安全送入协议 parser 的文本, 是否观察到真正无效的 UTF-8)`。
+fn decode_stream_chunk(state: &mut AiRequestState, chunk: &[u8]) -> (Option<String>, bool) {
+    let mut bytes = std::mem::take(&mut state.stream_utf8_buffer);
+    bytes.extend_from_slice(chunk);
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => ((!text.is_empty()).then(|| text.to_string()), false),
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            let valid = (!bytes[..valid_up_to].is_empty()).then(|| {
+                std::str::from_utf8(&bytes[..valid_up_to])
+                    .expect("valid_up_to 之前必为合法 UTF-8")
+                    .to_string()
+            });
+            if error.error_len().is_none() {
+                state
+                    .stream_utf8_buffer
+                    .extend_from_slice(&bytes[valid_up_to..]);
+                (valid, false)
+            } else {
+                (valid, true)
+            }
+        }
+    }
+}
+
+fn discard_incomplete_stream_utf8(state: &mut AiRequestState) -> bool {
+    if state.stream_utf8_buffer.is_empty() {
+        false
+    } else {
+        state.stream_utf8_buffer.clear();
+        true
+    }
+}
+
+fn estimate_completion(model: &str, text: &str) -> u64 {
+    crate::token::TokenCounter::new().count(model, text, None)
+}
+
+fn estimate_completion_segments<'a>(
+    model: &str,
+    segments: impl IntoIterator<Item = &'a str>,
+) -> Option<u64> {
+    segments.into_iter().try_fold(0u64, |total, text| {
+        total.checked_add(estimate_completion(model, text))
+    })
+}
+
+fn update_chat_completion_estimate(
+    state: &mut AiRequestState,
+    response: &crate::codec::ChatResponse,
+) {
+    if state.usage.completion_tokens.is_some() || response.choices.is_empty() {
+        return;
+    }
+    let mut choice_texts = Vec::with_capacity(response.choices.len());
+    for choice in &response.choices {
+        let mut text = String::new();
+        if let Some(content) = &choice.message.content {
+            collect_content_text(content, &mut text);
+        }
+        if let Some(tool_calls) = &choice.message.tool_calls {
+            for tool_call in tool_calls {
+                text.push_str(&tool_call.function.arguments);
+            }
+        }
+        choice_texts.push(text);
+    }
+    match estimate_completion_segments(
+        &state.model.model_name,
+        choice_texts.iter().map(String::as_str),
+    ) {
+        Some(tokens) => state.estimated_completion_tokens = Some(tokens),
+        None => state.completion_observation_invalid = true,
+    }
+}
+
+fn collect_content_text(value: &serde_json::Value, output: &mut String) {
+    match value {
+        serde_json::Value::String(value) => output.push_str(value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_content_text(value, output);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(text) = object.get("text").and_then(serde_json::Value::as_str) {
+                output.push_str(text);
+            } else if let Some(content) = object.get("content") {
+                collect_content_text(content, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn append_chat_stream_completion_text(state: &mut AiRequestState, data: &str) {
+    let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    let Some(choices) = chunk.get("choices").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for choice in choices {
+        let Some(choice_index) = choice.get("index").and_then(serde_json::Value::as_u64) else {
+            state.completion_observation_invalid = true;
+            continue;
+        };
+        let Some(delta) = choice.get("delta") else {
+            continue;
+        };
+        let choice_text = state
+            .completion_text_by_choice
+            .entry(choice_index)
+            .or_default();
+        if let Some(content) = delta.get("content") {
+            collect_content_text(content, choice_text);
+        }
+        if let Some(tool_calls) = delta
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+        {
+            for tool_call in tool_calls {
+                if let Some(arguments) = tool_call
+                    .pointer("/function/arguments")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    choice_text.push_str(arguments);
+                }
+            }
+        }
+    }
+}
+
+fn collect_responses_output(value: &serde_json::Value, output: &mut String) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_responses_output(value, output);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            match object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+            {
+                "output_text" => {
+                    if let Some(text) = object.get("text").and_then(serde_json::Value::as_str) {
+                        output.push_str(text);
+                    }
+                }
+                "function_call" => {
+                    if let Some(arguments) =
+                        object.get("arguments").and_then(serde_json::Value::as_str)
+                    {
+                        output.push_str(arguments);
+                    }
+                }
+                _ => {}
+            }
+            for key in ["output", "content"] {
+                if let Some(value) = object.get(key) {
+                    collect_responses_output(value, output);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn update_responses_completion_estimate(state: &mut AiRequestState, response: &serde_json::Value) {
+    if state.usage.completion_tokens.is_some() {
+        return;
+    }
+    let Some(output) = response.get("output") else {
+        return;
+    };
+    let mut text = String::new();
+    collect_responses_output(output, &mut text);
+    state.estimated_completion_tokens = Some(estimate_completion(&state.model.model_name, &text));
+}
+
+fn append_responses_stream_completion_text(
+    state: &mut AiRequestState,
+    event: &serde_json::Value,
+) -> bool {
+    let event_type = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if matches!(
+        event_type,
+        "response.output_text.delta" | "response.function_call_arguments.delta"
+    ) {
+        if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) {
+            state.completion_text.push_str(delta);
+        }
+        return false;
+    }
+    if matches!(event_type, "response.completed" | "response.incomplete") {
+        if let Some(response) = event.get("response") {
+            if let Some(output) = response.get("output") {
+                state.completion_text.clear();
+                collect_responses_output(output, &mut state.completion_text);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn finalize_stream_completion_estimate(state: &mut AiRequestState) {
+    if state.stream_terminal == crate::usage::StreamTerminalState::Complete
+        && state.usage.completion_tokens.is_none()
+        && !state.completion_observation_invalid
+    {
+        state.estimated_completion_tokens = if state.completion_text_by_choice.is_empty() {
+            Some(estimate_completion(
+                &state.model.model_name,
+                &state.completion_text,
+            ))
+        } else {
+            estimate_completion_segments(
+                &state.model.model_name,
+                state.completion_text_by_choice.values().map(String::as_str),
+            )
+        };
+        if state.estimated_completion_tokens.is_none() {
+            state.completion_observation_invalid = true;
+        }
+    }
+}
+
 // ============ PluginHandler 实现 ============
 
 #[async_trait]
@@ -416,14 +716,22 @@ impl PluginHandler for AiProxyPlugin {
         true
     }
 
+    async fn rewrite(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        crate::usage::collector::observe_request_metadata(&config.config, ctx);
+        Ok(())
+    }
+
     async fn access(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
         let cfg: AiProxyConfig = crate::parse_plugin_config(config)?;
 
         // 1. 解析请求体
-        let body_str = ctx.request_body.as_ref().ok_or_else(|| KongError::PluginError {
-            plugin_name: "ai-proxy".to_string(),
-            message: "request body is empty".to_string(),
-        })?;
+        let body_str = ctx
+            .request_body
+            .as_ref()
+            .ok_or_else(|| KongError::PluginError {
+                plugin_name: "ai-proxy".to_string(),
+                message: "request body is empty".to_string(),
+            })?;
 
         // 检查请求体大小限制
         if body_str.len() > cfg.max_request_body_size * 1024 {
@@ -467,24 +775,23 @@ impl PluginHandler for AiProxyPlugin {
                 return Ok(());
             }
 
-            let (chat_req, stripped) = responses_format::responses_to_chat(&req).map_err(|e| {
-                KongError::PluginError {
+            let (chat_req, stripped) =
+                responses_format::responses_to_chat(&req).map_err(|e| KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
                     message: format!("failed to convert responses request: {}", e),
-                }
-            })?;
+                })?;
 
             stripped_tools = Some(stripped);
             responses_request = Some(req);
             chat_req
         } else {
             match effective_protocol {
-                "anthropic" => {
-                    AnthropicCodec::decode_request(body_str).map_err(|e| KongError::PluginError {
+                "anthropic" => AnthropicCodec::decode_request(body_str).map_err(|e| {
+                    KongError::PluginError {
                         plugin_name: "ai-proxy".to_string(),
                         message: format!("invalid Anthropic chat request body: {}", e),
-                    })?
-                }
+                    }
+                })?,
                 _ => serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
                     message: format!("invalid chat request body: {}", e),
@@ -542,13 +849,15 @@ impl PluginHandler for AiProxyPlugin {
             // AI 网关智能路由：正则匹配 model 名 → 具体 provider + model（含加权选择）
             // AI Gateway routing: regex match model name → concrete provider + model (with weighted selection)
             let router = self.model_router(ctx.route_id, &config.config, &cfg.model_routes)?;
-            let resolution = router.resolve(&model_name).ok_or_else(|| KongError::PluginError {
-                plugin_name: "ai-proxy".to_string(),
-                message: format!(
-                    "no model route matched for model '{}' — 无路由规则匹配",
-                    model_name
-                ),
-            })?;
+            let resolution = router
+                .resolve(&model_name)
+                .ok_or_else(|| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!(
+                        "no model route matched for model '{}' — 无路由规则匹配",
+                        model_name
+                    ),
+                })?;
 
             let driver = self
                 .driver_registry
@@ -609,7 +918,10 @@ impl PluginHandler for AiProxyPlugin {
                 .get(&provider_config.provider_type)
                 .ok_or_else(|| KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
-                    message: format!("unsupported provider type: {}", provider_config.provider_type),
+                    message: format!(
+                        "unsupported provider type: {}",
+                        provider_config.provider_type
+                    ),
                 })?
                 .clone();
 
@@ -628,8 +940,7 @@ impl PluginHandler for AiProxyPlugin {
 
         // 6.5 v1/responses pass-through 检测
         // 如果是 v1/responses 且 provider 是 OpenAI，直接 pass-through（不做格式转换）
-        let is_responses_pass_through =
-            is_responses_route && driver.provider_type() == "openai";
+        let is_responses_pass_through = is_responses_route && driver.provider_type() == "openai";
 
         if is_responses_pass_through {
             // Pass-through：保留原始 Responses 字段，仅用路由后的实际模型名覆盖 model。
@@ -702,6 +1013,12 @@ impl PluginHandler for AiProxyPlugin {
                 ai_model.model_name, stream_mode
             );
 
+            crate::usage::collector::observe_model_selection(
+                ctx,
+                &ai_model,
+                &provider_config,
+                stream_mode,
+            );
             let ai_state = AiRequestState {
                 driver,
                 model: ai_model,
@@ -709,14 +1026,28 @@ impl PluginHandler for AiProxyPlugin {
                 stream_mode,
                 client_protocol: ClientProtocol::OpenAi,
                 sse_parser: if stream_mode {
-                    Some(crate::codec::SseParser::new(crate::codec::SseFormat::Standard))
+                    Some(crate::codec::SseParser::new(
+                        crate::codec::SseFormat::Standard,
+                    ))
                 } else {
                     None
                 },
+                stream_utf8_buffer: Vec::new(),
                 usage: TokenUsage::default(),
+                estimated_completion_tokens: None,
+                completion_text: String::new(),
+                completion_text_by_choice: Default::default(),
+                completion_observation_invalid: false,
                 response_buffer: None,
                 request_start: Instant::now(),
                 ttft: None,
+                valid_stream_event_seen: false,
+                stream_terminal: if stream_mode {
+                    crate::usage::StreamTerminalState::Pending
+                } else {
+                    crate::usage::StreamTerminalState::NotStreaming
+                },
+                first_stream_event_at: None,
                 route_type: cfg.route_type.clone(),
                 is_first_stream_event: true,
                 responses_mode: false,
@@ -777,10 +1108,8 @@ impl PluginHandler for AiProxyPlugin {
         ctx.upstream_body = Some(provider_request.body);
 
         // 设置上游请求头（认证 + Content-Type + provider 额外头）
-        ctx.upstream_headers_to_set.push((
-            "Content-Type".to_string(),
-            provider_request.content_type,
-        ));
+        ctx.upstream_headers_to_set
+            .push(("Content-Type".to_string(), provider_request.content_type));
         for (k, v) in &upstream.headers {
             ctx.upstream_headers_to_set.push((k.clone(), v.clone()));
         }
@@ -810,6 +1139,12 @@ impl PluginHandler for AiProxyPlugin {
 
         // 11. 存储跨阶段状态
         let responses_mode = is_responses_route;
+        crate::usage::collector::observe_model_selection(
+            ctx,
+            &ai_model,
+            &provider_config,
+            stream_mode,
+        );
         let ai_state = AiRequestState {
             driver,
             model: ai_model,
@@ -817,10 +1152,22 @@ impl PluginHandler for AiProxyPlugin {
             stream_mode,
             client_protocol,
             sse_parser: None,
+            stream_utf8_buffer: Vec::new(),
             usage: TokenUsage::default(),
+            estimated_completion_tokens: None,
+            completion_text: String::new(),
+            completion_text_by_choice: Default::default(),
+            completion_observation_invalid: false,
             response_buffer: None,
             request_start: Instant::now(),
             ttft: None,
+            valid_stream_event_seen: false,
+            stream_terminal: if stream_mode {
+                crate::usage::StreamTerminalState::Pending
+            } else {
+                crate::usage::StreamTerminalState::NotStreaming
+            },
+            first_stream_event_at: None,
             route_type: cfg.route_type.clone(),
             is_first_stream_event: true,
             responses_mode,
@@ -871,37 +1218,47 @@ impl PluginHandler for AiProxyPlugin {
             .get("content-type")
             .cloned()
             .unwrap_or_default();
-
-        let is_stream = content_type.contains("text/event-stream")
-            || content_type.contains("application/x-ndjson")
-            || content_type.contains("application/stream+json");
+        let media_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let is_ndjson = media_type.eq_ignore_ascii_case("application/x-ndjson")
+            || media_type.eq_ignore_ascii_case("application/stream+json");
+        let is_stream = media_type.eq_ignore_ascii_case("text/event-stream") || is_ndjson;
 
         // Remove Content-Length: body transformation changes response size — 移除 Content-Length：body 转换会改变响应体大小
-        ctx.response_headers_to_remove.push("content-length".to_string());
-        ctx.response_headers_to_remove.push("content-encoding".to_string());
+        ctx.response_headers_to_remove
+            .push("content-length".to_string());
+        ctx.response_headers_to_remove
+            .push("content-encoding".to_string());
 
         if is_stream {
             // 初始化流式解析状态
             ai_state.stream_mode = true;
+            let stream_format = if is_ndjson {
+                crate::codec::SseFormat::Ndjson
+            } else {
+                crate::codec::SseFormat::Standard
+            };
             ai_state.sse_parser = Some(crate::codec::SseParser::new(
-                crate::codec::SseFormat::Standard,
+                stream_format,
             ));
             ai_state.response_buffer = Some(String::new());
 
             // 设置客户端响应 Content-Type 为 SSE
-            ctx.response_headers_to_set.push((
-                "content-type".to_string(),
-                "text/event-stream".to_string(),
-            ));
+            ctx.response_headers_to_set
+                .push(("content-type".to_string(), "text/event-stream".to_string()));
 
-            debug!("ai-proxy header_filter: detected streaming response, content-type={}", content_type);
+            debug!(
+                "ai-proxy header_filter: detected streaming response, content-type={}",
+                content_type
+            );
         } else if !ai_state.responses_pass_through {
             // Translation paths always emit JSON. Queue this before Pingora sends
             // the downstream headers; body_filter runs too late to change them.
-            ctx.response_headers_to_set.push((
-                "content-type".to_string(),
-                "application/json".to_string(),
-            ));
+            ctx.response_headers_to_set
+                .push(("content-type".to_string(), "application/json".to_string()));
         }
 
         if cfg.model_name_header && !ai_state.model.model_name.is_empty() {
@@ -934,40 +1291,49 @@ impl PluginHandler for AiProxyPlugin {
                 // 使用带缓冲的 SseParser 处理跨 chunk 边界的 SSE 事件
                 let mut events = Vec::new();
                 if let Some(chunk) = body.as_ref() {
-                    if let Ok(chunk_str) = std::str::from_utf8(chunk) {
+                    let (chunk, invalid) = decode_stream_chunk(state, chunk);
+                    state.completion_observation_invalid |= invalid;
+                    if let Some(chunk) = chunk {
                         if let Some(ref mut parser) = state.sse_parser {
-                            events.extend(parser.feed(chunk_str));
+                            events.extend(parser.feed(&chunk));
                         }
                     }
                 }
                 if end_of_stream {
+                    state.completion_observation_invalid |= discard_incomplete_stream_utf8(state);
                     if let Some(ref mut parser) = state.sse_parser {
                         events.extend(parser.flush());
                     }
                 }
                 // 从 SSE 事件中提取 usage（response.completed 事件中 usage 嵌套在 response 内）
                 for event in &events {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        // 优先查找顶层 usage，回退查找 response.usage
-                        let usage = val
-                            .get("usage")
-                            .or_else(|| val.get("response").and_then(|r| r.get("usage")));
-                        if let Some(usage) = usage {
-                            let input = usage
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let output = usage
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            state.usage = TokenUsage {
-                                prompt_tokens: Some(input),
-                                completion_tokens: Some(output),
-                                total_tokens: Some(input + output),
-                            };
-                        }
+                    state.observe_stream_event(event);
+                    if state.stream_terminal == crate::usage::StreamTerminalState::ProviderFailed {
+                        ctx.lifecycle.mark_upstream_semantic_error(Some(
+                            state.provider_config.provider_type.clone(),
+                        ));
                     }
+                    match serde_json::from_str::<serde_json::Value>(&event.data) {
+                        Ok(val) => {
+                            if append_responses_stream_completion_text(state, &val) {
+                                state.completion_observation_invalid = false;
+                            }
+                            // 优先查找顶层 usage，回退查找 response.usage
+                            let usage = val
+                                .get("usage")
+                                .or_else(|| val.get("response").and_then(|r| r.get("usage")));
+                            if let Some(usage) = usage {
+                                merge_token_usage(&mut state.usage, responses_token_usage(usage));
+                            }
+                        }
+                        Err(_) if !event.is_done() => {
+                            state.completion_observation_invalid = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if end_of_stream {
+                    finalize_stream_completion_estimate(state);
                 }
             } else {
                 // 非流式 pass-through：收集完整响应体，解析 JSON 提取 usage
@@ -979,24 +1345,15 @@ impl PluginHandler for AiProxyPlugin {
                     }
                 }
                 if end_of_stream {
-                    if let Some(ref buf) = state.response_buffer {
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(buf) {
-                            if let Some(usage) = data.get("usage") {
-                                let input = usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let output = usage
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                state.usage = TokenUsage {
-                                    prompt_tokens: Some(input),
-                                    completion_tokens: Some(output),
-                                    total_tokens: Some(input + output),
-                                };
-                            }
+                    let data = state
+                        .response_buffer
+                        .as_deref()
+                        .and_then(|buffer| serde_json::from_str::<serde_json::Value>(buffer).ok());
+                    if let Some(data) = data {
+                        if let Some(usage) = data.get("usage") {
+                            state.usage = responses_token_usage(usage);
                         }
+                        update_responses_completion_estimate(state, &data);
                     }
                 }
             }
@@ -1009,49 +1366,78 @@ impl PluginHandler for AiProxyPlugin {
             // 解析 SSE 事件：feed chunk（如有）+ end_of_stream 时 flush
             let mut events = Vec::new();
             if let Some(body_bytes) = body.as_ref() {
-                // invalid UTF-8 时跳过本 chunk 的 feed，但不 return（确保后续 flush 仍执行）
-                if let Ok(chunk) = std::str::from_utf8(body_bytes) {
+                let (chunk, invalid) = decode_stream_chunk(state, body_bytes);
+                if let Some(chunk) = chunk {
                     if let Some(ref mut parser) = state.sse_parser {
-                        events.extend(parser.feed(chunk));
+                        events.extend(parser.feed(&chunk));
                     }
+                }
+                if invalid {
+                    state.completion_observation_invalid = true;
+                    mark_response_transform_error(
+                        &mut ctx.lifecycle,
+                        ctx.response_status,
+                        "responses_stream_utf8_decode",
+                    );
                 }
             }
             // flush 必须在 body 检查外部，确保 body=None + end_of_stream=true 时也能触发
             if end_of_stream {
+                if discard_incomplete_stream_utf8(state) {
+                    state.completion_observation_invalid = true;
+                    mark_response_transform_error(
+                        &mut ctx.lifecycle,
+                        ctx.response_status,
+                        "responses_stream_utf8_decode",
+                    );
+                }
                 if let Some(ref mut parser) = state.sse_parser {
                     events.extend(parser.flush());
                 }
             }
 
-            if !events.is_empty() && state.ttft.is_none() {
-                state.ttft = Some(std::time::Instant::now());
-            }
-
             let mut output = String::new();
 
             for event in &events {
+                state.observe_stream_event(event);
+                if state.stream_terminal == crate::usage::StreamTerminalState::ProviderFailed {
+                    ctx.lifecycle.mark_upstream_semantic_error(Some(
+                        state.provider_config.provider_type.clone(),
+                    ));
+                }
                 // 提取 usage
                 if let Some(usage) = state.driver.extract_stream_usage(event) {
-                    if let Some(pt) = usage.prompt_tokens {
-                        state.usage.prompt_tokens = Some(pt);
-                    }
-                    if let Some(ct) = usage.completion_tokens {
-                        state.usage.completion_tokens = Some(ct);
-                    }
+                    merge_token_usage(&mut state.usage, usage);
                 }
 
                 if event.is_done() {
                     // [DONE] → 注入 usage 后通过状态机生成 response.completed 事件
-                    if let Some(ref mut es) = state.responses_event_state {
-                        let pt = state.usage.prompt_tokens.unwrap_or(0);
-                        let ct = state.usage.completion_tokens.unwrap_or(0);
-                        es.usage = crate::codec::responses_format::ResponsesUsage {
-                            input_tokens: pt,
-                            output_tokens: ct,
-                            total_tokens: pt + ct,
-                        };
-                        for e in es.process_done() {
-                            output.push_str(&e);
+                    let pt = state.usage.prompt_tokens.unwrap_or(0);
+                    let ct = state.usage.completion_tokens.unwrap_or(0);
+                    if let Some(total_tokens) =
+                        state.usage.total_tokens.or_else(|| pt.checked_add(ct))
+                    {
+                        if let Some(ref mut es) = state.responses_event_state {
+                            es.usage = crate::codec::responses_format::ResponsesUsage {
+                                input_tokens: pt,
+                                output_tokens: ct,
+                                total_tokens,
+                            };
+                            for e in es.process_done() {
+                                output.push_str(&e);
+                            }
+                        }
+                    } else {
+                        state.usage.invalid = true;
+                        mark_response_transform_error(
+                            &mut ctx.lifecycle,
+                            ctx.response_status,
+                            "responses_usage_overflow",
+                        );
+                        if let Some(ref mut es) = state.responses_event_state {
+                            for e in es.process_error("invalid provider usage") {
+                                output.push_str(&e);
+                            }
                         }
                     }
                     continue;
@@ -1060,6 +1446,7 @@ impl PluginHandler for AiProxyPlugin {
                 // 通过 driver 转换事件格式 → OpenAI chat chunk
                 match state.driver.transform_stream_event(event, &state.model) {
                     Ok(Some(mut transformed)) => {
+                        append_chat_stream_completion_text(state, &transformed.data);
                         // 重映射 tool_call index（Anthropic 全局 → 本地 0-based）
                         if let Some(remapped) = remap_tool_call_index(
                             &transformed.data,
@@ -1076,7 +1463,20 @@ impl PluginHandler for AiProxyPlugin {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        warn!("ai-proxy body_filter (responses): SSE transform error: {}", e);
+                        warn!(
+                            "ai-proxy body_filter (responses): SSE transform error: {}",
+                            e
+                        );
+                        state.completion_observation_invalid = true;
+                        if state.stream_terminal
+                            != crate::usage::StreamTerminalState::ProviderFailed
+                        {
+                            mark_response_transform_error(
+                                &mut ctx.lifecycle,
+                                ctx.response_status,
+                                "responses_stream_transform",
+                            );
+                        }
                     }
                 }
             }
@@ -1089,11 +1489,8 @@ impl PluginHandler for AiProxyPlugin {
             }
 
             if end_of_stream {
-                let pt = state.usage.prompt_tokens.unwrap_or(0);
-                let ct = state.usage.completion_tokens.unwrap_or(0);
-                if pt > 0 || ct > 0 {
-                    state.usage.total_tokens = Some(pt + ct);
-                }
+                finalize_stream_completion_estimate(state);
+                derive_total_if_missing(&mut state.usage);
             }
 
             return Ok(());
@@ -1101,49 +1498,58 @@ impl PluginHandler for AiProxyPlugin {
 
         // ---- 流式处理分支（chat completions / Anthropic 客户端协议）----
         if state.stream_mode {
+            let had_body = body.is_some();
+            let mut events = Vec::new();
             if let Some(body_bytes) = body.as_ref() {
-                let chunk = match std::str::from_utf8(body_bytes) {
-                    Ok(s) => s.to_string(),
-                    Err(e) => {
-                        warn!("ai-proxy body_filter: invalid UTF-8 in SSE chunk: {}", e);
-                        return Ok(());
-                    }
-                };
-
-                // 解析 SSE 事件：end_of_stream 时同时 flush 缓冲区
-                let events = if end_of_stream {
-                    let mut evts = if let Some(ref mut parser) = state.sse_parser {
-                        parser.feed(&chunk)
-                    } else {
-                        vec![]
-                    };
+                let (chunk, invalid) = decode_stream_chunk(state, body_bytes);
+                if let Some(chunk) = chunk {
                     if let Some(ref mut parser) = state.sse_parser {
-                        evts.extend(parser.flush());
+                        events.extend(parser.feed(&chunk));
                     }
-                    evts
-                } else {
-                    if let Some(ref mut parser) = state.sse_parser {
-                        parser.feed(&chunk)
-                    } else {
-                        vec![]
-                    }
-                };
-
-                // 记录首 token 时间（TTFT）
-                if !events.is_empty() && state.ttft.is_none() {
-                    state.ttft = Some(std::time::Instant::now());
                 }
+                if invalid {
+                    warn!("ai-proxy body_filter: invalid UTF-8 in stream chunk");
+                    state.completion_observation_invalid = true;
+                    mark_response_transform_error(
+                        &mut ctx.lifecycle,
+                        ctx.response_status,
+                        "stream_utf8_decode",
+                    );
+                }
+            }
+            // Pingora 可以用独立的 body=None + EOS 通知结束，必须照样 flush 残留事件。
+            if end_of_stream {
+                if discard_incomplete_stream_utf8(state) {
+                    warn!("ai-proxy body_filter: incomplete UTF-8 at end of stream");
+                    state.completion_observation_invalid = true;
+                    mark_response_transform_error(
+                        &mut ctx.lifecycle,
+                        ctx.response_status,
+                        "stream_utf8_decode",
+                    );
+                }
+                if let Some(ref mut parser) = state.sse_parser {
+                    events.extend(parser.flush());
+                }
+            }
 
-                // 转换每个 SSE 事件并拼装输出
-                let mut output = String::new();
-                let is_anthropic_client = state.client_protocol == ClientProtocol::Anthropic;
+            // 转换每个流事件并拼装输出
+            let mut output = String::new();
+            let is_anthropic_client = state.client_protocol == ClientProtocol::Anthropic;
 
-                for event in &events {
-                    // [DONE] 终止事件
-                    if event.is_done() {
-                        if is_anthropic_client {
-                            // Anthropic 客户端协议：[DONE] → message_delta + message_stop
-                            if let Ok(encoded) = AnthropicCodec::encode_stream_event(event, false) {
+            for event in &events {
+                state.observe_stream_event(event);
+                if state.stream_terminal == crate::usage::StreamTerminalState::ProviderFailed {
+                    ctx.lifecycle.mark_upstream_semantic_error(Some(
+                        state.provider_config.provider_type.clone(),
+                    ));
+                }
+                // [DONE] 终止事件
+                if event.is_done() {
+                    if is_anthropic_client {
+                        // Anthropic 客户端协议：[DONE] → message_delta + message_stop
+                        match AnthropicCodec::encode_stream_event(event, false) {
+                            Ok(encoded) => {
                                 for enc_event in &encoded {
                                     output.push_str(&format!(
                                         "event: {}\ndata: {}\n\n",
@@ -1151,42 +1557,51 @@ impl PluginHandler for AiProxyPlugin {
                                     ));
                                 }
                             }
-                        } else {
-                            output.push_str("data: [DONE]\n\n");
-                        }
-                        continue;
-                    }
-
-                    // 提取 token usage（在 transform 之前，使用原始事件格式）
-                    // Extract token usage before transform — using raw provider event format
-                    if let Some(usage) = state.driver.extract_stream_usage(event) {
-                        // 使用替换而非累加：兼容所有 provider 的语义
-                        // - OpenAI：仅最后一个 chunk 携带 usage，替换 = 赋值
-                        // - Anthropic：分两次发送（input_tokens / output_tokens），各字段独立替换
-                        // - Gemini：每个 chunk 携带累计值，替换 = 取最新值
-                        // Use replacement instead of accumulation — works for all providers
-                        if let Some(pt) = usage.prompt_tokens {
-                            state.usage.prompt_tokens = Some(pt);
-                        }
-                        if let Some(ct) = usage.completion_tokens {
-                            state.usage.completion_tokens = Some(ct);
-                        }
-                    }
-
-                    // 通过 driver 转换事件格式（OpenAI 直通，Anthropic provider 需转换）
-                    match state.driver.transform_stream_event(event, &state.model) {
-                        Ok(Some(mut transformed)) => {
-                            // 重映射 tool_call index（Anthropic 全局 → 本地 0-based）
-                            if let Some(remapped) = remap_tool_call_index(
-                                &transformed.data,
-                                &mut state.stream_tool_call_count,
-                            ) {
-                                transformed.data = remapped;
+                            Err(error) => {
+                                warn!(
+                                    "ai-proxy body_filter: Anthropic 终态编码失败: {}",
+                                    error
+                                );
+                                mark_response_transform_error(
+                                    &mut ctx.lifecycle,
+                                    ctx.response_status,
+                                    "anthropic_stream_encode",
+                                );
                             }
-                            // 如果客户端协议为 Anthropic，进一步编码为 Anthropic SSE 格式
-                            if is_anthropic_client {
-                                let is_first = state.is_first_stream_event;
-                                if let Ok(encoded) = AnthropicCodec::encode_stream_event(&transformed, is_first) {
+                        }
+                    } else {
+                        output.push_str("data: [DONE]\n\n");
+                    }
+                    continue;
+                }
+
+                // 提取 token usage（在 transform 之前，使用原始事件格式）
+                // Extract token usage before transform — using raw provider event format
+                if let Some(usage) = state.driver.extract_stream_usage(event) {
+                    // 使用替换而非累加：兼容所有 provider 的语义
+                    // - OpenAI：仅最后一个 chunk 携带 usage，替换 = 赋值
+                    // - Anthropic：分两次发送（input_tokens / output_tokens），各字段独立替换
+                    // - Gemini：每个 chunk 携带累计值，替换 = 取最新值
+                    // Use replacement instead of accumulation — works for all providers
+                    merge_token_usage(&mut state.usage, usage);
+                }
+
+                // 通过 driver 转换事件格式（OpenAI 直通，Anthropic provider 需转换）
+                match state.driver.transform_stream_event(event, &state.model) {
+                    Ok(Some(mut transformed)) => {
+                        append_chat_stream_completion_text(state, &transformed.data);
+                        // 重映射 tool_call index（Anthropic 全局 → 本地 0-based）
+                        if let Some(remapped) = remap_tool_call_index(
+                            &transformed.data,
+                            &mut state.stream_tool_call_count,
+                        ) {
+                            transformed.data = remapped;
+                        }
+                        // 如果客户端协议为 Anthropic，进一步编码为 Anthropic SSE 格式
+                        if is_anthropic_client {
+                            let is_first = state.is_first_stream_event;
+                            match AnthropicCodec::encode_stream_event(&transformed, is_first) {
+                                Ok(encoded) => {
                                     for enc_event in &encoded {
                                         output.push_str(&format!(
                                             "event: {}\ndata: {}\n\n",
@@ -1195,40 +1610,57 @@ impl PluginHandler for AiProxyPlugin {
                                     }
                                     state.is_first_stream_event = false;
                                 }
-                            } else {
-                                output.push_str(&format!("data: {}\n\n", transformed.data));
+                                Err(error) => {
+                                    warn!(
+                                        "ai-proxy body_filter: Anthropic 事件编码失败: {}",
+                                        error
+                                    );
+                                    mark_response_transform_error(
+                                        &mut ctx.lifecycle,
+                                        ctx.response_status,
+                                        "anthropic_stream_encode",
+                                    );
+                                }
                             }
+                        } else {
+                            output.push_str(&format!("data: {}\n\n", transformed.data));
+                        }
 
-                            // 累积到 response_buffer（供 ai-cache 等插件回写使用）
-                            if let Some(ref mut buf) = state.response_buffer {
-                                buf.push_str(&transformed.data);
-                            }
+                        // 累积到 response_buffer（供 ai-cache 等插件回写使用）
+                        if let Some(ref mut buf) = state.response_buffer {
+                            buf.push_str(&transformed.data);
                         }
-                        Ok(None) => {
-                            // transform_stream_event 返回 None 表示 [DONE] 或需跳过的事件
-                        }
-                        Err(e) => {
-                            warn!("ai-proxy body_filter: SSE event transform error: {}", e);
+                    }
+                    Ok(None) => {
+                        // transform_stream_event 返回 None 表示 [DONE] 或需跳过的事件
+                    }
+                    Err(e) => {
+                        warn!("ai-proxy body_filter: SSE event transform error: {}", e);
+                        state.completion_observation_invalid = true;
+                        if state.stream_terminal
+                            != crate::usage::StreamTerminalState::ProviderFailed
+                        {
+                            mark_response_transform_error(
+                                &mut ctx.lifecycle,
+                                ctx.response_status,
+                                "stream_event_transform",
+                            );
                         }
                     }
                 }
+            }
 
-                // 更新 body：有输出则替换，无输出则清空避免透传原始 chunk
-                if !output.is_empty() {
-                    *body = Some(bytes::Bytes::from(output));
-                } else if !end_of_stream {
-                    // 无完整事件产出时清空 body（事件尚在缓冲中）
-                    *body = Some(bytes::Bytes::new());
-                }
+            // 更新 body：有输出则替换；已消费的原始 chunk 即使在 EOS 也不能泄漏。
+            if !output.is_empty() {
+                *body = Some(bytes::Bytes::from(output));
+            } else if had_body {
+                *body = Some(bytes::Bytes::new());
             }
 
             // 流结束时汇总 total_tokens
             if end_of_stream {
-                let pt = state.usage.prompt_tokens.unwrap_or(0);
-                let ct = state.usage.completion_tokens.unwrap_or(0);
-                if pt > 0 || ct > 0 {
-                    state.usage.total_tokens = Some(pt + ct);
-                }
+                finalize_stream_completion_estimate(state);
+                derive_total_if_missing(&mut state.usage);
             }
 
             return Ok(());
@@ -1255,17 +1687,16 @@ impl PluginHandler for AiProxyPlugin {
                 }
 
                 // 转换响应
-                match state
-                    .driver
-                    .transform_response(status, &ctx.response_headers, &full_body, &state.model)
-                {
+                match state.driver.transform_response(
+                    status,
+                    &ctx.response_headers,
+                    &full_body,
+                    &state.model,
+                ) {
                     Ok(chat_response) => {
+                        update_chat_completion_estimate(state, &chat_response);
                         // ChatResponse → ResponsesResponse
-                        let stripped = state
-                            .stripped_tools
-                            .as_ref()
-                            .cloned()
-                            .unwrap_or_default();
+                        let stripped = state.stripped_tools.as_ref().cloned().unwrap_or_default();
                         let responses_resp =
                             responses_format::chat_to_responses(&chat_response, &stripped);
                         let json = serde_json::to_string(&responses_resp).unwrap_or_default();
@@ -1273,6 +1704,11 @@ impl PluginHandler for AiProxyPlugin {
                     }
                     Err(e) => {
                         warn!("ai-proxy body_filter (responses): transform error: {}", e);
+                        mark_response_transform_error(
+                            &mut ctx.lifecycle,
+                            ctx.response_status,
+                            "responses_body_transform",
+                        );
                         // 返回 responses 格式的错误
                         let err_resp = responses_format::responses_error(
                             "server_error",
@@ -1310,11 +1746,14 @@ impl PluginHandler for AiProxyPlugin {
             }
 
             // 转换响应格式
-            match state
-                .driver
-                .transform_response(status, &ctx.response_headers, &full_body, &state.model)
-            {
+            match state.driver.transform_response(
+                status,
+                &ctx.response_headers,
+                &full_body,
+                &state.model,
+            ) {
                 Ok(chat_response) => {
+                    update_chat_completion_estimate(state, &chat_response);
                     // 根据 client_protocol 编码响应
                     let response_json = if state.client_protocol == ClientProtocol::Anthropic {
                         AnthropicCodec::encode_response(&chat_response).map_err(|e| {
@@ -1338,6 +1777,11 @@ impl PluginHandler for AiProxyPlugin {
                 Err(e) => {
                     // 上游返回错误（如 4xx/5xx），透传错误信息
                     warn!("ai-proxy body_filter: transform_response failed: {}", e);
+                    mark_response_transform_error(
+                        &mut ctx.lifecycle,
+                        ctx.response_status,
+                        "response_body_transform",
+                    );
                     // 保留原始响应体，不做转换
                     *body = Some(Bytes::from(full_body));
                 }
@@ -1350,34 +1794,70 @@ impl PluginHandler for AiProxyPlugin {
         Ok(())
     }
 
-    async fn log(&self, _config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
-        let state = match ctx.extensions.get::<AiRequestState>() {
-            Some(s) => s,
-            None => return Ok(()),
-        };
+    async fn log(&self, config: &PluginConfig, ctx: &mut RequestCtx) -> Result<()> {
+        let log_statistics = config
+            .config
+            .get("logging")
+            .and_then(|value| value.get("log_statistics"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                config
+                    .config
+                    .get("log_statistics")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(true);
+        if !log_statistics {
+            return Ok(());
+        }
 
-        // 计算端到端延迟
-        let e2e_ms = state.request_start.elapsed().as_millis() as u64;
-
-        // 构建分析数据
-        let ai_log = serde_json::json!({
-            "ai": {
-                "proxy": {
-                    "provider": state.provider_config.provider_type,
-                    "model": state.model.model_name,
-                    "route_type": state.route_type,
-                    "stream": state.stream_mode,
-                },
-                "usage": {
-                    "prompt_tokens": state.usage.prompt_tokens,
-                    "completion_tokens": state.usage.completion_tokens,
-                    "total_tokens": state.usage.total_tokens,
-                },
-                "latency": {
-                    "e2e_ms": e2e_ms,
+        // lifecycle observer 已先于普通 log 阶段生成事实；优先复用该事实，
+        // 早期策略拒绝没有 AiRequestState 时也能得到一致的兼容日志。
+        let ai_log = if let Some(fact) = ctx.extensions.get::<Arc<crate::usage::AiUsageFact>>() {
+            let route_type = ctx
+                .extensions
+                .get::<AiRequestState>()
+                .map(|state| state.route_type.clone());
+            serde_json::json!({
+                "ai": {
+                    "proxy": {
+                        "provider": fact.provider_type,
+                        "model": fact.actual_model,
+                        "route_type": route_type,
+                        "stream": fact.stream,
+                    },
+                    "usage": {
+                        "prompt_tokens": fact.prompt_tokens.map(|field| field.value),
+                        "completion_tokens": fact.completion_tokens.map(|field| field.value),
+                        "total_tokens": fact.total_tokens.map(|field| field.value),
+                    },
+                    "latency": {
+                        "e2e_ms": fact.e2e_ms,
+                    }
                 }
-            }
-        });
+            })
+        } else if let Some(state) = ctx.extensions.get::<AiRequestState>() {
+            serde_json::json!({
+                "ai": {
+                    "proxy": {
+                        "provider": state.provider_config.provider_type,
+                        "model": state.model.model_name,
+                        "route_type": state.route_type,
+                        "stream": state.stream_mode,
+                    },
+                    "usage": {
+                        "prompt_tokens": state.usage.prompt_tokens,
+                        "completion_tokens": state.usage.completion_tokens,
+                        "total_tokens": state.usage.total_tokens,
+                    },
+                    "latency": {
+                        "e2e_ms": state.request_start.elapsed().as_millis() as u64,
+                    }
+                }
+            })
+        } else {
+            return Ok(());
+        };
 
         // 合并到 ctx.log_serialize
         match ctx.log_serialize.as_mut() {
@@ -1396,5 +1876,47 @@ impl PluginHandler for AiProxyPlugin {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod completion_estimate_tests {
+    use super::{
+        estimate_completion, estimate_completion_segments, merge_token_usage,
+        TokenUsage,
+    };
+
+    #[test]
+    fn completion_estimate_sums_choices_independently() {
+        let model = "gpt-5.6-sol";
+        let choices = ["hello", "world"];
+        let expected = estimate_completion(model, choices[0])
+            .checked_add(estimate_completion(model, choices[1]))
+            .unwrap();
+        assert_eq!(
+            estimate_completion_segments(model, choices.iter().copied()),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn merged_stream_usage_keeps_invalid_observation_sticky() {
+        let mut current = TokenUsage {
+            invalid: true,
+            ..Default::default()
+        };
+        merge_token_usage(
+            &mut current,
+            TokenUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(20),
+                total_tokens: Some(30),
+                ..Default::default()
+            },
+        );
+
+        assert!(current.invalid);
+        assert_eq!(current.prompt_tokens, Some(10));
+        assert_eq!(current.completion_tokens, Some(20));
     }
 }

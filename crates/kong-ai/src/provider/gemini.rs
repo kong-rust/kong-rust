@@ -7,6 +7,7 @@ use crate::codec::{
 };
 use crate::models::{AiModel, AiProviderConfig, AuthConfig};
 use crate::provider::{AiDriver, ProviderRequest, TokenUsage, UpstreamConfig};
+use crate::usage::normalizer::gemini_observation;
 use kong_core::error::{KongError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -114,7 +115,10 @@ impl AiDriver for GeminiDriver {
                 // system → systemInstruction
                 system_instruction = Some(GeminiContent {
                     role: None,
-                    parts: vec![GeminiPart { text: Some(text), function_call: None }],
+                    parts: vec![GeminiPart {
+                        text: Some(text),
+                        function_call: None,
+                    }],
                 });
             } else {
                 // Gemini role 映射：assistant → model
@@ -124,7 +128,10 @@ impl AiDriver for GeminiDriver {
                 };
                 contents.push(GeminiContent {
                     role: Some(role),
-                    parts: vec![GeminiPart { text: Some(text), function_call: None }],
+                    parts: vec![GeminiPart {
+                        text: Some(text),
+                        function_call: None,
+                    }],
                 });
             }
         }
@@ -221,15 +228,15 @@ impl AiDriver for GeminiDriver {
             });
 
         // usage
-        let usage = resp.usage_metadata.as_ref().map(|u| {
+        let usage = resp.usage_metadata.as_ref().and_then(|u| {
             let pt = u.prompt_token_count.unwrap_or(0);
             let ct = u.candidates_token_count.unwrap_or(0);
-            let tt = u.total_token_count.unwrap_or(pt + ct);
-            Usage {
+            let tt = u.total_token_count.or_else(|| pt.checked_add(ct))?;
+            Some(Usage {
                 prompt_tokens: pt,
                 completion_tokens: ct,
                 total_tokens: tt,
-            }
+            })
         });
 
         Ok(ChatResponse {
@@ -241,8 +248,16 @@ impl AiDriver for GeminiDriver {
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content: if text.is_empty() { None } else { Some(serde_json::Value::String(text)) },
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    content: if text.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::String(text))
+                    },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                     tool_call_id: None,
                     name: None,
                 },
@@ -435,30 +450,18 @@ impl AiDriver for GeminiDriver {
     }
 
     fn extract_usage(&self, body: &str) -> Option<TokenUsage> {
-        let resp: GeminiApiResponse = serde_json::from_str(body).ok()?;
-        let u = resp.usage_metadata?;
-        let pt = u.prompt_token_count.unwrap_or(0);
-        let ct = u.candidates_token_count.unwrap_or(0);
-        Some(TokenUsage {
-            prompt_tokens: Some(pt),
-            completion_tokens: Some(ct),
-            total_tokens: Some(u.total_token_count.unwrap_or(pt + ct)),
-        })
+        let data: serde_json::Value = serde_json::from_str(body).ok()?;
+        let usage = data.get("usageMetadata")?;
+        Some(TokenUsage::from_observation(gemini_observation(usage)))
     }
 
     fn extract_stream_usage(&self, event: &SseEvent) -> Option<TokenUsage> {
         if event.is_done() {
             return None;
         }
-        let resp: GeminiApiResponse = serde_json::from_str(&event.data).ok()?;
-        let u = resp.usage_metadata?;
-        let pt = u.prompt_token_count.unwrap_or(0);
-        let ct = u.candidates_token_count.unwrap_or(0);
-        Some(TokenUsage {
-            prompt_tokens: Some(pt),
-            completion_tokens: Some(ct),
-            total_tokens: Some(u.total_token_count.unwrap_or(pt + ct)),
-        })
+        let data: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+        let usage = data.get("usageMetadata")?;
+        Some(TokenUsage::from_observation(gemini_observation(usage)))
     }
 }
 

@@ -77,6 +77,32 @@ export const parseOptionalFloat = (value: NumericInput, fieldName: string) => {
   return parsed
 }
 
+export const parseOptionalDecimal = (value: NumericInput, fieldName: string) => {
+  const normalized = normalizeNumericInput(value)
+
+  if (normalized === '' || normalized === null || normalized === undefined) {
+    return undefined
+  }
+
+  const match = String(normalized).match(/^(\d+)(?:\.(\d+))?$/)
+  if (!match) {
+    throw new Error(`${fieldName} must be a non-negative decimal without an exponent`)
+  }
+
+  // NUMERIC(28,12) 最多容纳 16 位整数和 12 位小数。
+  const integer = (match[1] ?? '0').replace(/^0+(?=\d)/, '')
+  const rawFraction = match[2] ?? ''
+  const significantFraction = rawFraction.replace(/0+$/, '')
+
+  if (integer.length > 16 || significantFraction.length > 12) {
+    throw new Error(`${fieldName} supports up to 16 integer digits and 12 decimal places`)
+  }
+
+  const fraction = rawFraction.slice(0, 12).replace(/0+$/, '')
+
+  return fraction ? `${integer}.${fraction}` : integer
+}
+
 export const omitUndefined = (value: Record<string, unknown>) => {
   return Object.fromEntries(
     Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),

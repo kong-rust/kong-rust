@@ -18,13 +18,13 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| 15 | AI Gateway — 协议与管理面 | 4 | 4 | 0 |
+| 15 | AI Gateway — 协议与管理面 | 5 | 5 | 0 |
 | 16 | Admin API 补全 | 5 | 5 | 0 |
 | 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **88** | **83** | **5** |
+| **合计** | | **89** | **84** | **5** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -416,6 +416,17 @@
   - 测试：26 单元 + 25 集成（含缓存命中计数、轮换/禁用/删除即时失效、过滤条件被丢弃时的防御性校验）；16 项真实 HTTP E2E 经 PostgreSQL 实例全部通过
   - 需求分析：`docs/pm/REQ-AI-001/analysis.md`；方案设计：`docs/pm/REQ-AI-001/design.md`
   - 文件：`crates/kong-ai/src/auth.rs`（新建）、`crates/kong-ai/src/plugins/ai_key_auth.rs`（新建）、`crates/kong-ai/tests/ai_key_auth_test.rs`（新建）、`crates/kong-server/src/main.rs`、`crates/kong-admin/src/{lib.rs,handlers/ai_virtual_keys.rs,handlers/ai_endpoint_test.rs,handlers/schemas.rs,handlers/mod.rs}`、`crates/kong-db/src/dao/postgres.rs`、`crates/kong-config/src/config.rs`、`kong-manager/src/pages/ai-gateway/`
+
+- [x] **15.5** Token 成本核算与用量事实表（REQ-AI-002）`[R10]`
+  - 需求分析、方案设计与编码实现三道门禁均于 2026-07-26 完成
+  - 为每个包含 `ai-proxy` 的客户端请求形成请求级事实，覆盖早期拒绝、成功、
+    上游错误、断开与流中断；provider usage 优先，缺失值保留估算/混合/不可用口径
+  - 内置版本化价表 + Model 分方向 Decimal 覆盖；PostgreSQL 有界异步批写、
+    DB-less 本节点环形缓冲，Hybrid 明确返回 501
+  - Admin API 提供稳定 snapshot 的明细/summary；Manager 同步交付调用统计、
+    调用日志、下钻与 Model 有效价格交互
+  - 需求分析：`docs/pm/REQ-AI-002/analysis.md`；方案设计：`docs/pm/REQ-AI-002/design.md`
+  - 实现记录：`docs/implementation-logs/req-ai-002_2026-07-26_ai-usage-analytics.md`
 
 ## 阶段 16：Admin API 补全
 

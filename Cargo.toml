@@ -43,7 +43,7 @@ hyper = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 
 # 数据库
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "json", "chrono", "rust_decimal"] }
 
 # 缓存
 moka = { version = "0.12", features = ["future", "sync"] }
@@ -64,6 +64,10 @@ regex = "1"
 url = "2"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = "1"
+bigdecimal = "0.4"
+num-bigint = "0.4"
+chrono-tz = { version = "0.10", features = ["serde"] }
 rand = "0.8"
 sha2 = "0.10"
 hmac = "0.12"

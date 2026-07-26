@@ -31,6 +31,7 @@ gethostname = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
+sqlx = { workspace = true }
 pingora = { workspace = true }
 pingora-core = { workspace = true }
 pingora-proxy = { workspace = true }

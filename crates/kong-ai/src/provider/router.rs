@@ -106,10 +106,7 @@ impl ModelRouter {
             if cfg.targets.is_empty() {
                 return Err(KongError::PluginError {
                     plugin_name: "ai-proxy".to_string(),
-                    message: format!(
-                        "model route pattern '{}' has no targets",
-                        cfg.pattern
-                    ),
+                    message: format!("model route pattern '{}' has no targets", cfg.pattern),
                 });
             }
             if cfg
@@ -171,7 +168,8 @@ impl ModelRouter {
     /// 从 target config 构建 RouteResolution — build resolution from target config
     fn build_resolution(&self, model_name: &str, target: &ModelTargetConfig) -> RouteResolution {
         let model = AiModel {
-            id: Uuid::new_v4(),
+            // 配置内联目标没有稳定实体 ID，nil 仅作内部缺省并在事实中投影为 null。
+            id: Uuid::nil(),
             name: model_name.to_string(),
             model_name: target.model_name.clone(),
             enabled: true,
@@ -179,7 +177,7 @@ impl ModelRouter {
         };
 
         let provider_config = AiProviderConfig {
-            id: Uuid::new_v4(),
+            id: Uuid::nil(),
             name: target.provider_type.clone(),
             provider_type: target.provider_type.clone(),
             endpoint_url: target.endpoint_url.clone(),

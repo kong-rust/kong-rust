@@ -20,6 +20,10 @@ pub use listen::{parse_listen_addresses, ListenAddr};
 
 use std::path::Path;
 
+const AI_USAGE_QUEUE_CAPACITY_MAX: usize = 1_000_000;
+const AI_USAGE_BATCH_SIZE_MAX: usize = 1_129;
+const AI_USAGE_DBLESS_CAPACITY_MAX: usize = 1_000_000;
+
 /// Load Kong configuration — 加载 Kong 配置
 ///
 /// Merges by priority: defaults < conf_file < env_vars — 按优先级合并: defaults < conf_file < env_vars
@@ -142,7 +146,7 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
             // CP must use a database — CP 必须使用数据库
             if config.database == "off" {
                 return Err(KongConfigError::ValidationError(
-                    "Error: in-memory storage can not be used when role = \"control_plane\"".into()
+                    "Error: in-memory storage can not be used when role = \"control_plane\"".into(),
                 ));
             }
             // CP must have cluster_cert/key — CP 必须有集群证书
@@ -156,13 +160,14 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
             // DP must use database=off — DP 必须使用 db-less 模式
             if config.database != "off" {
                 return Err(KongConfigError::ValidationError(
-                    "Error: only in-memory storage can be used when role = \"data_plane\"".into()
+                    "Error: only in-memory storage can be used when role = \"data_plane\"".into(),
                 ));
             }
             // DP must specify cluster_control_plane — DP 必须指定 CP 地址
             if config.cluster_control_plane.is_empty() {
                 return Err(KongConfigError::ValidationError(
-                    "Error: cluster_control_plane must be specified when role = \"data_plane\"".into()
+                    "Error: cluster_control_plane must be specified when role = \"data_plane\""
+                        .into(),
                 ));
             }
             // DP must have cluster_cert/key — DP 必须有集群证书
@@ -188,6 +193,52 @@ fn validate_config(config: &KongConfig) -> Result<(), KongConfigError> {
         return Err(KongConfigError::ValidationError(format!(
             "无效的 worker_consistency: {}，可选值: {:?}",
             config.worker_consistency, valid_consistency
+        )));
+    }
+
+    if config.ai_usage_queue_capacity == 0 {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_queue_capacity 必须大于 0".to_string(),
+        ));
+    }
+    if config.ai_usage_queue_capacity > AI_USAGE_QUEUE_CAPACITY_MAX {
+        return Err(KongConfigError::ValidationError(format!(
+            "ai_usage_queue_capacity 不能大于 {AI_USAGE_QUEUE_CAPACITY_MAX}"
+        )));
+    }
+    if config.ai_usage_batch_size == 0 {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_batch_size 必须大于 0".to_string(),
+        ));
+    }
+    if config.ai_usage_batch_size > AI_USAGE_BATCH_SIZE_MAX {
+        return Err(KongConfigError::ValidationError(format!(
+            "ai_usage_batch_size 不能大于 {AI_USAGE_BATCH_SIZE_MAX}"
+        )));
+    }
+    if config.ai_usage_batch_size > config.ai_usage_queue_capacity {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_batch_size 不能大于 ai_usage_queue_capacity".to_string(),
+        ));
+    }
+    if config.ai_usage_flush_interval_ms == 0 {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_flush_interval_ms 必须大于 0".to_string(),
+        ));
+    }
+    if config.ai_usage_shutdown_timeout_ms == 0 {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_shutdown_timeout_ms 必须大于 0".to_string(),
+        ));
+    }
+    if config.ai_usage_dbless_capacity == 0 {
+        return Err(KongConfigError::ValidationError(
+            "ai_usage_dbless_capacity 必须大于 0".to_string(),
+        ));
+    }
+    if config.ai_usage_dbless_capacity > AI_USAGE_DBLESS_CAPACITY_MAX {
+        return Err(KongConfigError::ValidationError(format!(
+            "ai_usage_dbless_capacity 不能大于 {AI_USAGE_DBLESS_CAPACITY_MAX}"
         )));
     }
 
@@ -307,6 +358,68 @@ declarative_config = /etc/kong/kong.yml
             assert_eq!(config.router_flavor, "traditional_compatible");
             assert!(!config.pg_ssl);
             assert_eq!(config.upstream_keepalive_pool_size, 512);
+            assert_eq!(config.ai_usage_queue_capacity, 8192);
+            assert_eq!(config.ai_usage_batch_size, 256);
+            assert_eq!(config.ai_usage_flush_interval_ms, 500);
+            assert_eq!(config.ai_usage_shutdown_timeout_ms, 5000);
+            assert_eq!(config.ai_usage_dbless_capacity, 10_000);
+        });
+    }
+
+    #[test]
+    fn ai_usage_writer_config_is_strictly_validated() {
+        with_cleared_kong_env(|| {
+            let valid = load_config_from_string(
+                "ai_usage_queue_capacity = 64\n\
+                 ai_usage_batch_size = 16\n\
+                 ai_usage_flush_interval_ms = 25\n\
+                 ai_usage_shutdown_timeout_ms = 100\n\
+                 ai_usage_dbless_capacity = 50\n",
+            )
+            .unwrap();
+            assert_eq!(valid.ai_usage_queue_capacity, 64);
+            assert_eq!(valid.ai_usage_batch_size, 16);
+
+            let oversized =
+                load_config_from_string("ai_usage_queue_capacity = 8\nai_usage_batch_size = 9\n");
+            assert!(matches!(
+                oversized,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("ai_usage_batch_size")
+            ));
+
+            let queue_above_limit = load_config_from_string(
+                "ai_usage_queue_capacity = 1000001\nai_usage_batch_size = 16\n",
+            );
+            assert!(matches!(
+                queue_above_limit,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("ai_usage_queue_capacity")
+            ));
+
+            let batch_above_limit = load_config_from_string(
+                "ai_usage_queue_capacity = 2048\nai_usage_batch_size = 1130\n",
+            );
+            assert!(matches!(
+                batch_above_limit,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("ai_usage_batch_size")
+            ));
+
+            let dbless_above_limit =
+                load_config_from_string("ai_usage_dbless_capacity = 1000001\n");
+            assert!(matches!(
+                dbless_above_limit,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("ai_usage_dbless_capacity")
+            ));
+
+            let malformed = load_config_from_string("ai_usage_flush_interval_ms = nope\n");
+            assert!(matches!(
+                malformed,
+                Err(KongConfigError::ValidationError(message))
+                    if message.contains("ai_usage_flush_interval_ms")
+            ));
         });
     }
 }

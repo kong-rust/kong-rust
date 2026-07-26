@@ -40,6 +40,10 @@ const CORE_MIGRATIONS: &[Migration] = &[
         name: "005_ai_model_weight_limit",
         sql: include_str!("../migrations/core/005_ai_model_weight_limit.sql"),
     },
+    Migration {
+        name: "006_ai_usage_logs",
+        sql: include_str!("../migrations/core/006_ai_usage_logs.sql"),
+    },
 ];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
@@ -59,6 +63,7 @@ const KNOWN_TABLES: &[&str] = &[
     "certificates",
     "ca_certificates",
     "sm_vaults",
+    "ai_usage_logs",
     "ai_virtual_keys",
     "ai_models",
     "ai_providers",
@@ -285,15 +290,13 @@ async fn execute_migration(pool: &PgPool, migration: &Migration) -> Result<()> {
         .await
         .map_err(|e| KongError::DatabaseError(format!("开启事务失败: {}", e)))?;
 
-    // Execute SQL statements one by one (sqlx prepared statements don't support multiple statements) — 逐条执行 SQL 语句（sqlx prepared statement 不支持多条语句）
-    for statement in split_sql_statements(migration.sql) {
-        sqlx::query(&statement)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                KongError::DatabaseError(format!("执行 migration {} 失败: {}", migration.name, e))
-            })?;
-    }
+    // 使用 raw_sql 保留 PostgreSQL dollar-quoted procedural block，同时整份脚本仍在外层事务中原子执行。
+    sqlx::raw_sql(migration.sql)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            KongError::DatabaseError(format!("执行 migration {} 失败: {}", migration.name, e))
+        })?;
 
     // Update schema_meta (upsert) — 更新 schema_meta（upsert）
     sqlx::query(
@@ -318,25 +321,9 @@ async fn execute_migration(pool: &PgPool, migration: &Migration) -> Result<()> {
     Ok(())
 }
 
-/// Split SQL file into individual statements by semicolons, stripping comment lines and empty statements — 将 SQL 文件按分号拆分为独立语句，剥离注释行和空语句
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    // Strip all SQL single-line comments (lines starting with --), then split by semicolons — 先剥离所有 SQL 单行注释（-- 开头的行），再按分号拆分
-    let stripped: String = sql
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("--"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    stripped
-        .split(';')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::CORE_MIGRATIONS;
+    use super::{CORE_MIGRATIONS, KNOWN_TABLES};
 
     #[test]
     fn max_input_tokens_has_a_forward_migration() {
@@ -360,5 +347,163 @@ mod tests {
 
         assert!(migration.sql.contains("CHECK (weight BETWEEN 0 AND 10000)"));
         assert!(!migration.sql.contains("IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn ai_usage_logs_migration_is_registered_and_reset_first() {
+        assert_eq!(
+            CORE_MIGRATIONS.last().map(|migration| migration.name),
+            Some("006_ai_usage_logs")
+        );
+
+        let usage_index = KNOWN_TABLES
+            .iter()
+            .position(|table| *table == "ai_usage_logs")
+            .expect("usage table must be reset");
+        let model_index = KNOWN_TABLES
+            .iter()
+            .position(|table| *table == "ai_models")
+            .expect("model table must be reset");
+        let workspace_index = KNOWN_TABLES
+            .iter()
+            .position(|table| *table == "workspaces")
+            .expect("workspace table must be reset");
+
+        assert!(usage_index < model_index);
+        assert!(usage_index < workspace_index);
+    }
+
+    #[test]
+    fn ai_usage_logs_migration_has_exact_decimal_and_fact_schema() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "006_ai_usage_logs")
+            .expect("usage migration must be registered");
+
+        for fragment in [
+            "ALTER COLUMN input_cost TYPE NUMERIC(28,12)",
+            "ALTER COLUMN output_cost TYPE NUMERIC(28,12)",
+            "ai_models_input_cost_valid",
+            "ai_models_output_cost_valid",
+            "CREATE TABLE ai_usage_logs",
+            "ingest_seq                        BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE",
+            "request_id                        VARCHAR(32) NOT NULL UNIQUE",
+            "started_at                        TIMESTAMPTZ(3) NOT NULL",
+            "workspace_id                      UUID",
+            "input_price_per_million           NUMERIC(28,12)",
+            "output_price_per_million          NUMERIC(28,12)",
+            "cost_usd                          NUMERIC(28,12)",
+        ] {
+            assert!(
+                migration.sql.contains(fragment),
+                "missing migration fragment: {fragment}"
+            );
+        }
+
+        assert!(migration.sql.contains("RAISE EXCEPTION"));
+        assert!(migration.sql.contains("invalid_model_id"));
+        assert!(!migration.sql.contains("IF NOT EXISTS"));
+        assert!(!migration.sql.contains("REFERENCES"));
+    }
+
+    #[test]
+    fn ai_usage_logs_migration_has_named_invariant_checks() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "006_ai_usage_logs")
+            .expect("usage migration must be registered");
+
+        for constraint in [
+            "ai_usage_logs_request_id_format",
+            "ai_usage_logs_prompt_tokens_nonnegative",
+            "ai_usage_logs_completion_tokens_nonnegative",
+            "ai_usage_logs_total_tokens_nonnegative",
+            "ai_usage_logs_reasoning_tokens_nonnegative",
+            "ai_usage_logs_cache_read_input_tokens_nonnegative",
+            "ai_usage_logs_cache_write_input_tokens_nonnegative",
+            "ai_usage_logs_e2e_ms_nonnegative",
+            "ai_usage_logs_ttft_ms_nonnegative",
+            "ai_usage_logs_input_price_nonnegative",
+            "ai_usage_logs_output_price_nonnegative",
+            "ai_usage_logs_cost_nonnegative",
+            "ai_usage_logs_time_order",
+            "ai_usage_logs_status_code_range",
+            "ai_usage_logs_upstream_status_code_range",
+            "ai_usage_logs_attempt_count_supported",
+            "ai_usage_logs_attempt_upstream_consistency",
+            "ai_usage_logs_prompt_source_value",
+            "ai_usage_logs_completion_source_value",
+            "ai_usage_logs_total_source_value",
+            "ai_usage_logs_usage_source_value",
+            "ai_usage_logs_pricing_status_value",
+            "ai_usage_logs_cost_status_value",
+            "ai_usage_logs_outcome_value",
+            "ai_usage_logs_cache_status_value",
+            "ai_usage_logs_prompt_token_source_presence",
+            "ai_usage_logs_completion_token_source_presence",
+            "ai_usage_logs_total_token_source_presence",
+            "ai_usage_logs_usage_availability_consistency",
+            "ai_usage_logs_provider_source_consistency",
+            "ai_usage_logs_estimated_source_consistency",
+            "ai_usage_logs_mixed_source_consistency",
+            "ai_usage_logs_input_price_bundle_consistency",
+            "ai_usage_logs_output_price_bundle_consistency",
+            "ai_usage_logs_pricing_bundle_consistency",
+            "ai_usage_logs_pricing_reason_consistency",
+            "ai_usage_logs_not_applicable_cost_consistency",
+            "ai_usage_logs_not_incurred_consistency",
+            "ai_usage_logs_not_attempted_consistency",
+            "ai_usage_logs_calculated_cost_consistency",
+            "ai_usage_logs_estimated_cost_consistency",
+            "ai_usage_logs_unmatched_unsupported_cost_consistency",
+            "ai_usage_logs_cost_availability_consistency",
+            "ai_usage_logs_currency_value",
+            "ai_usage_logs_usage_reason_values",
+            "ai_usage_logs_pricing_reason_values",
+            "ai_usage_logs_cost_reason_values",
+        ] {
+            assert!(
+                migration.sql.contains(&format!("CONSTRAINT {constraint}")),
+                "missing named constraint: {constraint}"
+            );
+        }
+
+        for reason in [
+            "not_attempted",
+            "invalid_token_value",
+            "provider_cache_pricing",
+            "additional_pricing",
+            "missing_prompt_usage",
+            "arithmetic_overflow",
+        ] {
+            assert!(
+                migration.sql.contains(&format!("'{reason}'")),
+                "missing reason value: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_usage_logs_migration_has_required_indexes() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "006_ai_usage_logs")
+            .expect("usage migration must be registered");
+
+        for index in [
+            "idx_ai_usage_logs_workspace_started",
+            "idx_ai_usage_logs_workspace_actual_model_started",
+            "idx_ai_usage_logs_workspace_model_group_started",
+            "idx_ai_usage_logs_workspace_virtual_key_started",
+            "idx_ai_usage_logs_workspace_route_started",
+            "idx_ai_usage_logs_workspace_service_started",
+            "idx_ai_usage_logs_workspace_provider_started",
+            "idx_ai_usage_logs_workspace_consumer_started",
+        ] {
+            assert!(
+                migration.sql.contains(&format!("CREATE INDEX {index}")),
+                "missing index: {index}"
+            );
+        }
     }
 }

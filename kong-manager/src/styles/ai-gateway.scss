@@ -818,3 +818,577 @@
     }
   }
 }
+
+.ai-model-pricing-panel {
+  background: $kui-color-background-neutral-weakest;
+  border: 1px solid $kui-color-border;
+  border-radius: $kui-border-radius-30;
+  display: grid;
+  gap: $kui-space-50;
+  padding: $kui-space-60;
+}
+
+.ai-model-pricing-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: $kui-space-50;
+  justify-content: space-between;
+
+  p {
+    color: $kui-color-text-neutral;
+    margin: $kui-space-20 0 0;
+  }
+}
+
+.ai-model-pricing-grid {
+  display: grid;
+  gap: $kui-space-50;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ai-model-price-direction {
+  align-items: flex-start;
+  background: $kui-color-background;
+  border: 1px solid $kui-color-border;
+  border-radius: $kui-border-radius-20;
+  display: flex;
+  flex-direction: column;
+  gap: $kui-space-30;
+  min-width: 0;
+  padding: $kui-space-50;
+
+  small {
+    color: $kui-color-text-neutral;
+    overflow-wrap: anywhere;
+  }
+}
+
+.ai-model-price-amount {
+  color: $kui-color-text;
+  font-size: $kui-font-size-50;
+  font-weight: $kui-font-weight-bold;
+}
+
+.ai-model-catalog-meta {
+  color: $kui-color-text-neutral;
+  margin: 0;
+}
+
+.ai-model-pricing-conditions {
+  color: $kui-color-text-neutral;
+  margin: 0;
+  padding-left: $kui-space-70;
+}
+
+.ai-model-table-pricing {
+  display: grid;
+  gap: $kui-space-40;
+  min-width: 190px;
+
+  > div {
+    display: grid;
+    gap: $kui-space-20;
+  }
+
+  small {
+    color: $kui-color-text-neutral;
+  }
+}
+
+.ai-model-price-warning {
+  color: $kui-color-text-danger !important;
+}
+
+.ai-usage-page {
+  display: grid;
+  gap: $kui-space-70;
+}
+
+.ai-usage-subnav {
+  align-items: center;
+  border-bottom: 1px solid $kui-color-border;
+  display: flex;
+  gap: $kui-space-60;
+  margin: -$kui-space-40 0 $kui-space-70;
+
+  a {
+    border-bottom: 3px solid transparent;
+    color: $kui-color-text-neutral;
+    font-weight: $kui-font-weight-semibold;
+    padding: $kui-space-40 $kui-space-20;
+    text-decoration: none;
+  }
+
+  a.router-link-exact-active {
+    border-bottom-color: $kui-color-border-primary;
+    color: $kui-color-text-primary;
+  }
+}
+
+.ai-usage-filters {
+  margin-bottom: $kui-space-70;
+
+  form {
+    display: grid;
+    gap: $kui-space-60;
+  }
+}
+
+.ai-usage-filter-grid {
+  display: grid;
+  gap: $kui-space-50;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.ai-usage-advanced-filters {
+  border-top: 1px solid $kui-color-border;
+  padding-top: $kui-space-50;
+
+  summary {
+    color: $kui-color-text-primary;
+    cursor: pointer;
+    font-weight: $kui-font-weight-semibold;
+    margin-bottom: $kui-space-50;
+  }
+}
+
+.ai-usage-filter-error {
+  color: $kui-color-text-danger;
+  margin: 0;
+}
+
+.ai-usage-state {
+  align-items: center;
+  border: 1px dashed $kui-color-border;
+  border-radius: $kui-border-radius-40;
+  display: flex;
+  flex-direction: column;
+  gap: $kui-space-40;
+  justify-content: center;
+  min-height: 280px;
+  padding: $kui-space-90;
+  text-align: center;
+
+  h2,
+  p {
+    margin: 0;
+  }
+
+  p {
+    color: $kui-color-text-neutral;
+    max-width: 640px;
+  }
+}
+
+.ai-usage-spinner {
+  animation: ai-usage-spin 0.8s linear infinite;
+  border: 3px solid $kui-color-border;
+  border-radius: 50%;
+  border-top-color: $kui-color-border-primary;
+  height: 36px;
+  width: 36px;
+}
+
+@keyframes ai-usage-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ai-usage-kpi-grid {
+  display: grid;
+  gap: $kui-space-60;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.ai-usage-kpi {
+  min-width: 0;
+
+  > span,
+  > small {
+    color: $kui-color-text-neutral;
+    display: block;
+  }
+
+  > strong {
+    color: $kui-color-text;
+    display: block;
+    font-size: $kui-font-size-80;
+    margin: $kui-space-30 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.ai-usage-panel {
+  min-width: 0;
+}
+
+.ai-usage-section-header {
+  align-items: flex-start;
+  display: flex;
+  gap: $kui-space-60;
+  justify-content: space-between;
+  margin-bottom: $kui-space-60;
+
+  h2,
+  p {
+    margin: 0;
+  }
+
+  h2 {
+    font-size: $kui-font-size-60;
+  }
+
+  p {
+    color: $kui-color-text-neutral;
+    margin-top: $kui-space-20;
+  }
+}
+
+.ai-usage-trend-controls {
+  align-items: center;
+}
+
+.ai-usage-toggle-group {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: $kui-space-30;
+
+  button,
+  select {
+    background: $kui-color-background;
+    border: 1px solid $kui-color-border;
+    border-radius: $kui-border-radius-20;
+    color: $kui-color-text;
+    font: inherit;
+    min-height: 36px;
+    padding: $kui-space-30 $kui-space-50;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button.active {
+    background: $kui-color-background-primary-weakest;
+    border-color: $kui-color-border-primary;
+    color: $kui-color-text-primary;
+    font-weight: $kui-font-weight-semibold;
+  }
+}
+
+.ai-usage-chart-canvas {
+  min-height: 280px;
+  position: relative;
+
+  svg {
+    height: auto;
+    max-height: 320px;
+    overflow: visible;
+    width: 100%;
+  }
+}
+
+.ai-usage-chart-legend {
+  align-items: center;
+  display: flex;
+  gap: $kui-space-30;
+  margin-bottom: $kui-space-30;
+
+  > span {
+    background: $kui-color-text-primary;
+    border-radius: 999px;
+    height: 3px;
+    width: 28px;
+  }
+}
+
+.ai-usage-chart-axis {
+  stroke: $kui-color-border;
+  stroke-width: 1;
+}
+
+.ai-usage-chart-line {
+  stroke: $kui-color-text-primary;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.ai-usage-chart-point {
+  cursor: crosshair;
+  outline: none;
+
+  circle {
+    fill: $kui-color-background;
+    stroke: $kui-color-text-primary;
+    stroke-width: 3;
+  }
+
+  &:focus circle,
+  &:hover circle {
+    fill: $kui-color-background-primary-weakest;
+    r: 7px;
+    stroke-width: 4;
+  }
+}
+
+.ai-usage-chart-tooltip {
+  background: #101828;
+  border-radius: $kui-border-radius-20;
+  color: #fff;
+  display: grid;
+  gap: $kui-space-20;
+  padding: $kui-space-40 $kui-space-50;
+  pointer-events: none;
+  position: absolute;
+  right: $kui-space-40;
+  top: $kui-space-40;
+
+  small {
+    color: #d0d5dd;
+  }
+}
+
+.ai-usage-chart-table {
+  border-top: 1px solid $kui-color-border;
+  padding-top: $kui-space-40;
+
+  summary {
+    color: $kui-color-text-primary;
+    cursor: pointer;
+    font-weight: $kui-font-weight-semibold;
+  }
+}
+
+.ai-usage-ranking-grid {
+  display: grid;
+  gap: $kui-space-70;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ai-usage-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+
+  table {
+    border-collapse: collapse;
+    min-width: 100%;
+  }
+
+  th,
+  td {
+    border-bottom: 1px solid $kui-color-border;
+    padding: $kui-space-40 $kui-space-50;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  thead th {
+    color: $kui-color-text-neutral;
+    font-size: $kui-font-size-20;
+    white-space: nowrap;
+  }
+}
+
+.ai-usage-link-button {
+  background: none;
+  border: 0;
+  color: $kui-color-text-primary;
+  cursor: pointer;
+  font: inherit;
+  font-weight: $kui-font-weight-semibold;
+  padding: 0;
+  text-align: left;
+}
+
+.ai-usage-status-grid {
+  display: grid;
+  gap: $kui-space-70;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  h3 {
+    margin-top: 0;
+  }
+
+  dl {
+    display: grid;
+    gap: $kui-space-30;
+    grid-template-columns: minmax(0, 1fr) auto;
+    margin: 0;
+  }
+
+  dt,
+  dd {
+    margin: 0;
+  }
+
+  dd {
+    font-weight: $kui-font-weight-semibold;
+    justify-self: end;
+  }
+}
+
+.ai-usage-logs-card {
+  overflow: hidden;
+}
+
+.ai-usage-snapshot {
+  color: $kui-color-text-neutral;
+  font-size: $kui-font-size-20;
+  white-space: nowrap;
+}
+
+.ai-usage-logs-table {
+  min-width: 1780px !important;
+
+  td {
+    max-width: 260px;
+  }
+
+  td > strong,
+  td > span,
+  td > small {
+    display: block;
+    margin-bottom: $kui-space-20;
+    overflow-wrap: anywhere;
+  }
+
+  code {
+    white-space: nowrap;
+  }
+}
+
+.ai-usage-inline-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $kui-space-20;
+  margin: $kui-space-20 0;
+}
+
+.ai-usage-pagination {
+  align-items: center;
+  display: flex;
+  gap: $kui-space-50;
+  justify-content: flex-end;
+  padding-top: $kui-space-60;
+}
+
+.ai-usage-detail {
+  background: $kui-color-background;
+  box-shadow: -12px 0 40px rgba(16, 24, 40, 0.2);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  max-width: min(680px, 92vw);
+  position: fixed;
+  right: 0;
+  top: 0;
+  width: 680px;
+  z-index: 1000;
+
+  > header {
+    align-items: flex-start;
+    border-bottom: 1px solid $kui-color-border;
+    display: flex;
+    gap: $kui-space-50;
+    justify-content: space-between;
+    padding: $kui-space-70;
+
+    span {
+      color: $kui-color-text-primary;
+      font-size: $kui-font-size-20;
+      font-weight: $kui-font-weight-bold;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: $kui-font-size-50;
+      margin: $kui-space-20 0 0;
+      overflow-wrap: anywhere;
+    }
+  }
+}
+
+.ai-usage-detail-body {
+  display: grid;
+  gap: $kui-space-70;
+  overflow-y: auto;
+  padding: $kui-space-70;
+}
+
+.ai-usage-detail-group {
+  h3 {
+    border-bottom: 1px solid $kui-color-border;
+    font-size: $kui-font-size-50;
+    margin: 0 0 $kui-space-40;
+    padding-bottom: $kui-space-30;
+  }
+
+  dl {
+    display: grid;
+    gap: $kui-space-40;
+    margin: 0;
+  }
+
+  dl > div {
+    display: grid;
+    gap: $kui-space-30;
+    grid-template-columns: minmax(130px, 0.4fr) minmax(0, 1fr);
+  }
+
+  dt {
+    color: $kui-color-text-neutral;
+  }
+
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.sr-only {
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  width: 1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 960px) {
+  .ai-model-pricing-grid,
+  .ai-usage-ranking-grid,
+  .ai-usage-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-usage-section-header {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 600px) {
+  .ai-usage-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-usage-state {
+    min-height: 220px;
+    padding: $kui-space-70 $kui-space-50;
+  }
+
+  .ai-usage-detail {
+    max-width: 100vw;
+    width: 100vw;
+  }
+
+  .ai-usage-detail-group dl > div {
+    grid-template-columns: 1fr;
+  }
+}

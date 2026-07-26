@@ -30,8 +30,13 @@ use uuid::Uuid;
 
 use kong_config::KongConfig;
 use kong_core::models::{CaCertificate, Route, Service, Target, Upstream};
-use kong_core::traits::RequestCtx;
-use kong_plugin_system::{PluginExecutor, PluginRegistry, ResolvedPlugin};
+use kong_core::traits::{
+    LifecyclePhase, RequestCtx, RequestTransportError, RequestTransportErrorKind,
+    RequestTransportSource,
+};
+use kong_plugin_system::{
+    PluginExecutor, PluginRegistry, RequestLifecycleObserver, ResolvedPlugin,
+};
 use kong_router::{RequestContext, RouteMatch, Router};
 
 use crate::access_log::AccessLogWriter;
@@ -83,21 +88,34 @@ pub struct KongCtx {
     pub last_body_chunk_at: Option<std::time::Instant>,
     /// proxy 注入到 upstream 请求的 real-ip header 键值对，用于 access log 输出
     pub injected_real_ip_headers: Vec<(String, String)>,
-    /// Request start time (for latency tracking) — 请求开始时间（用于延迟统计）
-    pub request_start_time: std::time::Instant,
     /// Upstream response received time (for latency tracking) — 上游响应接收时间（用于延迟统计）
     pub upstream_response_time: Option<std::time::Instant>,
-    /// Per-request unique ID (sent to both upstream and downstream) — 每请求唯一 ID（同时发送给上游和下游）
-    pub request_id: String,
+}
+
+impl KongCtx {
+    /// 生命周期中的唯一请求 ID。
+    pub fn request_id(&self) -> &str {
+        &self.plugin_ctx.lifecycle.request_id
+    }
+
+    /// 生命周期中的单调起始时钟。
+    pub fn request_start_time(&self) -> std::time::Instant {
+        self.plugin_ctx.lifecycle.started_mono
+    }
 }
 
 /// Kong proxy service — implements Pingora ProxyHttp trait — Kong 代理服务 — 实现 Pingora ProxyHttp trait
+struct RoutingState {
+    router: Router,
+    routes_by_id: HashMap<Uuid, Route>,
+}
+
 #[derive(Clone)]
 pub struct KongProxy {
     /// Kong configuration — Kong 配置
     pub config: Arc<KongConfig>,
-    /// Router (hot-reloadable) — 路由器（可热更新）
-    pub router: Arc<RwLock<Router>>,
+    /// 原子更新的 Router 与 Route 快照缓存。
+    routing: Arc<RwLock<RoutingState>>,
     /// Plugin registry — 插件注册表
     pub plugin_registry: Arc<PluginRegistry>,
     /// Load balancers (upstream_name -> LoadBalancer) — 负载均衡器（upstream_name -> LoadBalancer）
@@ -116,8 +134,8 @@ pub struct KongProxy {
     pub dns_resolver: SharedDnsResolver,
     /// Pre-computed plugin chains: (route_id, service_id) -> sorted plugin list — 预计算插件链
     pub plugin_chains: Arc<RwLock<HashMap<(Option<Uuid>, Option<Uuid>), Arc<Vec<ResolvedPlugin>>>>>,
-    /// Route cache (route_id -> Route) for kong.router.get_route() — 路由缓存，用于 kong.router.get_route()
-    pub routes_by_id: Arc<RwLock<HashMap<Uuid, Route>>>,
+    /// Request lifecycle observers — 请求生命周期观察器
+    pub lifecycle_observers: Arc<Vec<Arc<dyn RequestLifecycleObserver>>>,
 }
 
 impl KongProxy {
@@ -130,9 +148,16 @@ impl KongProxy {
         dns_resolver: SharedDnsResolver,
         config: Arc<KongConfig>,
     ) -> Self {
+        let routes_by_id = routes
+            .iter()
+            .map(|route| (route.id, route.clone()))
+            .collect();
         Self {
             config,
-            router: Arc::new(RwLock::new(Router::new(routes, router_flavor))),
+            routing: Arc::new(RwLock::new(RoutingState {
+                router: Router::new(routes, router_flavor),
+                routes_by_id,
+            })),
             plugin_registry: Arc::new(plugin_registry),
             balancers: Arc::new(RwLock::new(HashMap::new())),
             services: Arc::new(RwLock::new(HashMap::new())),
@@ -142,38 +167,127 @@ impl KongProxy {
             access_log_writer: None,
             dns_resolver,
             plugin_chains: Arc::new(RwLock::new(HashMap::new())),
-            routes_by_id: {
-                let mut map = HashMap::new();
-                for route in routes {
-                    map.insert(route.id, route.clone());
-                }
-                Arc::new(RwLock::new(map))
-            },
+            lifecycle_observers: Arc::new(Vec::new()),
         }
+    }
+
+    /// 装配同步请求生命周期观察器，保留 `new` 的默认无观察器行为。
+    pub fn with_lifecycle_observers(
+        mut self,
+        observers: Vec<Arc<dyn RequestLifecycleObserver>>,
+    ) -> Self {
+        self.lifecycle_observers = Arc::new(observers);
+        self
+    }
+
+    fn notify_plugins_resolved(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) {
+        for observer in self.lifecycle_observers.iter() {
+            observer.on_plugins_resolved(plugins, ctx);
+        }
+    }
+
+    fn notify_request_finalizing(&self, plugins: &[ResolvedPlugin], ctx: &mut RequestCtx) {
+        for observer in self.lifecycle_observers.iter() {
+            observer.on_request_finalizing(plugins, ctx);
+        }
+    }
+
+    fn transport_error_from_pingora(error: &pingora_core::Error) -> RequestTransportError {
+        use pingora_core::{ErrorSource, ErrorType};
+
+        let source = match error.esource() {
+            ErrorSource::Upstream => RequestTransportSource::Upstream,
+            ErrorSource::Downstream => RequestTransportSource::Downstream,
+            ErrorSource::Internal => RequestTransportSource::Internal,
+            ErrorSource::Unset => RequestTransportSource::Unknown,
+        };
+        let kind = match error.root_etype() {
+            ErrorType::ConnectTimedout => RequestTransportErrorKind::ConnectTimeout,
+            ErrorType::ConnectRefused => RequestTransportErrorKind::ConnectRefused,
+            ErrorType::ConnectNoRoute => RequestTransportErrorKind::ConnectNoRoute,
+            ErrorType::TLSWantX509Lookup
+            | ErrorType::TLSHandshakeFailure
+            | ErrorType::TLSHandshakeTimedout
+            | ErrorType::InvalidCert
+            | ErrorType::HandshakeError => RequestTransportErrorKind::Tls,
+            ErrorType::ConnectError | ErrorType::ConnectProxyFailure => {
+                RequestTransportErrorKind::Connect
+            }
+            ErrorType::BindError => RequestTransportErrorKind::Bind,
+            ErrorType::AcceptError => RequestTransportErrorKind::Accept,
+            ErrorType::SocketError => RequestTransportErrorKind::Socket,
+            ErrorType::InvalidHTTPHeader
+            | ErrorType::H1Error
+            | ErrorType::H2Error
+            | ErrorType::H2Downgrade
+            | ErrorType::InvalidH2 => RequestTransportErrorKind::Protocol,
+            ErrorType::ReadError => RequestTransportErrorKind::Read,
+            ErrorType::WriteError => RequestTransportErrorKind::Write,
+            ErrorType::ReadTimedout => RequestTransportErrorKind::ReadTimeout,
+            ErrorType::WriteTimedout => RequestTransportErrorKind::WriteTimeout,
+            ErrorType::ConnectionClosed => RequestTransportErrorKind::ConnectionClosed,
+            ErrorType::HTTPStatus(status) => RequestTransportErrorKind::HttpStatus(*status),
+            ErrorType::FileOpenError
+            | ErrorType::FileCreateError
+            | ErrorType::FileReadError
+            | ErrorType::FileWriteError => RequestTransportErrorKind::File,
+            ErrorType::InternalError => RequestTransportErrorKind::Internal,
+            ErrorType::UnknownError => RequestTransportErrorKind::Unknown,
+            ErrorType::Custom(_) | ErrorType::CustomCode(_, _) => RequestTransportErrorKind::Custom,
+        };
+
+        RequestTransportError::new(source, kind)
+    }
+
+    fn proxy_failure_status(error: &pingora_core::Error) -> u16 {
+        use pingora_core::ErrorType;
+
+        match error.root_etype() {
+            ErrorType::ConnectTimedout
+            | ErrorType::TLSHandshakeTimedout
+            | ErrorType::ReadTimedout
+            | ErrorType::WriteTimedout => 504,
+            _ => 502,
+        }
+    }
+
+    fn find_route_with_snapshot(
+        &self,
+        request: &RequestContext,
+    ) -> Option<(RouteMatch, Option<Route>)> {
+        let routing = self
+            .routing
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let route_match = routing.router.find_route(request)?;
+        let route = routing.routes_by_id.get(&route_match.route_id).cloned();
+        Some((route_match, route))
     }
 
     /// Update routing table — 更新路由表
     pub fn update_routes(&self, routes: &[Route]) {
-        if let Ok(mut router) = self.router.write() {
-            router.rebuild(routes);
-        }
-        // Update routes_by_id cache for kong.router.get_route() — 更新 routes_by_id 缓存
-        if let Ok(mut cache) = self.routes_by_id.write() {
-            cache.clear();
-            for route in routes {
-                cache.insert(route.id, route.clone());
-            }
-        }
+        let mut routing = self
+            .routing
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routing.router.rebuild(routes);
+        routing.routes_by_id = routes
+            .iter()
+            .map(|route| (route.id, route.clone()))
+            .collect();
+        drop(routing);
         self.rebuild_plugin_chains();
     }
 
     /// Update service cache — 更新服务缓存
     pub fn update_services(&self, services: Vec<Service>) {
-        if let Ok(mut cache) = self.services.write() {
-            cache.clear();
-            for svc in services {
-                cache.insert(svc.id, svc);
-            }
+        let mut cache = self
+            .services
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.clear();
+        for svc in services {
+            cache.insert(svc.id, svc);
         }
     }
 
@@ -199,18 +313,20 @@ impl KongProxy {
 
     /// Update plugin configurations — 更新插件配置
     pub fn update_plugins(&self, plugins: Vec<kong_core::models::Plugin>) {
-        if let Ok(mut p) = self.plugins.write() {
-            *p = plugins;
-        }
+        *self
+            .plugins
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plugins;
         self.rebuild_plugin_chains();
     }
 
     /// Pre-compute plugin chains for all (route_id, service_id) combinations — 预计算所有 (route_id, service_id) 组合的插件链
     fn rebuild_plugin_chains(&self) {
-        let plugins = match self.plugins.read() {
-            Ok(p) => p.clone(),
-            Err(_) => return,
-        };
+        let plugins = self
+            .plugins
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
         // Collect unique (route_id, service_id) pairs from plugin configs — 从插件配置中收集唯一的 (route_id, service_id) 组合
         let mut keys: std::collections::HashSet<(Option<Uuid>, Option<Uuid>)> =
@@ -242,9 +358,10 @@ impl KongProxy {
             chains.insert((route_id, service_id), Arc::new(resolved));
         }
 
-        if let Ok(mut pc) = self.plugin_chains.write() {
-            *pc = chains;
-        }
+        *self
+            .plugin_chains
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = chains;
     }
 
     /// Hot-reload CA certificate list — 热更新 CA 证书列表
@@ -256,7 +373,11 @@ impl KongProxy {
 
     /// Populate RequestCtx and build RequestContext in a single header scan — 单次头遍历同时填充 RequestCtx 和构建 RequestContext
     /// `default_port`: the actual proxy listening port (from config) — 实际的代理监听端口（来自配置）
-    fn populate_and_build_route_ctx(session: &Session, ctx: &mut RequestCtx, default_port: u16) -> RequestContext {
+    fn populate_and_build_route_ctx(
+        session: &Session,
+        ctx: &mut RequestCtx,
+        default_port: u16,
+    ) -> RequestContext {
         let req = session.req_header();
         let method = req.method.as_str().to_string();
         let uri_path = req.uri.path().to_string();
@@ -293,10 +414,7 @@ impl KongProxy {
         // When Host header has no port, use the actual server listening port — 当 Host 头没有端口时，使用实际的服务器监听端口
         let (host_no_port, port) = if let Some(colon_pos) = host_header.rfind(':') {
             let (h, p) = host_header.split_at(colon_pos);
-            (
-                h.to_string(),
-                p[1..].parse().unwrap_or(default_port),
-            )
+            (h.to_string(), p[1..].parse().unwrap_or(default_port))
         } else {
             (host_header.to_string(), default_port)
         };
@@ -379,7 +497,10 @@ impl KongProxy {
 
     // Helper: check if a specific header feature is enabled in config.headers — 检查配置中是否启用了特定 header 功能
     fn has_header_feature(&self, feature: &str) -> bool {
-        self.config.headers.iter().any(|h| h.eq_ignore_ascii_case(feature))
+        self.config
+            .headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(feature))
     }
 
     // Helper: check if Server header should be included (server_tokens or explicit "Server") — 检查是否应包含 Server 头
@@ -399,12 +520,14 @@ impl KongProxy {
 
     // Helper: check if X-Kong-Upstream-Latency should be included — 检查是否应包含 X-Kong-Upstream-Latency
     fn should_include_upstream_latency(&self) -> bool {
-        self.has_header_feature("latency_tokens") || self.has_header_feature("x-kong-upstream-latency")
+        self.has_header_feature("latency_tokens")
+            || self.has_header_feature("x-kong-upstream-latency")
     }
 
     // Helper: check if X-Kong-Response-Latency should be included (for non-proxied responses) — 检查是否应包含 X-Kong-Response-Latency（非代理响应）
     fn should_include_response_latency(&self) -> bool {
-        self.has_header_feature("latency_tokens") || self.has_header_feature("x-kong-response-latency")
+        self.has_header_feature("latency_tokens")
+            || self.has_header_feature("x-kong-response-latency")
     }
 
     /// 构建非代理响应头（404/错误/短路）— Content-Type + Content-Length + Server 头 + 延迟头 + 自定义头注入
@@ -493,9 +616,10 @@ impl KongProxy {
         plugin_ctx: &RequestCtx,
     ) {
         if let Some(host) = plugin_ctx.upstream_target_host.as_deref() {
-            let port = plugin_ctx
-                .upstream_target_port
-                .unwrap_or(if *upstream_tls { 443 } else { 80 });
+            let port =
+                plugin_ctx
+                    .upstream_target_port
+                    .unwrap_or(if *upstream_tls { 443 } else { 80 });
             *upstream_addr = format!("{host}:{port}");
             *upstream_sni = host.to_string();
         }
@@ -517,20 +641,21 @@ impl KongProxy {
         session: &mut Session,
         status_code: u16,
         message: &str,
-        request_id: &str,
-        is_grpc: bool,
+        ctx: &mut KongCtx,
     ) -> pingora_core::Result<bool> {
-        if is_grpc {
+        ctx.plugin_ctx.lifecycle.mark_downstream_send_attempted();
+        let request_id = ctx.request_id().to_string();
+        if ctx.is_grpc_request {
             grpc::send_grpc_error(
                 session,
                 status_code,
                 message,
-                Some(request_id),
+                Some(&request_id),
                 self.has_header_feature("x-kong-request-id"),
             )
             .await
         } else {
-            self.send_error_response(session, status_code, message, Some(request_id))
+            self.send_error_response(session, status_code, message, Some(&request_id))
                 .await
         }
     }
@@ -550,7 +675,12 @@ impl KongProxy {
 
         // Inject X-Kong-Request-Id in error responses — 在错误响应中注入 X-Kong-Request-Id
         if let Some(rid) = request_id {
-            if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
+            if self
+                .config
+                .headers
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("x-kong-request-id"))
+            {
                 let _ = resp.insert_header("x-kong-request-id", rid);
             }
         }
@@ -569,9 +699,10 @@ impl KongProxy {
         &self,
         session: &mut Session,
         ctx: &mut RequestCtx,
-        request_id: &str,
         resolved_plugins: &[kong_plugin_system::ResolvedPlugin],
     ) -> pingora_core::Result<bool> {
+        ctx.lifecycle.mark_downstream_send_attempted();
+        let request_id = ctx.lifecycle.request_id.clone();
         let status_code = ctx.exit_status.unwrap_or(200);
         let body = ctx.exit_body.take();
         let headers = ctx.exit_headers.take();
@@ -580,8 +711,13 @@ impl KongProxy {
         let mut resp = self.build_response_header(status_code, body_bytes.len())?;
 
         // Inject X-Kong-Request-Id in short-circuit responses — 在短路响应中注入 X-Kong-Request-Id
-        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
-            let _ = resp.insert_header("x-kong-request-id", request_id);
+        if self
+            .config
+            .headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("x-kong-request-id"))
+        {
+            let _ = resp.insert_header("x-kong-request-id", &request_id);
         }
 
         // Apply exit_headers from the short-circuiting plugin — 应用短路插件设置的自定义响应头
@@ -602,7 +738,8 @@ impl KongProxy {
         ctx.response_headers.clear();
         for (name, value) in resp.headers.iter() {
             if let Ok(v) = value.to_str() {
-                ctx.response_headers.insert(name.as_str().to_lowercase(), v.to_string());
+                ctx.response_headers
+                    .insert(name.as_str().to_lowercase(), v.to_string());
             }
         }
         if let Err(e) = PhaseRunner::run_header_filter(resolved_plugins, ctx).await {
@@ -656,9 +793,7 @@ impl ProxyHttp for KongProxy {
             deferred_header_filter: false,
             last_body_chunk_at: None,
             injected_real_ip_headers: Vec::new(),
-            request_start_time: std::time::Instant::now(),
             upstream_response_time: None,
-            request_id: Uuid::new_v4().simple().to_string(),
         }
     }
 
@@ -670,29 +805,25 @@ impl ProxyHttp for KongProxy {
     ) -> pingora_core::Result<bool> {
         // 1. Populate request context + build route matching context (single header scan) — 填充请求上下文 + 构建路由匹配上下文（单次头遍历）
         // Get default proxy port from config — 从配置获取默认代理端口
-        let default_port = self.config.proxy_listen.first()
+        let default_port = self
+            .config
+            .proxy_listen
+            .first()
             .and_then(|l| l.address.rsplit(':').next())
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(8000);
-        let req_ctx = Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx, default_port);
+        let req_ctx =
+            Self::populate_and_build_route_ctx(session, &mut ctx.plugin_ctx, default_port);
 
         // 1.5 Detect gRPC request (content-type: application/grpc) — 检测 gRPC 请求
         ctx.is_grpc_request = grpc::is_grpc_request(session);
 
         // 2. Route matching — 路由匹配
-        let route_match = {
-            let router = self
-                .router
-                .read()
-                .map_err(|_| pingora_core::Error::new_str("路由器读取失败"))?;
-            router.find_route(&req_ctx)
-        };
-
-        let route_match = match route_match {
-            Some(rm) => rm,
+        let (route_match, matched_route) = match self.find_route_with_snapshot(&req_ctx) {
+            Some(result) => result,
             None => {
                 return self
-                    .send_error_or_grpc(session, 404, "no Route matched with those values", &ctx.request_id, ctx.is_grpc_request)
+                    .send_error_or_grpc(session, 404, "no Route matched with those values", ctx)
                     .await;
             }
         };
@@ -702,7 +833,7 @@ impl ProxyHttp for KongProxy {
             let services = self
                 .services
                 .read()
-                .map_err(|_| pingora_core::Error::new_str("服务缓存读取失败"))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             services.get(&service_id).cloned()
         } else {
             None
@@ -710,19 +841,27 @@ impl ProxyHttp for KongProxy {
 
         // 4. Set up plugin context (before service check so plugins can short-circuit serviceless routes) — 设置插件上下文（在服务检查之前，以便插件可以短路无服务路由）
         ctx.plugin_ctx.route_id = Some(route_match.route_id);
+        ctx.plugin_ctx.route_name = route_match.route_name.as_ref().map(|name| name.to_string());
         ctx.plugin_ctx.service_id = route_match.service_id;
+        ctx.plugin_ctx.service_name = service.as_ref().and_then(|value| value.name.clone());
         // Pass URI captures from regex path matching to plugin context — 将正则路径匹配的 URI 捕获组传递给插件上下文
         ctx.plugin_ctx.uri_captures_named = route_match.uri_captures.named.clone();
         ctx.plugin_ctx.uri_captures_unnamed = route_match.uri_captures.unnamed.clone();
 
         // Populate matched route JSON for kong.router.get_route() — 填充匹配路由 JSON 供 kong.router.get_route() 使用
-        if let Ok(routes_cache) = self.routes_by_id.read() {
-            if let Some(route) = routes_cache.get(&route_match.route_id) {
-                if let Ok(route_json) = serde_json::to_value(route) {
-                    ctx.plugin_ctx.matched_route_json = Some(route_json);
-                }
+        if let Some(route) = matched_route {
+            ctx.plugin_ctx.workspace_id = route.ws_id;
+            if ctx.plugin_ctx.route_name.is_none() {
+                ctx.plugin_ctx.route_name = route.name.clone();
+            }
+            if let Ok(route_json) = serde_json::to_value(route) {
+                ctx.plugin_ctx.matched_route_json = Some(route_json);
             }
         }
+
+        // Route/Service 快照需在请求体和插件阶段之前可见。
+        ctx.route_match = Some(route_match.clone());
+        ctx.service = service.clone();
 
         // 5. Resolve plugin chain (from pre-computed cache) — 解析插件链（从预计算缓存）
         let resolved_plugins = {
@@ -730,7 +869,7 @@ impl ProxyHttp for KongProxy {
             let chains = self
                 .plugin_chains
                 .read()
-                .map_err(|_| pingora_core::Error::new_str("插件链缓存读取失败"))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             chains.get(&key).cloned().unwrap_or_else(|| {
                 // Fallback: compute at runtime if no pre-computed chain — 回退：如果没有预计算链则运行时计算
                 let plugins = self.plugins.read().unwrap_or_else(|p| p.into_inner());
@@ -744,6 +883,11 @@ impl ProxyHttp for KongProxy {
             })
         };
 
+        // 保存链并同步通知观察器，确保后续任意早期失败仍能在 logging 收口。
+        ctx.resolved_plugins = resolved_plugins;
+        let plugins_ref = Arc::clone(&ctx.resolved_plugins);
+        self.notify_plugins_resolved(&plugins_ref, &mut ctx.plugin_ctx);
+
         // 7. Pre-read request body when buffering is enabled so access-phase plugins can inspect it. — 当启用 buffering 时预读取请求体，供 access 阶段插件检查。
         if let Err(err) = self
             .preload_request_body_for_plugins(
@@ -754,43 +898,47 @@ impl ProxyHttp for KongProxy {
             .await
         {
             tracing::error!("请求体预读取失败: {}", err);
+            let transport_error = Self::transport_error_from_pingora(&err);
+            if transport_error.source != RequestTransportSource::Unknown {
+                ctx.plugin_ctx
+                    .lifecycle
+                    .mark_transport_error(transport_error);
+            }
+            ctx.plugin_ctx
+                .lifecycle
+                .mark_gateway_error(LifecyclePhase::RequestBody, "request_body_preload");
             return self
-                .send_error_or_grpc(session, 400, "Bad request body", &ctx.request_id, ctx.is_grpc_request)
+                .send_error_or_grpc(session, 400, "Bad request body", ctx)
                 .await;
         }
 
         // 8. Execute rewrite phase — 执行 rewrite 阶段
-        if let Err(e) = PhaseRunner::run_rewrite(&resolved_plugins, &mut ctx.plugin_ctx).await {
+        if let Err(e) = PhaseRunner::run_rewrite(&plugins_ref, &mut ctx.plugin_ctx).await {
             tracing::error!("Rewrite 阶段执行失败: {}", e);
             return self
-                .send_error_or_grpc(session, 500, "An unexpected error occurred", &ctx.request_id, ctx.is_grpc_request)
+                .send_error_or_grpc(session, 500, "An unexpected error occurred", ctx)
                 .await;
         }
 
         // 9. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
-            // Save plugin chain for log phase — 保存插件链供 log 阶段使用
-            ctx.resolved_plugins = resolved_plugins;
-            let plugins_ref = Arc::clone(&ctx.resolved_plugins);
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id, &plugins_ref)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &plugins_ref)
                 .await;
         }
 
         // 10. Execute access phase — 执行 access 阶段
-        if let Err(e) = PhaseRunner::run_access(&resolved_plugins, &mut ctx.plugin_ctx).await {
+        if let Err(e) = PhaseRunner::run_access(&plugins_ref, &mut ctx.plugin_ctx).await {
             tracing::error!("Access 阶段执行失败: {}", e);
             return self
-                .send_error_or_grpc(session, 500, "An unexpected error occurred", &ctx.request_id, ctx.is_grpc_request)
+                .send_error_or_grpc(session, 500, "An unexpected error occurred", ctx)
                 .await;
         }
 
         // 11. Check short-circuit — 检查短路
         if ctx.plugin_ctx.is_short_circuited() {
-            ctx.resolved_plugins = resolved_plugins;
-            let plugins_ref = Arc::clone(&ctx.resolved_plugins);
             return self
-                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &ctx.request_id, &plugins_ref)
+                .send_short_circuit_response(session, &mut ctx.plugin_ctx, &plugins_ref)
                 .await;
         }
 
@@ -798,24 +946,40 @@ impl ProxyHttp for KongProxy {
         let service = match service {
             Some(s) => s,
             None => {
-                ctx.resolved_plugins = resolved_plugins;
+                ctx.plugin_ctx
+                    .lifecycle
+                    .mark_gateway_error(LifecyclePhase::Service, "service_lookup");
                 return self
-                    .send_error_or_grpc(session, 503, "no Service found for the requested route", &ctx.request_id, ctx.is_grpc_request)
+                    .send_error_or_grpc(
+                        session,
+                        503,
+                        "no Service found for the requested route",
+                        ctx,
+                    )
                     .await;
             }
         };
 
         if !service.enabled {
-            ctx.resolved_plugins = resolved_plugins;
+            ctx.plugin_ctx
+                .lifecycle
+                .mark_gateway_error(LifecyclePhase::Service, "service_disabled");
             return self
-                .send_error_or_grpc(session, 503, "Service unavailable", &ctx.request_id, ctx.is_grpc_request)
+                .send_error_or_grpc(session, 503, "Service unavailable", ctx)
                 .await;
         }
 
         // Resolve upstream address — 解析上游地址
-        let (mut upstream_addr, mut upstream_tls, mut upstream_sni, upstream_is_grpc) = self
-            .resolve_upstream(&service)
-            .map_err(|_| pingora_core::Error::new_str("上游解析失败"))?;
+        let (mut upstream_addr, mut upstream_tls, mut upstream_sni, upstream_is_grpc) =
+            match self.resolve_upstream(&service) {
+                Ok(value) => value,
+                Err(_) => {
+                    ctx.plugin_ctx
+                        .lifecycle
+                        .mark_gateway_error(LifecyclePhase::Upstream, "upstream_configuration");
+                    return Err(pingora_core::Error::new_str("上游解析失败"));
+                }
+            };
 
         self.apply_plugin_upstream_overrides(
             &mut upstream_addr,
@@ -825,13 +989,12 @@ impl ProxyHttp for KongProxy {
         );
 
         // Save to context — 保存到上下文
-        ctx.route_match = Some(route_match);
         ctx.service = Some(service);
         ctx.upstream_addr = Some(upstream_addr);
         ctx.upstream_tls = upstream_tls;
         ctx.upstream_sni = upstream_sni;
         ctx.upstream_is_grpc = upstream_is_grpc;
-        ctx.resolved_plugins = resolved_plugins;
+        ctx.plugin_ctx.lifecycle.mark_upstream_attempted();
 
         Ok(false) // Continue to upstream — 继续到上游
     }
@@ -842,14 +1005,20 @@ impl ProxyHttp for KongProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Box<HttpPeer>> {
-        let raw_addr = ctx
-            .upstream_addr
-            .as_deref()
-            .ok_or_else(|| pingora_core::Error::new_str("上游地址未设置"))?;
+        let raw_addr = match ctx.upstream_addr.clone() {
+            Some(value) => value,
+            None => {
+                ctx.plugin_ctx
+                    .lifecycle
+                    .mark_gateway_error(LifecyclePhase::Upstream, "upstream_address");
+                return Err(pingora_core::Error::new_str("上游地址未设置"));
+            }
+        };
+        ctx.plugin_ctx.lifecycle.mark_upstream_attempted();
 
         // Ensure address includes port — 确保地址包含端口
         let addr_with_port = if raw_addr.contains(':') {
-            raw_addr.to_string()
+            raw_addr
         } else {
             let default_port = if ctx.upstream_tls { 443 } else { 80 };
             format!("{}:{}", raw_addr, default_port)
@@ -863,10 +1032,20 @@ impl ProxyHttp for KongProxy {
         } else {
             (addr_with_port.as_str(), 80u16)
         };
-        let socket_addr = self.dns_resolver.resolve(host, port).await.map_err(|e| {
-            tracing::error!("上游地址解析失败: {} ({})", addr_with_port, e);
-            pingora_core::Error::new_str("上游地址解析失败")
-        })?;
+        let socket_addr = match self.dns_resolver.resolve(host, port).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!("上游地址解析失败: {} ({})", addr_with_port, error);
+                ctx.plugin_ctx
+                    .lifecycle
+                    .mark_transport_error(RequestTransportError::upstream(
+                        RequestTransportErrorKind::ConnectNoRoute,
+                    ));
+                return Err(pingora_core::Error::new_up(
+                    pingora_core::ErrorType::ConnectNoRoute,
+                ));
+            }
+        };
 
         let mut peer = HttpPeer::new(socket_addr, ctx.upstream_tls, ctx.upstream_sni.clone());
 
@@ -1041,14 +1220,16 @@ impl ProxyHttp for KongProxy {
         }
 
         // 4. Apply plugin path/query overrides after route strip_path logic. — 在 strip_path 逻辑之后应用插件路径/查询覆写。
-        if ctx.plugin_ctx.upstream_path.is_some() || ctx.plugin_ctx.upstream_query_to_set.is_some() {
+        if ctx.plugin_ctx.upstream_path.is_some() || ctx.plugin_ctx.upstream_query_to_set.is_some()
+        {
             let path = ctx
                 .plugin_ctx
                 .upstream_path
                 .as_deref()
                 .unwrap_or_else(|| upstream_request.uri.path());
             let query = ctx.plugin_ctx.upstream_query_to_set.as_ref().map(|pairs| {
-                pairs.iter()
+                pairs
+                    .iter()
                     .map(|(key, value)| format!("{key}={value}"))
                     .collect::<Vec<_>>()
                     .join("&")
@@ -1161,7 +1342,12 @@ impl ProxyHttp for KongProxy {
                 };
                 if is_trusted {
                     // Trusted: preserve original if present — 可信客户端：保留原值
-                    if session.req_header().headers.get("x-forwarded-proto").is_none() {
+                    if session
+                        .req_header()
+                        .headers
+                        .get("x-forwarded-proto")
+                        .is_none()
+                    {
                         let _ = upstream_request.insert_header("x-forwarded-proto", proto);
                     }
                 } else {
@@ -1175,7 +1361,12 @@ impl ProxyHttp for KongProxy {
                 if let Some(host) = session.req_header().headers.get("host") {
                     if is_trusted {
                         // Trusted: preserve original if present — 可信客户端：保留原值
-                        if session.req_header().headers.get("x-forwarded-host").is_none() {
+                        if session
+                            .req_header()
+                            .headers
+                            .get("x-forwarded-host")
+                            .is_none()
+                        {
                             let _ = upstream_request.insert_header("x-forwarded-host", host);
                         }
                     } else {
@@ -1211,7 +1402,12 @@ impl ProxyHttp for KongProxy {
                 };
                 let port_str = port.to_string();
                 if is_trusted {
-                    if session.req_header().headers.get("x-forwarded-port").is_none() {
+                    if session
+                        .req_header()
+                        .headers
+                        .get("x-forwarded-port")
+                        .is_none()
+                    {
                         let _ = upstream_request.insert_header("x-forwarded-port", &port_str);
                     }
                 } else {
@@ -1229,7 +1425,12 @@ impl ProxyHttp for KongProxy {
                     .map(|pq| pq.as_str())
                     .unwrap_or("/");
                 if is_trusted {
-                    if session.req_header().headers.get("x-forwarded-path").is_none() {
+                    if session
+                        .req_header()
+                        .headers
+                        .get("x-forwarded-path")
+                        .is_none()
+                    {
                         let _ = upstream_request.insert_header("x-forwarded-path", path);
                     }
                 } else {
@@ -1248,7 +1449,8 @@ impl ProxyHttp for KongProxy {
                         if rm.strip_path {
                             if let Some(ref matched) = rm.matched_path {
                                 if matched != "/" {
-                                    let _ = upstream_request.insert_header("x-forwarded-prefix", matched.as_str());
+                                    let _ = upstream_request
+                                        .insert_header("x-forwarded-prefix", matched.as_str());
                                     ctx.injected_real_ip_headers
                                         .push(("X-Forwarded-Prefix".to_string(), matched.clone()));
                                 } else {
@@ -1300,8 +1502,13 @@ impl ProxyHttp for KongProxy {
         }
 
         // 8. Inject X-Kong-Request-Id into upstream request (only if headers_upstream config includes it) — 向上游请求注入 X-Kong-Request-Id（仅当 headers_upstream 配置包含时）
-        if self.config.headers_upstream.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
-            let _ = upstream_request.insert_header("x-kong-request-id", &ctx.request_id);
+        if self
+            .config
+            .headers_upstream
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("x-kong-request-id"))
+        {
+            let _ = upstream_request.insert_header("x-kong-request-id", ctx.request_id());
         }
 
         Ok(())
@@ -1350,7 +1557,9 @@ impl ProxyHttp for KongProxy {
         }
 
         // Check chunk interval timeout (use service read_timeout, default 60s) — 检查 chunk 间隔超时（使用 service read_timeout，默认 60s）
-        let timeout_secs = ctx.service.as_ref()
+        let timeout_secs = ctx
+            .service
+            .as_ref()
             .map(|s| s.read_timeout as u64 / 1000)
             .unwrap_or(60)
             .max(60); // minimum 60s to avoid premature timeout — 最少 60s 避免过早超时
@@ -1358,7 +1567,14 @@ impl ProxyHttp for KongProxy {
         if let Some(last_at) = ctx.last_body_chunk_at {
             if now.duration_since(last_at).as_secs() > timeout_secs {
                 tracing::warn!("请求体 chunk 间隔超时 (>{}s)，终止请求", timeout_secs);
-                return Err(pingora_core::Error::new_str("client body timeout"));
+                ctx.plugin_ctx
+                    .lifecycle
+                    .mark_transport_error(RequestTransportError::downstream(
+                        RequestTransportErrorKind::ReadTimeout,
+                    ));
+                return Err(pingora_core::Error::new_down(
+                    pingora_core::ErrorType::ReadTimedout,
+                ));
             }
         }
 
@@ -1389,6 +1605,11 @@ impl ProxyHttp for KongProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
+        ctx.plugin_ctx
+            .lifecycle
+            .mark_upstream_status(upstream_response.status.as_u16());
+        ctx.plugin_ctx.lifecycle.mark_downstream_send_attempted();
+
         // Record upstream response time for latency tracking — 记录上游响应时间用于延迟统计
         ctx.upstream_response_time = Some(std::time::Instant::now());
 
@@ -1443,10 +1664,10 @@ impl ProxyHttp for KongProxy {
         // Add Kong standard response headers for proxied responses — 添加代理响应的 Kong 标准响应头
         // Latency headers: X-Kong-Proxy-Latency and X-Kong-Upstream-Latency — 延迟头
         let now = std::time::Instant::now();
-        let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+        let proxy_latency = now.duration_since(ctx.request_start_time()).as_millis();
         let upstream_latency = ctx
             .upstream_response_time
-            .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+            .map(|t| t.duration_since(ctx.request_start_time()).as_millis())
             .unwrap_or(0);
         if self.should_include_proxy_latency() {
             let _ =
@@ -1464,7 +1685,7 @@ impl ProxyHttp for KongProxy {
 
         // Use per-request X-Kong-Request-Id in downstream response (only if headers config includes it) — 在下游响应中使用每请求的 X-Kong-Request-Id（仅当 headers 配置包含时）
         if self.has_header_feature("x-kong-request-id") {
-            let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
+            let _ = upstream_response.insert_header("x-kong-request-id", ctx.request_id());
         }
 
         // For proxied responses: do NOT set Kong's Server header — 代理响应：不要设置 Kong 的 Server 头
@@ -1484,9 +1705,16 @@ impl ProxyHttp for KongProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
+        ctx.plugin_ctx.lifecycle.mark_downstream_send_attempted();
+
         // Ensure X-Kong-Request-Id is set in downstream response (defense in depth) — 确保下游响应中设置了 X-Kong-Request-Id（纵深防御）
-        if self.config.headers.iter().any(|h| h.eq_ignore_ascii_case("x-kong-request-id")) {
-            let _ = upstream_response.insert_header("x-kong-request-id", &ctx.request_id);
+        if self
+            .config
+            .headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("x-kong-request-id"))
+        {
+            let _ = upstream_response.insert_header("x-kong-request-id", ctx.request_id());
         }
         Ok(())
     }
@@ -1499,6 +1727,8 @@ impl ProxyHttp for KongProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Option<std::time::Duration>> {
+        ctx.plugin_ctx.lifecycle.mark_downstream_send_attempted();
+
         // 1. Response buffering — 响应体缓冲
         // gRPC always streams; plugin-requested buffering must force full upstream response collection.
         // gRPC 始终流式；插件显式请求的 buffering 必须强制启用完整上游响应缓冲。
@@ -1600,11 +1830,14 @@ impl ProxyHttp for KongProxy {
     where
         Self::CTX: Send + Sync,
     {
-        let error_msg = format!("{}", e);
-        let (status, body) = if error_msg.contains("timeout") || error_msg.contains("Timeout") {
-            (504u16, serde_json::json!({"message": "The upstream server is timing out"}))
+        ctx.plugin_ctx
+            .lifecycle
+            .mark_transport_error(Self::transport_error_from_pingora(e));
+        let status = Self::proxy_failure_status(e);
+        let body = if status == 504 {
+            serde_json::json!({"message": "The upstream server is timing out"})
         } else {
-            (502u16, serde_json::json!({"message": "An invalid response was received from the upstream server"}))
+            serde_json::json!({"message": "An invalid response was received from the upstream server"})
         };
 
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
@@ -1620,24 +1853,43 @@ impl ProxyHttp for KongProxy {
             }
             // Latency headers for proxy failures — 代理失败的延迟头
             let now = std::time::Instant::now();
-            let proxy_latency = now.duration_since(ctx.request_start_time).as_millis();
+            let proxy_latency = now.duration_since(ctx.request_start_time()).as_millis();
             let upstream_latency = ctx
                 .upstream_response_time
-                .map(|t| t.duration_since(ctx.request_start_time).as_millis())
+                .map(|t| t.duration_since(ctx.request_start_time()).as_millis())
                 .unwrap_or(0);
             if self.should_include_proxy_latency() {
                 let _ = resp.insert_header("x-kong-proxy-latency", &proxy_latency.to_string());
             }
             if self.should_include_upstream_latency() {
-                let _ = resp.insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
+                let _ =
+                    resp.insert_header("x-kong-upstream-latency", &upstream_latency.to_string());
             }
             if self.has_header_feature("x-kong-request-id") {
-                let _ = resp.insert_header("x-kong-request-id", &ctx.request_id);
+                let _ = resp.insert_header("x-kong-request-id", ctx.request_id());
             }
-            let _ = session.write_response_header(Box::new(resp), false).await;
-            let _ = session
-                .write_response_body(Some(bytes::Bytes::from(body_bytes)), true)
-                .await;
+            ctx.plugin_ctx.lifecycle.mark_downstream_send_attempted();
+            let write_result = match session.write_response_header(Box::new(resp), false).await {
+                Ok(()) => {
+                    session
+                        .write_response_body(Some(bytes::Bytes::from(body_bytes)), true)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(write_error) = write_result {
+                let mapped = Self::transport_error_from_pingora(&write_error);
+                let mapped = if mapped.source == RequestTransportSource::Unknown {
+                    RequestTransportError::downstream(mapped.kind)
+                } else {
+                    mapped
+                };
+                ctx.plugin_ctx.lifecycle.mark_transport_error(mapped);
+            }
+        } else {
+            ctx.plugin_ctx
+                .lifecycle
+                .mark_gateway_error(LifecyclePhase::Response, "proxy_error_response");
         }
 
         ctx.plugin_ctx.response_status = Some(status);
@@ -1677,6 +1929,24 @@ impl ProxyHttp for KongProxy {
             .response_written()
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
+        if let Some(error) = error {
+            ctx.plugin_ctx
+                .lifecycle
+                .mark_transport_error(Self::transport_error_from_pingora(error));
+        } else {
+            ctx.plugin_ctx.lifecycle.mark_downstream_completed();
+        }
+        let final_status = (status > 0).then_some(status);
+        ctx.plugin_ctx.lifecycle.finish(final_status);
+        if let Some(status) = final_status {
+            ctx.plugin_ctx.response_status = Some(status);
+        }
+        if ctx.plugin_ctx.response_source.is_none() {
+            ctx.plugin_ctx.response_source = Some("service".to_string());
+        }
+        let plugins = Arc::clone(&ctx.resolved_plugins);
+        self.notify_request_finalizing(&plugins, &mut ctx.plugin_ctx);
+
         let upstream = ctx.upstream_addr.as_deref().unwrap_or("-");
         let user_agent = req
             .headers
@@ -1760,18 +2030,15 @@ impl ProxyHttp for KongProxy {
         );
 
         kong_lua_bridge::metrics::record_http_request();
-        if status > 0 {
-            ctx.plugin_ctx.response_status = Some(status);
-        }
-        if ctx.plugin_ctx.response_source.is_none() {
-            ctx.plugin_ctx.response_source = Some("service".to_string());
-        }
 
         // Calculate latencies for prometheus plugin — 计算延迟指标供 prometheus 插件使用
         let now = std::time::Instant::now();
-        let request_latency = now.duration_since(ctx.request_start_time).as_millis() as i64;
-        let (kong_latency, proxy_latency) = if let Some(upstream_time) = ctx.upstream_response_time {
-            let proxy = upstream_time.duration_since(ctx.request_start_time).as_millis() as i64;
+        let request_latency = now.duration_since(ctx.request_start_time()).as_millis() as i64;
+        let (kong_latency, proxy_latency) = if let Some(upstream_time) = ctx.upstream_response_time
+        {
+            let proxy = upstream_time
+                .duration_since(ctx.request_start_time())
+                .as_millis() as i64;
             let kong = now.duration_since(upstream_time).as_millis() as i64;
             (kong, proxy)
         } else {
@@ -1788,24 +2055,60 @@ impl ProxyHttp for KongProxy {
         });
 
         // Populate log_serialize for Lua plugins (prometheus plugin expects this) — 填充 log_serialize 供 Lua 插件使用（prometheus 插件依赖此数据）
-        let service_name = ctx.service.as_ref().and_then(|s| s.name.clone()).unwrap_or_default();
-        let route_id = ctx.route_match.as_ref().map(|rm| rm.route_id.to_string()).unwrap_or_default();
-        let route_name = ctx.route_match.as_ref().and_then(|rm| rm.route_name.as_ref().map(|n| n.to_string())).unwrap_or_else(|| route_id.clone());
+        let service_name = ctx
+            .service
+            .as_ref()
+            .and_then(|s| s.name.clone())
+            .unwrap_or_default();
+        let route_id = ctx
+            .route_match
+            .as_ref()
+            .map(|rm| rm.route_id.to_string())
+            .unwrap_or_default();
+        let route_name = ctx
+            .route_match
+            .as_ref()
+            .and_then(|rm| rm.route_name.as_ref().map(|n| n.to_string()))
+            .unwrap_or_else(|| route_id.clone());
 
         // Calculate request size: header line + headers + body — 计算请求大小：请求行 + 头 + 体
-        let req_header_size: usize = session.req_header().headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum();
-        let req_body_size = ctx.plugin_ctx.request_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let req_header_size: usize = session
+            .req_header()
+            .headers
+            .iter()
+            .map(|(k, v)| k.as_str().len() + v.len() + 4)
+            .sum();
+        let req_body_size = ctx
+            .plugin_ctx
+            .request_body
+            .as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0);
         let request_size = (req_header_size + req_body_size) as i64;
 
         // Calculate response size: headers + body — 计算响应大小：头 + 体
-        let resp_header_size: usize = session.response_written()
-            .map(|r| r.headers.iter().map(|(k, v)| k.as_str().len() + v.len() + 4).sum::<usize>())
+        let resp_header_size: usize = session
+            .response_written()
+            .map(|r| {
+                r.headers
+                    .iter()
+                    .map(|(k, v)| k.as_str().len() + v.len() + 4)
+                    .sum::<usize>()
+            })
             .unwrap_or(0);
-        let resp_body_size = ctx.plugin_ctx.service_response_body.as_ref().map(|b| b.len()).unwrap_or(0);
+        let resp_body_size = ctx
+            .plugin_ctx
+            .service_response_body
+            .as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0);
         let response_size = (resp_header_size + resp_body_size) as i64;
 
         // Extract consumer username from authenticated_consumer — 从 authenticated_consumer 提取消费者用户名
-        let consumer_value = ctx.plugin_ctx.authenticated_consumer.as_ref()
+        let consumer_value = ctx
+            .plugin_ctx
+            .authenticated_consumer
+            .as_ref()
             .and_then(|c| c.get("username").and_then(|u| u.as_str()))
             .unwrap_or("");
 
@@ -1842,8 +2145,136 @@ impl ProxyHttp for KongProxy {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_proxy_response_headers, set_upstream_header};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    use kong_config::KongConfig;
+    use kong_core::models::Route;
+    use kong_core::traits::{RequestCtx, RequestTransportError, RequestTransportErrorKind};
+    use kong_plugin_system::{PluginRegistry, RequestLifecycleObserver, ResolvedPlugin};
+    use kong_router::RequestContext;
+    use pingora_core::{Error, ErrorType};
     use pingora_http::{RequestHeader, ResponseHeader};
+
+    use super::{apply_proxy_response_headers, set_upstream_header, KongProxy};
+    use crate::dns::DnsResolver;
+    use crate::tls::CertificateManager;
+
+    fn test_proxy() -> KongProxy {
+        let config = Arc::new(KongConfig::default());
+        let dns_resolver = Arc::new(DnsResolver::new(&config));
+        KongProxy::new(
+            &[],
+            "traditional",
+            PluginRegistry::new(),
+            CertificateManager::new(),
+            Vec::new(),
+            dns_resolver,
+            config,
+        )
+    }
+
+    struct CountingObserver {
+        resolved: Arc<AtomicUsize>,
+        finalizing: Arc<AtomicUsize>,
+    }
+
+    impl RequestLifecycleObserver for CountingObserver {
+        fn on_plugins_resolved(&self, _plugins: &[ResolvedPlugin], _ctx: &mut RequestCtx) {
+            self.resolved.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_request_finalizing(&self, _plugins: &[ResolvedPlugin], _ctx: &mut RequestCtx) {
+            self.finalizing.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn lifecycle_observers_are_optional_and_invoked_synchronously() {
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let finalizing = Arc::new(AtomicUsize::new(0));
+        let proxy = test_proxy().with_lifecycle_observers(vec![Arc::new(CountingObserver {
+            resolved: Arc::clone(&resolved),
+            finalizing: Arc::clone(&finalizing),
+        })]);
+        let mut ctx = RequestCtx::new();
+
+        proxy.notify_plugins_resolved(&[], &mut ctx);
+        proxy.notify_request_finalizing(&[], &mut ctx);
+
+        assert_eq!(resolved.load(Ordering::SeqCst), 1);
+        assert_eq!(finalizing.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn route_match_and_workspace_snapshot_are_updated_atomically() {
+        let proxy = Arc::new(test_proxy());
+        let route_id = uuid::Uuid::new_v4();
+        let workspace_a = uuid::Uuid::new_v4();
+        let workspace_b = uuid::Uuid::new_v4();
+        let route = move |name: &str, workspace_id| Route {
+            id: route_id,
+            name: Some(name.to_string()),
+            paths: Some(vec!["/ai".to_string()]),
+            ws_id: Some(workspace_id),
+            ..Route::default()
+        };
+        proxy.update_routes(&[route("a", workspace_a)]);
+        let request = RequestContext {
+            method: "GET".to_string(),
+            uri: "/ai".to_string(),
+            host: "localhost".to_string(),
+            scheme: "http".to_string(),
+            ..RequestContext::default()
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let updater_proxy = Arc::clone(&proxy);
+        let updater_barrier = Arc::clone(&barrier);
+        let updater = std::thread::spawn(move || {
+            updater_barrier.wait();
+            for index in 0..5_000 {
+                let updated = if index % 2 == 0 {
+                    route("a", workspace_a)
+                } else {
+                    route("b", workspace_b)
+                };
+                updater_proxy.update_routes(&[updated]);
+            }
+        });
+
+        barrier.wait();
+        for _ in 0..5_000 {
+            let (matched, snapshot) = proxy.find_route_with_snapshot(&request).unwrap();
+            let snapshot = snapshot.unwrap();
+            assert_eq!(matched.route_name.as_deref(), snapshot.name.as_deref());
+            match snapshot.name.as_deref() {
+                Some("a") => assert_eq!(snapshot.ws_id, Some(workspace_a)),
+                Some("b") => assert_eq!(snapshot.ws_id, Some(workspace_b)),
+                value => panic!("意外的 Route 快照名称: {value:?}"),
+            }
+            std::thread::yield_now();
+        }
+        updater.join().unwrap();
+    }
+
+    #[test]
+    fn pingora_transport_error_is_mapped_without_message_matching() {
+        let downstream = Error::new_down(ErrorType::ConnectionClosed);
+        let upstream = Error::new_up(ErrorType::ConnectTimedout);
+        let misleading_message = Error::new_str("timeout");
+
+        assert_eq!(
+            KongProxy::transport_error_from_pingora(&downstream),
+            RequestTransportError::downstream(RequestTransportErrorKind::ConnectionClosed,)
+        );
+        assert_eq!(
+            KongProxy::transport_error_from_pingora(&upstream),
+            RequestTransportError::upstream(RequestTransportErrorKind::ConnectTimeout,)
+        );
+        assert_eq!(KongProxy::proxy_failure_status(&upstream), 504);
+        assert_eq!(KongProxy::proxy_failure_status(&downstream), 502);
+        assert_eq!(KongProxy::proxy_failure_status(&misleading_message), 502);
+    }
 
     #[test]
     fn plugin_header_insertion_keeps_pingora_case_map_in_sync() {
@@ -1874,16 +2305,11 @@ mod tests {
     #[test]
     fn response_header_mutations_keep_pingora_case_map_in_sync() {
         let mut response = ResponseHeader::build(200, Some(4)).unwrap();
-        response
-            .insert_header("Content-Length", "10")
-            .unwrap();
+        response.insert_header("Content-Length", "10").unwrap();
         response.insert_header("Connection", "close").unwrap();
 
         response.remove_header("content-length");
-        apply_proxy_response_headers(
-            &mut response,
-            &["X-Proxy-Test: present".to_string()],
-        );
+        apply_proxy_response_headers(&mut response, &["X-Proxy-Test: present".to_string()]);
 
         assert_eq!(
             response.case_header_iter().count(),
@@ -1914,11 +2340,19 @@ fn cidr_contains(cidr: &str, client_ip: &str) -> bool {
     };
     match (net_ip, client) {
         (std::net::IpAddr::V4(net), std::net::IpAddr::V4(cli)) => {
-            let mask = if prefix_len >= 32 { u32::MAX } else { u32::MAX << (32 - prefix_len) };
+            let mask = if prefix_len >= 32 {
+                u32::MAX
+            } else {
+                u32::MAX << (32 - prefix_len)
+            };
             (u32::from(net) & mask) == (u32::from(cli) & mask)
         }
         (std::net::IpAddr::V6(net), std::net::IpAddr::V6(cli)) => {
-            let mask = if prefix_len >= 128 { u128::MAX } else { u128::MAX << (128 - prefix_len) };
+            let mask = if prefix_len >= 128 {
+                u128::MAX
+            } else {
+                u128::MAX << (128 - prefix_len)
+            };
             (u128::from(net) & mask) == (u128::from(cli) & mask)
         }
         _ => false, // v4 vs v6 mismatch — IPv4 与 IPv6 不匹配

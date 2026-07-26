@@ -132,25 +132,35 @@
 
       <div class="ai-gateway-form-grid">
         <div class="ai-gateway-form-field">
-          <label for="ai-model-input-cost">{{ t('Input Cost') }}</label>
+          <label for="ai-model-input-cost">
+            {{ l('Custom input override (USD / 1M tokens)', '自定义 Input 覆盖价（USD / 1M tokens）') }}
+          </label>
           <input
             id="ai-model-input-cost"
             v-model="form.inputCost"
-            min="0"
-            step="0.000001"
-            type="number"
+            autocomplete="off"
+            inputmode="decimal"
+            type="text"
           >
+          <p class="ai-endpoint-hint">
+            {{ l('Leave blank to use the current built-in price; enter 0 to make this direction free.', '留空使用当前内置价格；填写 0 表示该方向免费。') }}
+          </p>
         </div>
 
         <div class="ai-gateway-form-field">
-          <label for="ai-model-output-cost">{{ t('Output Cost') }}</label>
+          <label for="ai-model-output-cost">
+            {{ l('Custom output override (USD / 1M tokens)', '自定义 Output 覆盖价（USD / 1M tokens）') }}
+          </label>
           <input
             id="ai-model-output-cost"
             v-model="form.outputCost"
-            min="0"
-            step="0.000001"
-            type="number"
+            autocomplete="off"
+            inputmode="decimal"
+            type="text"
           >
+          <p class="ai-endpoint-hint">
+            {{ l('Leave blank to use the current built-in price; enter 0 to make this direction free.', '留空使用当前内置价格；填写 0 表示该方向免费。') }}
+          </p>
         </div>
 
         <div class="ai-gateway-form-field">
@@ -173,6 +183,76 @@
           >
         </div>
       </div>
+
+      <section
+        v-if="editingModel?.effective_pricing"
+        class="ai-model-pricing-panel"
+        :aria-label="l('Effective pricing', '当前生效价格')"
+      >
+        <div class="ai-model-pricing-heading">
+          <div>
+            <strong>{{ l('Effective pricing', '当前生效价格') }}</strong>
+            <p>
+              {{ l('Resolved by the server from per-direction overrides and the built-in catalog.', '由服务端按方向合并自定义覆盖价与内置价。') }}
+            </p>
+          </div>
+          <KBadge :appearance="pricingStatusAppearance(editingModel.effective_pricing.status)">
+            {{ pricingStatusLabel(editingModel.effective_pricing.status) }}
+          </KBadge>
+        </div>
+
+        <div class="ai-model-pricing-grid">
+          <article
+            v-for="direction in pricingDirections"
+            :key="direction"
+            class="ai-model-price-direction"
+          >
+            <strong>{{ directionLabel(direction) }}</strong>
+            <template v-if="editingModel.effective_pricing[direction]">
+              <span class="ai-model-price-amount">
+                {{ formatEffectiveAmount(editingModel.effective_pricing[direction]?.amount) }}
+              </span>
+              <KBadge appearance="neutral">
+                {{ priceSourceLabel(editingModel.effective_pricing[direction]?.source) }}
+              </KBadge>
+              <small>
+                {{ priceMetadata(editingModel.effective_pricing[direction]) }}
+              </small>
+              <small v-if="effectivePeriod(editingModel.effective_pricing[direction])">
+                {{ effectivePeriod(editingModel.effective_pricing[direction]) }}
+              </small>
+            </template>
+            <template v-else>
+              <span class="ai-model-price-amount">—</span>
+              <small>{{ l('Unpriced', '未定价') }}</small>
+            </template>
+          </article>
+        </div>
+
+        <p
+          v-if="editingModel.effective_pricing.catalog_snapshot_date"
+          class="ai-model-catalog-meta"
+        >
+          {{
+            l(
+              `Catalog snapshot ${editingModel.effective_pricing.catalog_snapshot_date}${editingModel.effective_pricing.catalog_version ? ` · ${editingModel.effective_pricing.catalog_version}` : ''}`,
+              `价表快照 ${editingModel.effective_pricing.catalog_snapshot_date}${editingModel.effective_pricing.catalog_version ? ` · ${editingModel.effective_pricing.catalog_version}` : ''}`,
+            )
+          }}
+        </p>
+
+        <ul
+          v-if="editingModel.effective_pricing.conditions.length"
+          class="ai-model-pricing-conditions"
+        >
+          <li
+            v-for="condition in editingModel.effective_pricing.conditions"
+            :key="`${condition.type}:${condition.value}`"
+          >
+            {{ conditionLabel(condition) }}
+          </li>
+        </ul>
+      </section>
 
       <div class="ai-gateway-form-field">
         <label for="ai-model-tags">{{ t('Tags') }}</label>
@@ -306,7 +386,40 @@
       </template>
 
       <template #cost="{ row }">
-        <span>{{ formatCost(row.input_cost) }} / {{ formatCost(row.output_cost) }}</span>
+        <div class="ai-model-table-pricing">
+          <div
+            v-for="direction in pricingDirections"
+            :key="direction"
+          >
+            <strong>{{ directionLabel(direction) }}</strong>
+            <template v-if="row.effective_pricing?.[direction]">
+              <span>{{ formatEffectiveAmount(row.effective_pricing[direction]?.amount) }}</span>
+              <small>
+                {{ priceSourceLabel(row.effective_pricing[direction]?.source) }}
+                · {{ row.effective_pricing[direction]?.snapshot_date }}
+                · {{ row.effective_pricing[direction]?.version }}
+              </small>
+            </template>
+            <template v-else>
+              <span>—</span>
+              <small>{{ l('Unpriced', '未定价') }}</small>
+            </template>
+          </div>
+          <small v-if="row.effective_pricing?.catalog_snapshot_date">
+            {{
+              l(
+                `Catalog ${row.effective_pricing.catalog_snapshot_date}${row.effective_pricing.catalog_version ? ` · ${row.effective_pricing.catalog_version}` : ''}`,
+                `价表 ${row.effective_pricing.catalog_snapshot_date}${row.effective_pricing.catalog_version ? ` · ${row.effective_pricing.catalog_version}` : ''}`,
+              )
+            }}
+          </small>
+          <small
+            v-if="row.effective_pricing?.status === 'unsupported'"
+            class="ai-model-price-warning"
+          >
+            {{ l('Current conditions are unsupported for cost calculation', '当前条件不支持成本计算') }}
+          </small>
+        </div>
       </template>
 
       <template #tokens="{ row }">
@@ -331,6 +444,13 @@
 
       <template #actions="{ row }">
         <div class="ai-gateway-row-actions">
+          <KButton
+            appearance="secondary"
+            size="small"
+            @click="viewUsage(row)"
+          >
+            {{ t('View Usage') }}
+          </KButton>
           <KButton
             appearance="secondary"
             :disabled="gatewaySaving"
@@ -364,16 +484,23 @@
 <script setup lang="ts">
 import type { TableDataFetcherParams } from '@kong/kongponents'
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import AiGatewayNav from './AiGatewayNav.vue'
 import { apiService } from '@/services/apiService'
 import { useToaster } from '@/composables/useToaster'
-import type { AiModel, AiProvider, KongPageResponse } from './types'
+import type {
+  AiModel,
+  AiModelEffectivePrice,
+  AiModelPricingCondition,
+  AiProvider,
+  KongPageResponse,
+} from './types'
 import { useAiGatewayI18n } from './useAiGatewayI18n'
 import {
   formatTags,
   getErrorMessage,
   omitUndefined,
-  parseOptionalFloat,
+  parseOptionalDecimal,
   parseOptionalInt,
   parseTags,
 } from './utils'
@@ -384,8 +511,8 @@ interface ModelFormState {
   modelName: string
   priority: string | number
   weight: string | number
-  inputCost: string | number
-  outputCost: string | number
+  inputCost: string
+  outputCost: string
   maxTokens: string | number
   maxInputTokens: string | number
   enabled: boolean
@@ -410,6 +537,7 @@ defineOptions({
 })
 
 const toaster = useToaster()
+const router = useRouter()
 const { l, locale, t } = useAiGatewayI18n()
 const tableKey = ref(0)
 const formVisible = ref(false)
@@ -422,6 +550,8 @@ const providerLoading = ref(true)
 const gatewayModel = ref<AiModel | null>(null)
 const gatewaySaving = ref(false)
 const gatewayEndpoint = ref('')
+const editingModel = ref<AiModel | null>(null)
+const pricingDirections = ['input', 'output'] as const
 
 const providerMap = computed(() => {
   return new Map(providers.value.map(provider => [provider.id, provider]))
@@ -433,7 +563,7 @@ const headers = computed(() => [
   { label: locale.value === 'zh-CN' ? '服务商模型' : 'Provider Model', key: 'model_name' },
   { label: t('Priority'), key: 'priority' },
   { label: t('Weight'), key: 'weight' },
-  { label: locale.value === 'zh-CN' ? '输入 / 输出成本' : 'Input / Output Cost', key: 'cost' },
+  { label: locale.value === 'zh-CN' ? '当前 Input / Output 价格' : 'Effective Input / Output Pricing', key: 'cost' },
   { label: locale.value === 'zh-CN' ? '输入 / 总 Token' : 'Input / Total Tokens', key: 'tokens' },
   { label: t('Status'), key: 'enabled' },
   { label: t('Tags'), key: 'tags' },
@@ -548,7 +678,106 @@ const providerName = (providerId: string) => {
   return provider ? `${provider.name} (${provider.provider_type})` : providerId
 }
 
-const formatCost = (value?: number | null) => value ?? '-'
+const directionLabel = (direction: typeof pricingDirections[number]) => {
+  return direction === 'input' ? 'Input' : 'Output'
+}
+
+const compactDecimal = (value: string) => {
+  const [rawInteger = '0', rawFraction = ''] = value.split('.')
+  const integer = rawInteger.replace(/^0+(?=\d)/, '') || '0'
+  const fraction = rawFraction.replace(/0+$/, '')
+
+  return fraction ? `${integer}.${fraction}` : integer
+}
+
+const formatEffectiveAmount = (value?: string | null) => {
+  if (value === null || value === undefined || value === '') {
+    return '—'
+  }
+
+  return `$${compactDecimal(value)} / 1M tokens`
+}
+
+const priceSourceLabel = (source?: string | null) => {
+  if (source === 'override') {
+    return l('Custom override', '自定义覆盖')
+  }
+  if (source === 'builtin') {
+    return l('Built-in price', '内置价')
+  }
+
+  return source || l('Unknown source', '未知来源')
+}
+
+const priceMetadata = (price?: AiModelEffectivePrice | null) => {
+  if (!price) {
+    return ''
+  }
+
+  return l(
+    `Snapshot ${price.snapshot_date} · ${price.version}`,
+    `快照 ${price.snapshot_date} · ${price.version}`,
+  )
+}
+
+const effectivePeriod = (price?: AiModelEffectivePrice | null) => {
+  if (!price?.effective_from && !price?.effective_to) {
+    return ''
+  }
+
+  return l(
+    `Effective ${price.effective_from ?? '—'} → ${price.effective_to ?? 'ongoing'}`,
+    `生效期 ${price.effective_from ?? '—'} → ${price.effective_to ?? '持续有效'}`,
+  )
+}
+
+const pricingStatusLabel = (status: string) => {
+  const labels: Record<string, [string, string]> = {
+    matched: ['Matched', '已匹配'],
+    unmatched: ['Unpriced', '未定价'],
+    unsupported: ['Unsupported conditions', '当前条件不支持计价'],
+    not_applicable: ['Not applicable', '不适用'],
+  }
+  const label = labels[status]
+
+  return label ? l(...label) : status
+}
+
+const pricingStatusAppearance = (status: string) => {
+  if (status === 'matched') {
+    return 'success' as const
+  }
+  if (status === 'unsupported') {
+    return 'warning' as const
+  }
+
+  return 'neutral' as const
+}
+
+const conditionLabel = (condition: AiModelPricingCondition) => {
+  if (condition.type === 'max_prompt_tokens') {
+    const value = typeof condition.value === 'number'
+      ? condition.value.toLocaleString(locale.value)
+      : condition.value
+
+    return l(`Prompt tokens ≤ ${value}`, `Prompt Token ≤ ${value}`)
+  }
+
+  return `${condition.type}: ${condition.value}`
+}
+
+const viewUsage = (model: AiModel) => {
+  void router.push({
+    name: 'ai-usage-overview',
+    query: {
+      actual_model: model.model_name,
+      model_group: model.name,
+      provider_id: model.provider_id,
+      range: '24h',
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    },
+  })
+}
 
 const modelSlug = (name: string) => {
   return name
@@ -571,6 +800,7 @@ const startCreate = () => {
   errorMessage.value = ''
   gatewayModel.value = null
   editingId.value = ''
+  editingModel.value = null
   resetForm()
   formVisible.value = true
 }
@@ -579,13 +809,16 @@ const startEdit = (model: AiModel) => {
   errorMessage.value = ''
   gatewayModel.value = null
   editingId.value = model.id
+  editingModel.value = model
   form.name = model.name
   form.providerId = model.provider_id
   form.modelName = model.model_name
   form.priority = String(model.priority)
   form.weight = String(model.weight)
-  form.inputCost = model.input_cost === null || model.input_cost === undefined ? '' : String(model.input_cost)
-  form.outputCost = model.output_cost === null || model.output_cost === undefined ? '' : String(model.output_cost)
+  form.inputCost = model.input_cost_decimal
+    ?? (model.input_cost === null || model.input_cost === undefined ? '' : String(model.input_cost))
+  form.outputCost = model.output_cost_decimal
+    ?? (model.output_cost === null || model.output_cost === undefined ? '' : String(model.output_cost))
   form.maxTokens = model.max_tokens === null || model.max_tokens === undefined ? '' : String(model.max_tokens)
   form.maxInputTokens = model.max_input_tokens === null || model.max_input_tokens === undefined ? '' : String(model.max_input_tokens)
   form.enabled = model.enabled
@@ -602,6 +835,7 @@ const startGatewayRoute = (model: AiModel) => {
 
   errorMessage.value = ''
   formVisible.value = false
+  editingModel.value = null
   gatewayEndpoint.value = ''
   gatewayModel.value = model
   gatewayForm.serviceName = `ai-${slug}`
@@ -623,6 +857,7 @@ const cancelForm = () => {
   errorMessage.value = ''
   formVisible.value = false
   editingId.value = ''
+  editingModel.value = null
   resetForm()
 }
 
@@ -651,8 +886,8 @@ const submitModel = async () => {
       model_name: form.modelName,
       priority,
       weight,
-      input_cost: parseOptionalFloat(form.inputCost, 'Input cost') ?? (editingId.value ? null : undefined),
-      output_cost: parseOptionalFloat(form.outputCost, 'Output cost') ?? (editingId.value ? null : undefined),
+      input_cost: parseOptionalDecimal(form.inputCost, 'Input cost') ?? null,
+      output_cost: parseOptionalDecimal(form.outputCost, 'Output cost') ?? null,
       max_tokens: parseOptionalInt(form.maxTokens, 'Max tokens') ?? (editingId.value ? null : undefined),
       max_input_tokens: parseOptionalInt(form.maxInputTokens, 'Max input tokens') ?? (editingId.value ? null : undefined),
       ...(!editingId.value ? { config: {} } : {}),

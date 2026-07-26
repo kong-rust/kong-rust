@@ -21,6 +21,14 @@ anymap2 = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+rust_decimal = { workspace = true }
+bigdecimal = { workspace = true }
+num-bigint = { workspace = true }
+chrono-tz = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
 # Step 3: HuggingFace tokenizer.json 本地加载(开源模型 LLaMA/Qwen/Mistral 等)
 tokenizers = { workspace = true }
 # Step 3: HF tokenizer.json 远端下载;Step 4 复用作为 OpenAI/Anthropic/Gemini count API 客户端

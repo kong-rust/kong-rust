@@ -52,6 +52,7 @@ fn test_cost_calculation() {
         prompt_tokens: Some(1000),
         completion_tokens: Some(500),
         total_tokens: Some(1500),
+        ..Default::default()
     };
     let cost = calculate_cost(&usage, Some(30.0), Some(60.0));
     assert!((cost - 0.06).abs() < 1e-10);
@@ -64,6 +65,7 @@ fn test_cost_calculation_no_costs() {
         prompt_tokens: Some(100),
         completion_tokens: Some(50),
         total_tokens: Some(150),
+        ..Default::default()
     };
     assert_eq!(calculate_cost(&usage, None, None), 0.0);
 }

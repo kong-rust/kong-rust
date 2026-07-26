@@ -17,7 +17,7 @@
 | ID | 需求 | 优先级 | 状态 | Effort | 依赖 |
 |----|------|--------|------|--------|------|
 | [REQ-AI-001](#req-ai-001) | Virtual Key 运行时认证 | P0 | ✅ 已完成 | M | 无 |
-| [REQ-AI-002](#req-ai-002) | Token 成本核算与用量事实表 | P0 | 📋 待启动 | M | 无 |
+| [REQ-AI-002](#req-ai-002) | Token 成本核算与用量事实表 | P0 | ✅ 已完成 | L | 无 |
 | [REQ-AI-003](#req-ai-003) | Virtual Key 配额与预算控制 | P0 | 📋 待启动 | M | 001, 002 |
 | [REQ-AI-004](#req-ai-004) | AI 可观测性对齐（Prometheus + TTFT） | P1 | 📋 待启动 | S | 无 |
 | [REQ-AI-005](#req-ai-005) | 模型健康回报与故障重试 | P1 | 📋 待启动 | M | 无 |
@@ -56,30 +56,19 @@
 
 ### Token 成本核算与用量事实表（Cost Accounting & Usage Facts）
 
-- **优先级 / Effort：** P0 / M
-- **状态：** 📋 待启动
+- **优先级 / Effort：** P0 / L（需求分析后由 M 调整）
+- **状态：** ✅ 已完成（2026-07-26）
 - **依赖：** 无（`virtual_key_id` 字段可空，REQ-AI-001 完成后自动携带）
+- **📄 需求分析：** [REQ-AI-002/analysis.md](REQ-AI-002/analysis.md)（11 条 FR、10 条验收标准、10 项已定稿决策）
+- **📄 方案设计：** [REQ-AI-002/design.md](REQ-AI-002/design.md)
+- **📄 实现记录：** [REQ-AI-002 — Token 成本核算与用量事实表](../implementation-logs/req-ai-002_2026-07-26_ai-usage-analytics.md)
 
-**背景与价值**
-
-`calculate_cost` 是 15 行纯函数且生产代码**零调用点**；无内置定价表、无任何 usage 持久化表、无 AI analytics API。没有事实表，成本仪表盘、预算控制（REQ-AI-003）、按 key 计费都无从谈起。这是轨道 C「成本仪表盘」的数据地基。
-
-**需求范围**
-
-- 后端：
-  1. 内置主流模型定价表（静态数据 + `ai_models.input_cost/output_cost` 可覆盖），标注价格快照日期
-  2. 新表 `ai_usage_logs`（forward-only 迁移）：时间、route/service、provider/model、virtual_key_id/consumer_id、prompt/completion/total tokens、token 来源（官方 usage / 估算）、cost、e2e 延迟、TTFT、状态码、是否流式、缓存状态
-  3. log 阶段异步批量落库（mpsc + 批量 insert，不阻塞代理路径）；DB-less 模式降级策略在方案设计阶段定（内存环形缓冲 / 仅日志输出）
-  4. Admin API：`GET /ai-usage`（分页 + 过滤）、`GET /ai-usage/summary`（按 model / virtual key / 时间窗聚合）
-- 前端：AI Gateway Overview 增加成本卡片；新增「用量分析」页（消耗趋势图、按 model / virtual key 下钻、Top 排行）；模型调用日志列表页（可脱敏）
-- 文档：guide 双语版用量章节、`design.md`
-
-**验收标准**
-
-1. 每次 AI 请求（含流式、含失败请求）落一条 usage 记录，cost 计算正确且标注 token 来源
-2. 聚合 API 返回值与明细一致；分页与时间过滤正确
-3. 前端仪表盘展示真实数据（非 mock）
-4. 落库为异步路径，代理延迟无可测回归；落库失败不影响代理请求
+**摘要**：为包含 `ai-proxy` 的每个客户端请求形成一条请求级元数据事实，覆盖上游前拒绝、
+解析失败、成功、上游错误与流中断；provider usage 优先，缺失值显式标记估算/混合/不可用。
+内置 OpenAI / Anthropic / Gemini 静态价表可被 Model 分方向覆盖，未知价格为未定价而非
+零成本，并把生效单价与版本固化到历史事实。PostgreSQL 走有界非阻塞队列异步批写，
+DB-less 使用本节点易失环形缓冲；提供共享过滤口径的明细/汇总 API。Manager 新增“调用统计”
+（用量分析 + 元数据调用日志），保持 AI Endpoint 为默认入口，不保存 prompt、响应正文或凭据。
 
 ---
 
@@ -89,7 +78,8 @@
 
 - **优先级 / Effort：** P0 / M
 - **状态：** 📋 待启动
-- **依赖：** REQ-AI-001（key 身份）、REQ-AI-002（成本数据）
+- **依赖：** REQ-AI-001（key 身份）、REQ-AI-002（价格/成本口径；usage facts
+  仅供 analytics，不作为预算执行账本）
 
 **背景与价值**
 
@@ -99,7 +89,9 @@
 
 - 后端：
   1. `ai-rate-limit` 接通 `limit_by=virtual_key`：读取 key 自身 tpm/rpm_limit，非法 `limit_by` 值改为配置校验报错
-  2. 预算扣减：log 阶段将请求 cost 累加到 `budget_used`（批量/异步，方案设计定并发累加策略）；超预算请求拒绝
+  2. 预算扣减：采用独立的原子、可恢复 accounting 路径累加 `budget_used`，
+     不依赖 REQ-AI-002 的 best-effort usage writer；具体一致性策略在本需求分析与
+     方案设计阶段确定，超预算请求拒绝
   3. 超限响应：429（限流）/ 403（预算耗尽），OpenAI 风格错误体 + `X-RateLimit-*` 响应头
 - 前端：VirtualKeys 页展示 budget 使用进度条、TPM/RPM 配置生效状态、超限徽章
 - 文档：guide 双语版配额章节

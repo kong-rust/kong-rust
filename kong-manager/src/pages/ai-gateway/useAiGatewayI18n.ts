@@ -8,6 +8,8 @@ const zh: Record<string, string> = {
   'Provider Connections': '服务商连接',
   'Advanced Models': '高级模型',
   'Virtual Keys': '虚拟密钥',
+  'Usage': '调用统计',
+  'View Usage': '查看用量',
   'Create Endpoint': '创建接口',
   'AI traffic starts here': '从这里开始管理 AI 流量',
   'Publish one URL. Route it to the right models.': '发布一个地址，将流量转发到合适的模型。',
