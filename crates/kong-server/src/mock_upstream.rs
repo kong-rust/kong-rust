@@ -189,7 +189,11 @@ fn build_echo(
     }
 
     // post_data — 请求体
-    let post_data = if !body.is_empty() || method == Method::POST || method == Method::PUT || method == Method::PATCH {
+    let post_data = if !body.is_empty()
+        || method == Method::POST
+        || method == Method::PUT
+        || method == Method::PATCH
+    {
         let text = String::from_utf8_lossy(body).to_string();
         let content_type = headers
             .get("content-type")
@@ -249,9 +253,18 @@ fn build_echo(
         .unwrap_or("localhost")
         .to_string();
     let scheme = if port == 15556 { "https" } else { "http" };
-    let request_uri = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(uri.path());
+    let request_uri = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(uri.path());
     let is_args = if uri.query().is_some() { "?" } else { "" };
-    let url = format!("{}://{}:{}{}", scheme, host.split(':').next().unwrap_or(&host), port, request_uri);
+    let url = format!(
+        "{}://{}:{}{}",
+        scheme,
+        host.split(':').next().unwrap_or(&host),
+        port,
+        request_uri
+    );
 
     EchoResponse {
         headers: hdr_map,
@@ -261,9 +274,7 @@ fn build_echo(
         vars: EchoVars {
             uri: uri.path().to_string(),
             host: host.split(':').next().unwrap_or(&host).to_string(),
-            hostname: gethostname::gethostname()
-                .to_string_lossy()
-                .to_string(),
+            hostname: gethostname::gethostname().to_string_lossy().to_string(),
             https: if scheme == "https" { "on" } else { "off" }.to_string(),
             scheme: scheme.to_string(),
             is_args: is_args.to_string(),
@@ -313,7 +324,10 @@ fn text_response(status: StatusCode, text: &str) -> Response {
 /// GET / — root: return valid routes listing — 根路径：返回可用路由列表
 async fn handle_root(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     if method != Method::GET {
-        return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed for the requested URL");
+        return text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed for the requested URL",
+        );
     }
     let mut echo = build_echo(&method, &uri, &headers, &[], 15555);
     echo.valid_routes = Some(serde_json::json!({
@@ -337,23 +351,39 @@ async fn handle_root(method: Method, uri: Uri, headers: HeaderMap) -> Response {
 /// GET /get — echo GET request only — 仅回显 GET 请求
 async fn handle_get(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     if method != Method::GET {
-        return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed for the requested URL");
+        return text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed for the requested URL",
+        );
     }
     let echo = build_echo(&method, &uri, &headers, &[], 15555);
     echo_response(StatusCode::OK, &echo)
 }
 
 /// POST /post — echo POST request only — 仅回显 POST 请求
-async fn handle_post(method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_post(
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if method != Method::POST {
-        return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed for the requested URL");
+        return text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed for the requested URL",
+        );
     }
     let echo = build_echo(&method, &uri, &headers, &body, 15555);
     echo_response(StatusCode::OK, &echo)
 }
 
 /// ANY /anything or /request — echo any request — 回显任意请求
-async fn handle_anything(method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn handle_anything(
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     let echo = build_echo(&method, &uri, &headers, &body, 15555);
     echo_response(StatusCode::OK, &echo)
 }
@@ -458,7 +488,10 @@ async fn handle_basic_auth(
         .and_then(|v| v.to_str().ok());
 
     let authenticated = if let Some(auth) = auth_header {
-        if let Some(encoded) = auth.strip_prefix("Basic ").or_else(|| auth.strip_prefix("basic ")) {
+        if let Some(encoded) = auth
+            .strip_prefix("Basic ")
+            .or_else(|| auth.strip_prefix("basic "))
+        {
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
                 let decoded_str = String::from_utf8_lossy(&decoded);
                 // Split on first colon only (password may contain colons) — 只在第一个冒号处分割（密码可能包含冒号）
@@ -546,14 +579,13 @@ async fn handle_hop_by_hop() -> Response {
         .header("Proxy", "Remove-Me")
         .header("Proxy-Connection", "close")
         .header("Proxy-Authenticate", "Basic")
-        .header(
-            "Proxy-Authorization",
-            "Basic YWxhZGRpbjpvcGVuc2VzYW1l",
-        )
+        .header("Proxy-Authorization", "Basic YWxhZGRpbjpvcGVuc2VzYW1l")
         .header("TE", "trailers, deflate;q=0.5")
         .header("Trailer", "Expires")
         .header("Upgrade", "example/1, foo/2")
-        .body(Body::from("hello\r\n\r\nExpires: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n"))
+        .body(Body::from(
+            "hello\r\n\r\nExpires: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n",
+        ))
         .unwrap()
 }
 
@@ -599,7 +631,9 @@ async fn handle_post_log(
             "entry": entry,
             "log_req_headers": log_req_headers,
         });
-        store.entries.push(serde_json::to_string(&wrapped).unwrap_or_default());
+        store
+            .entries
+            .push(serde_json::to_string(&wrapped).unwrap_or_default());
         store.count += 1;
     }
 
@@ -607,10 +641,7 @@ async fn handle_post_log(
 }
 
 /// GET /read_log/{name} — read stored log entries — 读取存储的日志条目
-async fn handle_read_log(
-    Path(name): Path<String>,
-    State(state): State<MockState>,
-) -> Response {
+async fn handle_read_log(Path(name): Path<String>, State(state): State<MockState>) -> Response {
     let logs = state.logs.read().await;
     if let Some(store) = logs.get(&name) {
         let entries: Vec<serde_json::Value> = store
@@ -647,20 +678,14 @@ async fn handle_read_log(
 }
 
 /// GET /count_log/{name} — return log entry count — 返回日志条目计数
-async fn handle_count_log(
-    Path(name): Path<String>,
-    State(state): State<MockState>,
-) -> Response {
+async fn handle_count_log(Path(name): Path<String>, State(state): State<MockState>) -> Response {
     let logs = state.logs.read().await;
     let count = logs.get(&name).map(|s| s.count).unwrap_or(0);
     text_response(StatusCode::OK, &count.to_string())
 }
 
 /// DELETE /reset_log/{name} — clear stored log entries — 清除存储的日志条目
-async fn handle_reset_log(
-    Path(name): Path<String>,
-    State(state): State<MockState>,
-) -> Response {
+async fn handle_reset_log(Path(name): Path<String>, State(state): State<MockState>) -> Response {
     let mut logs = state.logs.write().await;
     logs.remove(&name);
     text_response(StatusCode::OK, "")

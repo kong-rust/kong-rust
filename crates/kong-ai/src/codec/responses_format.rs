@@ -232,23 +232,34 @@ fn input_item_to_message(item: &serde_json::Value) -> Option<Message> {
                                 let pt = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                 match pt {
                                     "input_text" => {
-                                        let text = p.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                        let text =
+                                            p.get("text").and_then(|t| t.as_str()).unwrap_or("");
                                         Some(serde_json::json!({"type": "text", "text": text}))
                                     }
                                     "input_image" => {
                                         // Responses: {type: "input_image", image_url: "..."}
                                         // Chat API: {type: "image_url", image_url: {url: "..."}}
-                                        let url = p.get("image_url").and_then(|u| u.as_str())
+                                        let url = p
+                                            .get("image_url")
+                                            .and_then(|u| u.as_str())
                                             .or_else(|| p.get("url").and_then(|u| u.as_str()));
-                                        url.map(|u| serde_json::json!({
-                                            "type": "image_url",
-                                            "image_url": {"url": u}
-                                        }))
+                                        url.map(|u| {
+                                            serde_json::json!({
+                                                "type": "image_url",
+                                                "image_url": {"url": u}
+                                            })
+                                        })
                                     }
                                     "input_audio" => {
                                         // 透传 audio 数据（格式基本兼容）
-                                        let data = p.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                                        let format = p.get("format").and_then(|f| f.as_str()).unwrap_or("wav");
+                                        let data = p
+                                            .get("data")
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null);
+                                        let format = p
+                                            .get("format")
+                                            .and_then(|f| f.as_str())
+                                            .unwrap_or("wav");
                                         Some(serde_json::json!({
                                             "type": "input_audio",
                                             "input_audio": {"data": data, "format": format}
@@ -267,7 +278,9 @@ fn input_item_to_message(item: &serde_json::Value) -> Option<Message> {
                         let text: Vec<String> = parts
                             .iter()
                             .filter_map(|p| {
-                                p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                p.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
                             })
                             .collect();
                         if text.is_empty() {
@@ -305,10 +318,7 @@ fn input_item_to_message(item: &serde_json::Value) -> Option<Message> {
 // ============ 响应升级：ChatResponse → ResponsesResponse ============
 
 /// 将 v1/chat/completions 非流式响应升级为 v1/responses 格式
-pub fn chat_to_responses(
-    resp: &ChatResponse,
-    stripped: &StrippedTools,
-) -> ResponsesResponse {
+pub fn chat_to_responses(resp: &ChatResponse, stripped: &StrippedTools) -> ResponsesResponse {
     let mut output: Vec<serde_json::Value> = Vec::new();
 
     if let Some(choice) = resp.choices.first() {
@@ -474,7 +484,10 @@ impl ResponsesEventState {
             }
         }
 
-        let choice = match chunk.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first())
+        let choice = match chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
         {
             Some(c) => c,
             None => return vec![],
@@ -691,7 +704,12 @@ impl ResponsesEventState {
 
     fn close_current_content(&mut self, events: &mut Vec<String>) {
         let info = self.output_items.last().map(|item| {
-            (item.item_type.clone(), item.index, item.emitted_done, item.accumulated_text.clone())
+            (
+                item.item_type.clone(),
+                item.index,
+                item.emitted_done,
+                item.accumulated_text.clone(),
+            )
         });
         if let Some((item_type, idx, emitted_done, text)) = info {
             if item_type == "message" && !emitted_done {

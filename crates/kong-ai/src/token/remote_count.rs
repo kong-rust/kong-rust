@@ -141,12 +141,7 @@ impl Default for RemoteCountCache {
 pub trait RemoteCountClient: Send + Sync {
     /// 调用远端 API 计数;返回 None 表示失败/未配置/超时,由调用方降级
     /// Call the remote API; None signals failure/missing config/timeout for caller fallback
-    async fn count(
-        &self,
-        model: &str,
-        request: &ChatRequest,
-        has_non_text: bool,
-    ) -> Option<u64>;
+    async fn count(&self, model: &str, request: &ChatRequest, has_non_text: bool) -> Option<u64>;
 
     /// provider 标识(用于 LRU key 和日志)
     fn provider(&self) -> &'static str;
@@ -218,12 +213,7 @@ impl OpenAiCountClient {
 
 #[async_trait]
 impl RemoteCountClient for OpenAiCountClient {
-    async fn count(
-        &self,
-        model: &str,
-        request: &ChatRequest,
-        has_non_text: bool,
-    ) -> Option<u64> {
+    async fn count(&self, model: &str, request: &ChatRequest, has_non_text: bool) -> Option<u64> {
         // 缺 api_key → 不发请求(避免 401);双轨外层会自动兜底 tiktoken
         let api_key = self.common.api_key.as_deref()?;
 
@@ -384,12 +374,7 @@ impl AnthropicCountClient {
 
 #[async_trait]
 impl RemoteCountClient for AnthropicCountClient {
-    async fn count(
-        &self,
-        model: &str,
-        request: &ChatRequest,
-        has_non_text: bool,
-    ) -> Option<u64> {
+    async fn count(&self, model: &str, request: &ChatRequest, has_non_text: bool) -> Option<u64> {
         let api_key = self.common.api_key.as_deref()?;
 
         let (key, cached) = self
@@ -573,8 +558,8 @@ impl GeminiCountClient {
         cache: Arc<RemoteCountCache>,
         timeout: Duration,
     ) -> Self {
-        let base_url = base_url
-            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+        let base_url =
+            base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
         Self {
             common: RemoteCommon::new(http, base_url, api_key, cache, timeout),
         }
@@ -583,12 +568,7 @@ impl GeminiCountClient {
 
 #[async_trait]
 impl RemoteCountClient for GeminiCountClient {
-    async fn count(
-        &self,
-        model: &str,
-        request: &ChatRequest,
-        has_non_text: bool,
-    ) -> Option<u64> {
+    async fn count(&self, model: &str, request: &ChatRequest, has_non_text: bool) -> Option<u64> {
         let api_key = self.common.api_key.as_deref()?;
 
         let (key, cached) = self

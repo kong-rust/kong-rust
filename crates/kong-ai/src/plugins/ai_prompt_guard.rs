@@ -103,10 +103,13 @@ impl PluginHandler for AiPromptGuardPlugin {
         let cfg: AiPromptGuardConfig = crate::parse_plugin_config(config)?;
 
         // 解析请求体
-        let body = ctx.request_body.as_ref().ok_or_else(|| KongError::PluginError {
-            plugin_name: "ai-prompt-guard".to_string(),
-            message: "missing request body".to_string(),
-        })?;
+        let body = ctx
+            .request_body
+            .as_ref()
+            .ok_or_else(|| KongError::PluginError {
+                plugin_name: "ai-prompt-guard".to_string(),
+                message: "missing request body".to_string(),
+            })?;
 
         let parsed: serde_json::Value =
             serde_json::from_str(body).map_err(|e| KongError::PluginError {
@@ -121,18 +124,22 @@ impl PluginHandler for AiPromptGuardPlugin {
             let deny_regexes: Vec<Regex> = cfg
                 .deny_patterns
                 .iter()
-                .map(|p| Regex::new(p).map_err(|e| KongError::PluginError {
-                    plugin_name: "ai-prompt-guard".to_string(),
-                    message: format!("invalid deny pattern '{}': {}", p, e),
-                }))
+                .map(|p| {
+                    Regex::new(p).map_err(|e| KongError::PluginError {
+                        plugin_name: "ai-prompt-guard".to_string(),
+                        message: format!("invalid deny pattern '{}': {}", p, e),
+                    })
+                })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let allow_regexes: Vec<Regex> = cfg
                 .allow_patterns
                 .iter()
-                .map(|p| Regex::new(p).map_err(|e| KongError::PluginError {
-                    plugin_name: "ai-prompt-guard".to_string(),
-                    message: format!("invalid allow pattern '{}': {}", p, e),
-                }))
+                .map(|p| {
+                    Regex::new(p).map_err(|e| KongError::PluginError {
+                        plugin_name: "ai-prompt-guard".to_string(),
+                        message: format!("invalid allow pattern '{}': {}", p, e),
+                    })
+                })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
             for msg in messages {
@@ -142,17 +149,14 @@ impl PluginHandler for AiPromptGuardPlugin {
                 }
                 // 提取文本内容：支持 string 和 content part 数组两种格式
                 let content = match msg.get("content") {
-                    Some(v) if v.is_string() => {
-                        v.as_str().unwrap_or("").to_string()
-                    }
-                    Some(v) if v.is_array() => {
-                        v.as_array()
-                            .unwrap()
-                            .iter()
-                            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    }
+                    Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+                    Some(v) if v.is_array() => v
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     _ => String::new(),
                 };
 

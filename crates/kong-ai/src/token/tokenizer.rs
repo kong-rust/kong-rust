@@ -292,7 +292,12 @@ fn append_content_text(value: &serde_json::Value, buf: &mut String) {
 pub fn has_non_text_content(request: &ChatRequest) -> bool {
     // 顶层 tools / tool_choice — 这两个字段在 ChatRequest 上有专属位
     // top-level tools / tool_choice are first-class fields
-    if request.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+    if request
+        .tools
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false)
+    {
         return true;
     }
     if request.tool_choice.is_some() {
@@ -322,7 +327,12 @@ pub fn has_non_text_content(request: &ChatRequest) -> bool {
     // 遍历 messages
     for msg in &request.messages {
         // assistant 已发出过 tool_call → 历史上下文中含工具调用
-        if msg.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+        if msg
+            .tool_calls
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+        {
             return true;
         }
         // content 是数组 → 检查每个 part 类型

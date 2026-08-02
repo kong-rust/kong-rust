@@ -105,12 +105,10 @@ impl HfDownloader for HttpHfDownloader {
         );
         debug!("hf-loader: downloading {}", url);
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| KongError::InternalError(format!("hf download request failed: {}", e)))?;
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                KongError::InternalError(format!("hf download request failed: {}", e))
+            })?;
 
         if !resp.status().is_success() {
             return Err(KongError::InternalError(format!(
@@ -302,7 +300,11 @@ impl HfLoader {
             }
 
             let target = loader.cache_path(&repo_id);
-            match loader.downloader.download_tokenizer(&repo_id, &target).await {
+            match loader
+                .downloader
+                .download_tokenizer(&repo_id, &target)
+                .await
+            {
                 Ok(_) => match tokenizers::Tokenizer::from_file(&target) {
                     Ok(t) => {
                         let mut guard = cell.state.write().await;

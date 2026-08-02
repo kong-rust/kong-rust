@@ -85,7 +85,11 @@ impl AnthropicCodec {
                 serde_json::Value::Array(blocks) => {
                     let text: Vec<String> = blocks
                         .iter()
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                        .filter_map(|b| {
+                            b.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        })
                         .collect();
                     serde_json::Value::String(text.join("\n"))
                 }
@@ -146,23 +150,27 @@ impl AnthropicCodec {
         }];
 
         // 转换 finish_reason → stop_reason
-        let stop_reason = choice.and_then(|c| c.finish_reason.as_ref()).map(|r| {
-            match r.as_str() {
+        let stop_reason = choice
+            .and_then(|c| c.finish_reason.as_ref())
+            .map(|r| match r.as_str() {
                 "stop" => "end_turn".to_string(),
                 "length" => "max_tokens".to_string(),
                 "tool_calls" => "tool_use".to_string(),
                 other => other.to_string(),
-            }
-        });
+            });
 
         // 转换 usage
-        let usage = response.usage.as_ref().map(|u| AnthropicUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-        }).unwrap_or(AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        });
+        let usage = response
+            .usage
+            .as_ref()
+            .map(|u| AnthropicUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+            })
+            .unwrap_or(AnthropicUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            });
 
         let anthropic_resp = AnthropicResponse {
             id: response.id.clone(),
@@ -191,7 +199,8 @@ impl AnthropicCodec {
                     "type": "message_delta",
                     "delta": { "stop_reason": "end_turn" },
                     "usage": { "output_tokens": 0 }
-                }).to_string(),
+                })
+                .to_string(),
                 id: None,
             };
             let stop_event = SseEvent {
@@ -211,7 +220,10 @@ impl AnthropicCodec {
 
         // 第一个事件：先发 message_start + content_block_start
         if is_first {
-            let model = chunk.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let model = chunk
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let message_start = SseEvent {
                 event_type: "message_start".to_string(),
                 data: serde_json::json!({
@@ -226,7 +238,8 @@ impl AnthropicCodec {
                         "stop_sequence": null,
                         "usage": { "input_tokens": 0, "output_tokens": 0 }
                     }
-                }).to_string(),
+                })
+                .to_string(),
                 id: None,
             };
             events.push(message_start);
@@ -237,7 +250,8 @@ impl AnthropicCodec {
                     "type": "content_block_start",
                     "index": 0,
                     "content_block": { "type": "text", "text": "" }
-                }).to_string(),
+                })
+                .to_string(),
                 id: None,
             };
             events.push(block_start);
@@ -259,7 +273,8 @@ impl AnthropicCodec {
                     "type": "content_block_delta",
                     "index": 0,
                     "delta": { "type": "text_delta", "text": content }
-                }).to_string(),
+                })
+                .to_string(),
                 id: None,
             };
             events.push(block_delta);
@@ -280,7 +295,9 @@ fn convert_anthropic_content_to_openai(content: &serde_json::Value) -> serde_jso
                 .iter()
                 .filter_map(|b| {
                     if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        b.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
                     } else {
                         None
                     }

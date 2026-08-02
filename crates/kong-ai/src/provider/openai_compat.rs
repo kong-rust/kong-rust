@@ -40,7 +40,8 @@ impl AiDriver for OpenAiCompatDriver {
         provider_config: &AiProviderConfig,
     ) -> Result<ProviderRequest> {
         // 完全委托给 OpenAI driver
-        self.inner.transform_request(request, model, provider_config)
+        self.inner
+            .transform_request(request, model, provider_config)
     }
 
     fn transform_response(

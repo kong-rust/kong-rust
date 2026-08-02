@@ -14,9 +14,7 @@ use crate::AdminState;
 
 /// GET /clustering/data-planes — list connected data planes
 /// 获取已连接的数据平面列表（仅 CP 可用）
-pub async fn list_data_planes(
-    State(state): State<AdminState>,
-) -> impl IntoResponse {
+pub async fn list_data_planes(State(state): State<AdminState>) -> impl IntoResponse {
     // Only available on CP — 仅 CP 可用
     let Some(ref cp) = state.cp else {
         return (
@@ -24,7 +22,8 @@ pub async fn list_data_planes(
             Json(json!({
                 "message": "this endpoint is only available on control_plane nodes"
             })),
-        ).into_response();
+        )
+            .into_response();
     };
 
     let dps = cp.list_data_planes().await;
@@ -45,14 +44,13 @@ pub async fn list_data_planes(
     Json(json!({
         "data": data,
         "total": total,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// GET /clustering/status — cluster status summary
 /// 集群状态摘要
-pub async fn clustering_status(
-    State(state): State<AdminState>,
-) -> impl IntoResponse {
+pub async fn clustering_status(State(state): State<AdminState>) -> impl IntoResponse {
     let role = state.config.role.to_string();
 
     if let Some(ref cp) = state.cp {

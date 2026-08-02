@@ -9,9 +9,11 @@ use serde_json::{json, Value};
 use kong_ai::models::AiProviderConfig;
 use kong_core::traits::{Entity, PrimaryKey};
 
+use super::{
+    build_page_response, do_create, do_delete, do_get, do_list, do_update, do_upsert, ListParams,
+};
 use crate::extractors::FlexibleBody;
 use crate::AdminState;
-use super::{ListParams, do_list, do_create, do_get, do_update, do_upsert, do_delete, build_page_response};
 
 /// Mask auth_config sensitive fields in provider response — 在 provider 响应中遮蔽 auth_config 敏感字段
 fn mask_auth_config(mut val: Value) -> Value {
@@ -19,7 +21,12 @@ fn mask_auth_config(mut val: Value) -> Value {
         if let Some(auth) = obj.get_mut("auth_config") {
             if let Some(auth_obj) = auth.as_object_mut() {
                 // 遮蔽所有敏感凭证字段 — mask all sensitive credential fields
-                for key in &["header_value", "param_value", "aws_secret_access_key", "gcp_service_account_json"] {
+                for key in &[
+                    "header_value",
+                    "param_value",
+                    "aws_secret_access_key",
+                    "gcp_service_account_json",
+                ] {
                     if auth_obj.contains_key(*key) {
                         auth_obj.insert(key.to_string(), json!("***"));
                     }
@@ -69,7 +76,8 @@ pub async fn update(
     Path(id_or_name): Path<String>,
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
-    let (status, Json(resp)) = do_update::<AiProviderConfig>(&state.ai_providers, &id_or_name, &body).await;
+    let (status, Json(resp)) =
+        do_update::<AiProviderConfig>(&state.ai_providers, &id_or_name, &body).await;
     (status, Json(mask_auth_config(resp)))
 }
 
@@ -79,7 +87,8 @@ pub async fn upsert(
     Path(id_or_name): Path<String>,
     FlexibleBody(body): FlexibleBody,
 ) -> impl IntoResponse {
-    let (status, Json(resp)) = do_upsert::<AiProviderConfig>(&state.ai_providers, &id_or_name, body).await;
+    let (status, Json(resp)) =
+        do_upsert::<AiProviderConfig>(&state.ai_providers, &id_or_name, body).await;
     (status, Json(mask_auth_config(resp)))
 }
 
@@ -112,7 +121,8 @@ pub async fn list_models(
             );
         }
         Err(e) => {
-            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             return (status, Json(json!({"message": e.to_string()})));
         }
     };
@@ -133,7 +143,8 @@ pub async fn list_models(
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
-            let status = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status, Json(json!({"message": e.to_string()})))
         }
     }

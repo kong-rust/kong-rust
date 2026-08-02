@@ -3,10 +3,10 @@
 use crate::models::{AiModel, AiProviderConfig};
 use crate::provider::weighted::weighted_round_robin_index;
 use kong_core::error::{KongError, Result};
-use uuid::Uuid;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// 模型健康状态 — per-model health tracking
 struct ModelHealth {
@@ -87,7 +87,9 @@ impl ModelGroupBalancer {
         // 按 priority 降序排序，priority 相同时按 id 保证稳定性
         // Sort by priority descending; use id as tiebreaker for stability
         entries.sort_by(|a, b| {
-            b.model.priority.cmp(&a.model.priority)
+            b.model
+                .priority
+                .cmp(&a.model.priority)
                 .then_with(|| a.model.id.cmp(&b.model.id))
         });
 
@@ -117,14 +119,9 @@ impl ModelGroupBalancer {
     ///
     /// `prompt_tokens=None` 时不启用 token 过滤,行为与无 by_token_size 路由完全一致
     /// When prompt_tokens=None, token filtering is disabled — behavior identical to legacy select()
-    pub fn select_for(
-        &self,
-        prompt_tokens: Option<u64>,
-    ) -> Result<(&AiModel, &AiProviderConfig)> {
+    pub fn select_for(&self, prompt_tokens: Option<u64>) -> Result<(&AiModel, &AiProviderConfig)> {
         if self.entries.is_empty() {
-            return Err(KongError::InternalError(
-                "model group is empty".to_string(),
-            ));
+            return Err(KongError::InternalError("model group is empty".to_string()));
         }
 
         // 收集所有 priority 档位（已排序，直接取唯一值）
@@ -135,7 +132,8 @@ impl ModelGroupBalancer {
         for priority in &priorities {
             // 同 priority 的可用条目（enabled 且未冷却 且 token 阈值通过）
             // Candidates in this priority tier: enabled, not in cooldown, fits token budget
-            let candidates: Vec<&ModelEntry> = self.entries
+            let candidates: Vec<&ModelEntry> = self
+                .entries
                 .iter()
                 .filter(|e| {
                     e.model.priority == *priority
@@ -200,7 +198,11 @@ impl ModelGroupBalancer {
         }
 
         // 累积连续失败计数 — increment consecutive failure count
-        let failures = entry.health.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let failures = entry
+            .health
+            .consecutive_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         if failures >= 3 {
             entry.health.enter_cooldown(Duration::from_secs(30));
         }

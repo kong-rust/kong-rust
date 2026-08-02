@@ -20,8 +20,7 @@ use crate::codec::ChatRequest;
 use super::counter::TokenCounter;
 use super::hf_loader::{default_cache_dir, HfDownloader, HfLoader};
 use super::remote_count::{
-    AnthropicCountClient, GeminiCountClient, OpenAiCountClient, RemoteCountCache,
-    RemoteCountClient,
+    AnthropicCountClient, GeminiCountClient, OpenAiCountClient, RemoteCountCache, RemoteCountClient,
 };
 use super::tokenizer::{
     estimate_from_request, openai_default_xenova_repo, AnthropicTokenizer, GeminiTokenizer,
@@ -75,7 +74,10 @@ impl TokenizerConfig {
         Self {
             per_request_deadline: Duration::from_millis(cfg.ai_tokenizer_per_request_deadline_ms),
             remote_count_timeout: Duration::from_millis(cfg.ai_tokenizer_remote_count_timeout_ms),
-            hf_cache_dir: cfg.ai_tokenizer_cache_dir.as_ref().map(std::path::PathBuf::from),
+            hf_cache_dir: cfg
+                .ai_tokenizer_cache_dir
+                .as_ref()
+                .map(std::path::PathBuf::from),
             offline: cfg.ai_tokenizer_offline,
             mappings: Vec::new(),
             cache_capacity: cfg.ai_tokenizer_cache_capacity,
@@ -184,10 +186,8 @@ impl TokenizerRegistry {
 
         // 缺 api_key 时不构造 client(行为等同未启用),避免无意义请求
         // Skip building a client when api_key is absent — equivalent to disabled
-        let openai_remote: Option<Arc<dyn RemoteCountClient>> = config
-            .openai_api_key
-            .as_ref()
-            .map(|_| {
+        let openai_remote: Option<Arc<dyn RemoteCountClient>> =
+            config.openai_api_key.as_ref().map(|_| {
                 Arc::new(OpenAiCountClient::new(
                     http.clone(),
                     config.openai_endpoint.clone(),
@@ -196,10 +196,8 @@ impl TokenizerRegistry {
                     timeout,
                 )) as Arc<dyn RemoteCountClient>
             });
-        let anthropic_remote: Option<Arc<dyn RemoteCountClient>> = config
-            .anthropic_api_key
-            .as_ref()
-            .map(|_| {
+        let anthropic_remote: Option<Arc<dyn RemoteCountClient>> =
+            config.anthropic_api_key.as_ref().map(|_| {
                 Arc::new(AnthropicCountClient::new(
                     http.clone(),
                     config.anthropic_endpoint.clone(),
@@ -208,10 +206,8 @@ impl TokenizerRegistry {
                     timeout,
                 )) as Arc<dyn RemoteCountClient>
             });
-        let gemini_remote: Option<Arc<dyn RemoteCountClient>> = config
-            .gemini_api_key
-            .as_ref()
-            .map(|_| {
+        let gemini_remote: Option<Arc<dyn RemoteCountClient>> =
+            config.gemini_api_key.as_ref().map(|_| {
                 Arc::new(GeminiCountClient::new(
                     http.clone(),
                     config.gemini_endpoint.clone(),
@@ -242,10 +238,7 @@ impl TokenizerRegistry {
     }
 
     /// 注入式构造 — 直接传入 HfDownloader 实现(自动包装 HfLoader)
-    pub fn with_hf_downloader(
-        config: TokenizerConfig,
-        downloader: Arc<dyn HfDownloader>,
-    ) -> Self {
+    pub fn with_hf_downloader(config: TokenizerConfig, downloader: Arc<dyn HfDownloader>) -> Self {
         let cache_dir = config
             .hf_cache_dir
             .clone()
@@ -351,7 +344,8 @@ impl TokenizerRegistry {
                 } else {
                     model
                 };
-                self.count_prompt(provider_type, effective_model, &req).await
+                self.count_prompt(provider_type, effective_model, &req)
+                    .await
             }
             // body 不是合法 ChatRequest(可能是 Anthropic/responses 格式或损坏的请求)
             // → 退化到 byte-length 估算
@@ -505,9 +499,10 @@ impl TokenizerRegistry {
             // Tiktoken 直路 — 用于 vLLM / Ollama 等 OpenAI 兼容接口托管的开源模型(无远端 API)
             TokenizerStrategy::Tiktoken => Arc::new(TiktokenTokenizer),
             // HuggingFace 走真实 HfTokenizer — 注入共享 HfLoader + repo_resolver closure
-            TokenizerStrategy::HuggingFace => {
-                Arc::new(HfTokenizer::new(self.hf_loader.clone(), self.build_hf_repo_resolver()))
-            }
+            TokenizerStrategy::HuggingFace => Arc::new(HfTokenizer::new(
+                self.hf_loader.clone(),
+                self.build_hf_repo_resolver(),
+            )),
             // Anthropic/Gemini:有 remote 走真实 client;没 remote → Noop(让 registry estimate 兜底)
             // Anthropic/Gemini: real client if configured; else Noop (registry falls back to estimate)
             TokenizerStrategy::Anthropic => match &self.anthropic_remote {
