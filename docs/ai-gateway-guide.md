@@ -18,6 +18,7 @@ This document is the user-facing guide for Kong-Rust AI Gateway, covering quick 
 10. [Precise Prompt-Token Counting](#10-precise-prompt-token-counting-tokenizer-registry)
 11. [Usage Analytics and Cost Estimation](#11-usage-analytics-and-cost-estimation)
 12. [Virtual Key Quota and Budget Enforcement](#12-virtual-key-quota-and-budget-enforcement)
+13. [Headroom Context Compression and CCR Deployment](#13-headroom-context-compression-and-ccr-deployment)
 
 ---
 
@@ -158,7 +159,7 @@ An AI Virtual Key is a virtual API key for users/teams, used for:
 
 Virtual Keys have the format `sk-kr-<uuid32>`. The raw key is returned once at creation time; only its SHA256 hash is stored thereafter.
 
-### Five Plugins and Their Priorities
+### Six Plugins and Their Priorities
 
 Plugins execute in descending priority order (higher number executes first):
 
@@ -168,7 +169,8 @@ Plugins execute in descending priority order (higher number executes first):
 | ai-prompt-guard | 773 | Security check: deny/allow pattern matching, message length limit |
 | ai-cache | 772 | Semantic cache: compute cache key, short-circuit on hit |
 | ai-rate-limit | 771 | Rate limiting: RPM / TPM counting, pre-deduction correction |
-| ai-proxy | 770 | Core proxy: protocol conversion, upstream routing, token accounting |
+| ai-context-compression | 770 | Store the route policy and observe Headroom/CCR results |
+| ai-proxy | 769 | Core proxy: protocol conversion, upstream routing, token accounting |
 
 ---
 
@@ -527,6 +529,61 @@ ai_virtual_keys:
 
 ---
 
+### 3.6 ai-context-compression
+
+This route-scoped native plugin enables Headroom context compression and transparent
+CCR. It stores policy at priority 770; after `ai-proxy` has selected one Provider and
+created the Provider-native request, the injected Headroom adapter can replace that one
+upstream hop. Authentication, prompt guard, cache keys, conservative quota admission,
+Provider selection, credentials, and final usage accounting remain owned by Kong-Rust.
+
+#### Configuration Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `min_input_tokens` | integer | `2000` | Bypass when the original conservative prompt estimate is lower; range `0..=2^31-1` |
+| `max_input_bytes` | integer | `4194304` | Bypass when the original body is larger; range `1..=16777216` |
+| `on_unavailable` | string | `pass_through` | Safe pre-dispatch behavior: `pass_through` or protocol-shaped `reject` (503) |
+| `streaming` | string | `bypass` | Fixed to `bypass` in this release because transparent streaming CCR is not supported |
+| `expose_metrics_headers` | boolean | `false` | Expose only stable Kong token before/after/saved headers; internal Headroom headers are always removed |
+
+Attach it to the same Route as `ai-proxy`:
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-context-compression",
+    "route": {"id": "<ROUTE_ID>"},
+    "config": {
+      "min_input_tokens": 2000,
+      "max_input_bytes": 4194304,
+      "on_unavailable": "pass_through",
+      "streaming": "bypass",
+      "expose_metrics_headers": false
+    }
+  }'
+```
+
+Supported in the first release: non-streaming OpenAI Responses and Anthropic Messages.
+Kong injects the flat `headroom_retrieve` definition required by the frozen Responses
+transport and Headroom owns retrieval plus Provider continuation. OpenAI Chat and
+OpenAI-compatible Chat are intentionally bypassed with `unsupported_protocol`: Headroom
+0.33.0 injects its tool on that direct transport but does not intercept the returned call.
+Native Gemini, streaming, incompatible `tool_choice`, oversized/short requests, and
+targets whose path cannot be reconstructed safely also bypass with a fixed low-cardinality
+reason. Once a request has entered Headroom, Kong-Rust does not retry it directly against
+the Provider: Headroom might already have called the Provider, and replay could duplicate
+cost or side effects.
+
+All client-supplied `x-headroom-*` headers are removed. Target base URL/path is generated
+server-side, so callers cannot redirect credential-bearing traffic or turn compression/CCR
+on and off. `GET /status` exposes only the safe configuration capability
+(`configured`/`unavailable`, backend, supported protocols, CCR, streaming, and store
+scope); it does not expose the Headroom URL and is not a per-request health probe.
+
+---
+
 ## 4. Admin API Reference
 
 All AI Gateway-specific endpoints are prefixed with `/ai-`. The base path is the Admin API address (default `http://localhost:8001`).
@@ -724,13 +781,15 @@ curl -X POST http://localhost:8000/v1/messages \
 
 ## 7. Plugin Combination Examples
 
-The following demonstrates a complete production-grade configuration combining all 4 AI plugins.
+The following demonstrates a production configuration combining the proxy policy chain
+with optional Headroom context compression.
 
 ### Goal
 
 - **ai-prompt-guard**: Block sensitive content, limit message length (security first)
 - **ai-cache**: Cache identical questions for 5 minutes (cost reduction)
 - **ai-rate-limit**: Max 60 requests and 60k tokens per minute per Consumer (quota management)
+- **ai-context-compression**: Compress long non-streaming context with transparent CCR
 - **ai-proxy**: Route to OpenAI gpt-4o (core proxy)
 
 ### Steps
@@ -800,7 +859,22 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**Step 5**: Attach ai-proxy (priority 770, executes last)
+**Step 5**: Attach ai-context-compression (priority 770)
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-context-compression",
+    "route": {"name": "ai-full-stack"},
+    "config": {
+      "min_input_tokens": 2000,
+      "on_unavailable": "pass_through"
+    }
+  }'
+```
+
+**Step 6**: Attach ai-proxy (priority 769, executes last)
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -830,10 +904,11 @@ Client POST /ai/chat
   → ai-prompt-guard (773): content security check → returns 400 if violation
   → ai-cache (772):        compute cache key, return cached response on hit
   → ai-rate-limit (771):   RPM/TPM check → returns 429 if exceeded
-  → ai-proxy (770):        convert protocol, forward to OpenAI, return result
+  → ai-context-compression (770): save policy; ai-proxy applies it after Provider selection
+  → ai-proxy (769):        convert protocol, route through Headroom or direct Provider
   → ai-cache (772) log:    write back to cache (effective after Redis integration)
   → ai-rate-limit (771) log: TPM pre-deduction correction
-  → ai-proxy (770) log:    write token statistics to log
+  → ai-proxy (769) log:    write token statistics to log
 ```
 
 ---
@@ -1553,3 +1628,134 @@ Kafka usage/log backend; external analytics, retention, and migration belong to
 REQ-AI-013. The budget ledger must remain on a strongly consistent Store that satisfies
 atomic transactions, idempotency, audit, and reconciliation. Redis or ES is not a direct
 replacement.
+
+---
+
+## 13. Headroom Context Compression and CCR Deployment
+
+### 13.1 Frozen upstream and image
+
+The integration contract is frozen to the Apache-2.0 upstream commit
+`6d5516dcb878b6ffd139a1c7b3d480a1c8c1beb9` (source version `0.33.0`). The matching
+official non-root, multi-architecture OCI index resolved on 2026-08-01 is:
+
+```text
+ghcr.io/headroomlabs-ai/headroom@sha256:800a7ead087a791d54b7253c6cd5f98e5964f20fcde42872838f987244e090cc
+```
+
+The image's OCI revision label is the same full commit. The digest, not a mutable tag,
+is the production identity. Mirror that digest into the deployment registry, retain the
+Apache-2.0 LICENSE/NOTICE, verify provenance/attestations, generate an SBOM, and scan the
+mirrored artifact under the organization's normal release policy before promotion.
+
+The 2026-08-02 acceptance scan of this exact digest found one Critical and two High,
+unfixed vulnerabilities in Debian `perl 5.40.1-6`. Production promotion is therefore
+blocked until a new digest passes the same acceptance suite or the security owner records
+a time-bounded risk acceptance backed by reachability analysis. The image embeds a
+CycloneDX 1.5 SBOM with 405 components; its SHA-256 is
+`4e6b9d60b216b145a46b783d122763a05dbde23d89fc0c66633d911d09cde4d6`.
+See the [REQ-AI-014 acceptance report](pm/REQ-AI-014/acceptance.md) for the complete scan,
+load results, and known limitations.
+
+### 13.2 Single-node sidecar baseline
+
+Put Kong-Rust and Headroom on a dedicated private container network with no public port or
+Service for Headroom, and provision a writable encrypted volume for
+`/home/nonroot/.headroom`:
+
+```bash
+docker run -d --name headroom --restart unless-stopped \
+  --network kong-ai-internal \
+  -v headroom-ccr:/home/nonroot/.headroom \
+  -e HEADROOM_CCR_BACKEND=sqlite \
+  -e HEADROOM_CCR_SQLITE_PATH=/home/nonroot/.headroom/ccr_store.db \
+  -e HEADROOM_CCR_TTL_SECONDS=1800 \
+  -e HEADROOM_LOG_MESSAGES=0 \
+  -e HEADROOM_SKIP_UPSTREAM_CHECK=1 \
+  -e HEADROOM_RETRY_MAX_ATTEMPTS=1 \
+  ghcr.io/headroomlabs-ai/headroom@sha256:800a7ead087a791d54b7253c6cd5f98e5964f20fcde42872838f987244e090cc \
+  --host 0.0.0.0 --port 8787 --mode token --no-cache --no-rate-limit
+```
+
+`HEADROOM_RETRY_MAX_ATTEMPTS=1` is required by the no-replay contract: once Headroom may
+have dispatched to the provider, neither layer retries the provider implicitly.
+`HEADROOM_SKIP_UPSTREAM_CHECK=1` is intentional: Kong supplies a server-selected dynamic
+Provider origin per request, so Headroom has no one static Provider to probe. Kong still
+uses the official `/readyz` endpoint before dispatch. Leave `HEADROOM_NO_CCR` unset;
+setting it disables reversible retrieval. The explicit CLI switches are required because
+the frozen Click entrypoint does not consume `HEADROOM_CACHE_ENABLED` or
+`HEADROOM_RATE_LIMIT_ENABLED`. Do not enable Headroom response cache, rate limit, budget,
+memory, learn, or full-message logging because Kong-Rust owns those controls.
+`--mode token` selects the token-savings profile verified by the CCR contract; changing it
+to cache mode is a separate rollout decision and must be re-evaluated against the workload.
+In the local steady-state 128k acceptance run, Kong + Headroom at concurrency four reached
+about 4.04 QPS with 1.325s p95; the sidecar used about 0.84 CPU core and an observed
+388–444 MiB RSS. This is a single-machine baseline, not a sizing promise. Load-test the
+actual corpus, set CPU/memory limits and saturation alerts, and never size the sidecar from
+Kong direct-path capacity.
+
+Do **not** set `HEADROOM_PROXY_TOKEN` with this frozen integration. Headroom 0.33.0 checks
+the request `Authorization` header before `x-headroom-proxy-token`; OpenAI's Provider
+Bearer credential would therefore be interpreted as the sidecar token and every request
+would fail with 401. Protect the hop with same-pod loopback, a dedicated network plus
+NetworkPolicy/firewall, or an mTLS service-mesh policy that preserves Provider headers.
+The sidecar itself must never be internet- or tenant-reachable.
+
+Configure Kong-Rust and restart the gateway process:
+
+```ini
+ai_context_compression_headroom_url = http://headroom:8787
+ai_context_compression_health_timeout_ms = 200
+ai_context_compression_health_ttl_ms = 1000
+ai_context_compression_store_scope = local
+```
+
+Check the sidecar and the safe Admin capability before enabling a Route plugin:
+
+```bash
+curl -fsS http://headroom:8787/readyz
+curl -fsS http://localhost:8001/status | jq .ai_context_compression
+```
+
+The Admin status is configuration-only; request logs and optional stable response
+headers are the evidence for `applied`, `bypassed`, or `degraded` runtime outcomes.
+
+### 13.3 CCR storage and horizontal scaling
+
+SQLite is restart-safe and shared by workers using the same file, but it is only a local
+node capability. Its default TTL here is 1800 seconds; application documentation must
+not promise retrieval after that interval. The volume can contain original prompts/tool
+results, so restrict it to UID 1000, encrypt it at rest, exclude it from ordinary logs
+and backups unless explicitly approved, and verify expiry cleanup.
+
+Kong-Rust deliberately reports `store_scope=local` even if
+`ai_context_compression_store_scope=cluster` is requested. A multi-pod deployment may
+claim cluster retrieval only after installing a shared Headroom CCR backend (or verified
+session affinity), tenant-prefixing it, and passing cross-node compress/retrieve and
+restart contract tests. Never use an eventually consistent analytics/log store for CCR
+or for budget decisions.
+
+### 13.4 Upgrade, rollback, and troubleshooting
+
+- Promote a new digest only after non-streaming Responses/Messages, existing tools +
+  `headroom_retrieve`, response continuation, header stripping, failure policy, and
+  frozen-corpus quality/cost evaluations pass. Re-enable Chat only after a real direct-
+  transport test proves the internal retrieve call is intercepted and continued.
+- Drain old requests before replacing the sidecar. Preserve the encrypted CCR volume
+  across a compatible rollback; deleting it makes outstanding markers unretrievable.
+- A permanent `backend_unhealthy` usually means `/readyz` is not 200, the private network
+  cannot reach port 8787, or the 200 ms timeout is too low for the deployment.
+- `backend_not_configured` means the Kong URL is empty/invalid. `streaming`,
+  `below_threshold`, `body_too_large`, `unsupported_protocol`,
+  `tool_choice_unsupported`, and `unsupported_path` are intentional bypasses.
+- `compression_failed` with a successful business response is degraded/fail-open inside
+  Headroom; do not replay the Provider request. Internal `x-headroom-*` headers should
+  never reach clients.
+- A chunked request body over 64 KiB without `Content-Length` fails explicitly; large
+  bodies with a known length are fully supported. Normalize `Content-Length` at ingress,
+  and never degrade an incomplete body into a Provider request.
+- If RSS or idle CPU rises abnormally after offline evaluations or a long soak, drain the
+  sidecar, retain diagnostics, and rebuild it instead of continuing without resource
+  limits.
+- Roll back immediately by disabling/deleting `ai-context-compression`; with
+  `on_unavailable=pass_through`, stopping Headroom also preserves pre-dispatch traffic.

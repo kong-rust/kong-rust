@@ -346,6 +346,16 @@
       "totalTokens": "已知总 Token",
       "estimatedRatio": "估算用量占比",
       "pricingCoverage": "定价覆盖率",
+      "contextCompressionSavedTokens": "上下文节省 Token",
+      "contextCompressionRatio": "加权压缩率",
+      "contextCompressionBypassRatio": "上下文压缩旁路率",
+      "contextCompressionStatus": "压缩状态",
+      "contextCompressionReason": "压缩原因",
+      "contextCompressionBackend": "压缩后端",
+      "contextCompressionCcr": "透明 CCR",
+      "contextCompressionTokensBefore": "压缩前 Token",
+      "contextCompressionTokensAfter": "压缩后 Token",
+      "contextCompressionHopLatency": "Headroom 链路耗时",
       "time": "时间",
       "coverage": "覆盖率",
       "name": "名称",
@@ -390,7 +400,10 @@
       "successFailure": "成功 {success} · 失败 {failed}",
       "knownCoverage": "{unknown} 个已尝试调用未知 · 覆盖率 {coverage}",
       "estimatedHint": "已知用量中包含估算值的比例",
-      "unpriced": "{count} 个调用未匹配价格或使用了不支持的计价条件"
+      "unpriced": "{count} 个调用未匹配价格或使用了不支持的计价条件",
+      "contextCompressionKnown": "{count} 个请求包含 Headroom Token 指标",
+      "contextCompressionTokenFlow": "压缩前 {before} · 压缩后 {after}",
+      "contextCompressionBypassed": "已评估 {total} 个请求，其中 {bypassed} 个旁路"
     },
     "trend": {
       "title": "用量趋势",
@@ -424,7 +437,8 @@
       "body": "仅保存元数据；这里不会保存 Prompt、响应正文、请求头、凭据或密钥原文。",
       "snapshot": "快照",
       "page": "第 {page} 页",
-      "detailEyebrow": "请求事实"
+      "detailEyebrow": "请求事实",
+      "contextCompressionSaved": "Headroom 节省 {tokens} Token"
     },
     "detail": {
       "request": "请求",
@@ -432,6 +446,7 @@
       "ai": "服务商与模型快照",
       "identity": "身份快照",
       "usage": "用量",
+      "contextCompression": "上下文压缩与 CCR",
       "pricing": "定价与成本",
       "result": "结果"
     },
@@ -456,6 +471,11 @@
       "bypass": "绕过",
       "miss": "未命中",
       "hit": "已命中",
+      "applied": "已应用",
+      "bypassed": "已旁路",
+      "degraded": "已降级",
+      "rejected": "已拒绝",
+      "pending": "处理中",
       "builtin": "内置价",
       "override": "自定义覆盖",
       "true": "是",

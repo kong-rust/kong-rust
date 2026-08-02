@@ -38,6 +38,15 @@ status_error_log = logs/status_error.log
 # ---------- 插件 ----------
 plugins = bundled
 
+# ---------- AI 上下文压缩 ----------
+# Headroom sidecar/proxy 根地址；保持注释即禁用。生产环境应使用同 Pod loopback、
+# 私有网络或保留 Provider Authorization 的 mTLS 边界隔离 sidecar。
+#ai_context_compression_headroom_url = http://127.0.0.1:8787
+#ai_context_compression_health_timeout_ms = 200
+#ai_context_compression_health_ttl_ms = 1000
+# 首版未验证共享 CCR store capability，即使配置 cluster 也会保守降级并公布为 local。
+#ai_context_compression_store_scope = local
+
 # ---------- AI 预算治理 ----------
 # 预算热路径、owner 心跳与管理面使用独立 PostgreSQL 连接池，避免恢复或管理操作
 # 挤占请求准入。以下均为默认值；生产环境请按实例并发数和数据库容量调整。

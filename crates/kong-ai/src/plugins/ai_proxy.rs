@@ -18,7 +18,14 @@ use kong_core::traits::{
 use crate::codec::anthropic_format::AnthropicCodec;
 use crate::codec::responses_format::{self, ResponsesEventState, ResponsesRequest};
 use crate::codec::ChatRequest;
+use crate::context_compression::{
+    CompressionBackendError, CompressionBodyTransform, CompressionProtocol,
+    ContextCompressionBackend, ProviderTarget,
+};
 use crate::models::{AiModel, AiProviderConfig};
+use crate::plugins::ai_context_compression::{
+    ContextCompressionContext, ContextCompressionReason, UnavailablePolicy,
+};
 use crate::plugins::context::{AiRequestState, ClientProtocol};
 use crate::provider::router::{ModelRouteConfig, ModelRouter};
 use crate::provider::{DriverRegistry, ModelGroupResolver, TokenUsage};
@@ -308,6 +315,7 @@ impl AiProxyConfig {
 pub struct AiProxyPlugin {
     driver_registry: DriverRegistry,
     model_resolver: Option<Arc<ModelGroupResolver>>,
+    context_compression: Option<Arc<dyn ContextCompressionBackend>>,
     /// 按 Route 和配置缓存路由器，使加权轮转计数器跨请求保留。
     model_routers: Mutex<HashMap<[u8; 32], Arc<ModelRouter>>>,
 }
@@ -318,6 +326,7 @@ impl AiProxyPlugin {
         Self {
             driver_registry: DriverRegistry::new(),
             model_resolver: None,
+            context_compression: None,
             model_routers: Mutex::new(HashMap::new()),
         }
     }
@@ -327,8 +336,107 @@ impl AiProxyPlugin {
         Self {
             driver_registry: DriverRegistry::new(),
             model_resolver: Some(model_resolver),
+            context_compression: None,
             model_routers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 注入进程共享的上下文压缩后端。
+    pub fn with_context_compression_backend(
+        mut self,
+        backend: Arc<dyn ContextCompressionBackend>,
+    ) -> Self {
+        self.context_compression = Some(backend);
+        self
+    }
+
+    async fn apply_context_compression(
+        &self,
+        ctx: &mut RequestCtx,
+        protocol: Option<CompressionProtocol>,
+        provider: ProviderTarget,
+        stream_mode: bool,
+        estimated_prompt_tokens: u64,
+        original_body_bytes: usize,
+        client_protocol: ClientProtocol,
+    ) -> Result<bool> {
+        let Some(policy) = ctx
+            .extensions
+            .get::<ContextCompressionContext>()
+            .map(|context| context.policy.clone())
+        else {
+            return Ok(true);
+        };
+
+        scrub_client_headroom_headers(ctx);
+
+        if original_body_bytes > policy.max_input_bytes {
+            mark_compression_bypass(ctx, ContextCompressionReason::BodyTooLarge);
+            return Ok(true);
+        }
+        if estimated_prompt_tokens < policy.min_input_tokens {
+            mark_compression_bypass(ctx, ContextCompressionReason::BelowThreshold);
+            return Ok(true);
+        }
+        if stream_mode {
+            mark_compression_bypass(ctx, ContextCompressionReason::Streaming);
+            return Ok(true);
+        }
+        let Some(protocol) = protocol else {
+            mark_compression_bypass(ctx, ContextCompressionReason::UnsupportedProvider);
+            return Ok(true);
+        };
+        let Some(backend) = self.context_compression.as_ref() else {
+            return Ok(handle_compression_unavailable(
+                ctx,
+                policy.on_unavailable,
+                ContextCompressionReason::BackendNotConfigured,
+                client_protocol,
+            ));
+        };
+
+        let descriptor = backend.descriptor();
+        let route = match backend.prepare_route(protocol, provider).await {
+            Ok(route) => route,
+            Err(CompressionBackendError::UnsupportedProtocol) => {
+                mark_compression_bypass(ctx, ContextCompressionReason::UnsupportedProtocol);
+                return Ok(true);
+            }
+            Err(CompressionBackendError::UnsupportedTarget) => {
+                mark_compression_bypass(ctx, ContextCompressionReason::UnsupportedPath);
+                return Ok(true);
+            }
+            Err(CompressionBackendError::Unavailable) => {
+                return Ok(handle_compression_unavailable(
+                    ctx,
+                    policy.on_unavailable,
+                    ContextCompressionReason::BackendUnhealthy,
+                    client_protocol,
+                ));
+            }
+        };
+
+        if let Some(transform) = route.body_transform {
+            if !apply_compression_body_transform(ctx, transform)? {
+                mark_compression_bypass(ctx, ContextCompressionReason::ToolChoiceUnsupported);
+                return Ok(true);
+            }
+        }
+
+        // 先完整准备 route，再一次性覆写目标，避免失败时留下半改写请求。
+        ctx.upstream_target_host = Some(route.host);
+        ctx.upstream_target_port = Some(route.port);
+        ctx.upstream_scheme = Some(route.scheme);
+        ctx.upstream_path = Some(route.path);
+        for (name, value) in route.control_headers {
+            ctx.upstream_headers_to_remove
+                .retain(|candidate| !candidate.eq_ignore_ascii_case(&name));
+            ctx.upstream_headers_to_set.push((name, value));
+        }
+        if let Some(compression) = ctx.extensions.get_mut::<ContextCompressionContext>() {
+            compression.apply(descriptor);
+        }
+        Ok(true)
     }
 
     fn model_router(
@@ -376,6 +484,167 @@ impl Default for AiProxyPlugin {
 }
 
 // ============ 辅助函数 ============
+
+fn mark_compression_bypass(ctx: &mut RequestCtx, reason: ContextCompressionReason) {
+    if let Some(compression) = ctx.extensions.get_mut::<ContextCompressionContext>() {
+        compression.bypass(reason);
+    }
+}
+
+fn handle_compression_unavailable(
+    ctx: &mut RequestCtx,
+    policy: UnavailablePolicy,
+    reason: ContextCompressionReason,
+    client_protocol: ClientProtocol,
+) -> bool {
+    if policy == UnavailablePolicy::PassThrough {
+        mark_compression_bypass(ctx, reason);
+        return true;
+    }
+
+    if let Some(compression) = ctx.extensions.get_mut::<ContextCompressionContext>() {
+        compression.reject(reason);
+    }
+    ctx.short_circuited = true;
+    ctx.exit_status = Some(503);
+    ctx.exit_headers = Some(std::collections::HashMap::from([(
+        "content-type".to_string(),
+        "application/json".to_string(),
+    )]));
+    ctx.exit_body = Some(match client_protocol {
+        ClientProtocol::Anthropic => serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "code": "context_compression_unavailable",
+                "message": "context compression backend is unavailable"
+            }
+        })
+        .to_string(),
+        ClientProtocol::OpenAi => serde_json::json!({
+            "error": {
+                "message": "context compression backend is unavailable",
+                "type": "server_error",
+                "code": "context_compression_unavailable"
+            }
+        })
+        .to_string(),
+    });
+    false
+}
+
+fn scrub_client_headroom_headers(ctx: &mut RequestCtx) {
+    ctx.upstream_headers_to_set
+        .retain(|(name, _)| !name.to_ascii_lowercase().starts_with("x-headroom-"));
+    let names = ctx
+        .request_headers
+        .keys()
+        .filter(|name| name.to_ascii_lowercase().starts_with("x-headroom-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        if !ctx
+            .upstream_headers_to_remove
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&name))
+        {
+            ctx.upstream_headers_to_remove.push(name);
+        }
+    }
+}
+
+fn apply_compression_body_transform(
+    ctx: &mut RequestCtx,
+    transform: CompressionBodyTransform,
+) -> Result<bool> {
+    match transform {
+        CompressionBodyTransform::InjectOpenAiResponsesCcrTool => {
+            inject_openai_responses_ccr_tool(ctx)
+        }
+    }
+}
+
+fn inject_openai_responses_ccr_tool(ctx: &mut RequestCtx) -> Result<bool> {
+    let body = ctx
+        .upstream_body
+        .as_deref()
+        .ok_or_else(|| KongError::PluginError {
+            plugin_name: "ai-proxy".to_string(),
+            message: "context compression requires an upstream request body".to_string(),
+        })?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(body).map_err(|error| KongError::PluginError {
+            plugin_name: "ai-proxy".to_string(),
+            message: format!("failed to prepare Responses CCR tool: {error}"),
+        })?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| KongError::PluginError {
+            plugin_name: "ai-proxy".to_string(),
+            message: "Responses CCR request body must be a JSON object".to_string(),
+        })?;
+
+    if !responses_tool_choice_allows_ccr(object.get("tool_choice")) {
+        return Ok(false);
+    }
+
+    let tools = object
+        .entry("tools".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| KongError::PluginError {
+            plugin_name: "ai-proxy".to_string(),
+            message: "Responses tools must be an array".to_string(),
+        })?;
+    // 客户端同名定义不可信：先移除，再追加 Kong 固定的最小工具契约。
+    tools.retain(|tool| {
+        let flat_name = tool.get("name").and_then(serde_json::Value::as_str);
+        let nested_name = tool
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(serde_json::Value::as_str);
+        !flat_name
+            .or(nested_name)
+            .is_some_and(|name| name == "headroom_retrieve")
+    });
+    tools.push(serde_json::json!({
+        "type": "function",
+        "name": "headroom_retrieve",
+        "description": "Retrieve original uncompressed content from Headroom when a compression marker is insufficient.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hash": {
+                    "type": "string",
+                    "description": "Hash from the Headroom compression marker"
+                }
+            },
+            "required": ["hash"],
+            "additionalProperties": false
+        },
+        "strict": true
+    }));
+    ctx.upstream_body =
+        Some(
+            serde_json::to_string(&value).map_err(|error| KongError::PluginError {
+                plugin_name: "ai-proxy".to_string(),
+                message: format!("failed to serialize Responses CCR request: {error}"),
+            })?,
+        );
+    Ok(true)
+}
+
+fn responses_tool_choice_allows_ccr(tool_choice: Option<&serde_json::Value>) -> bool {
+    match tool_choice {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(value)) => matches!(value.as_str(), "auto" | "required"),
+        Some(serde_json::Value::Object(value)) => value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name == "headroom_retrieve"),
+        _ => false,
+    }
+}
 
 /// 重映射 OpenAI chat chunk 中的 tool_calls index
 /// Anthropic 的 content_block index 是全局索引（含 text block），
@@ -673,6 +942,28 @@ fn append_responses_stream_completion_text(
     false
 }
 
+fn append_anthropic_stream_completion_text(state: &mut AiRequestState, event: &serde_json::Value) {
+    let event_type = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if event_type != "content_block_delta" {
+        return;
+    }
+    let Some(delta) = event.get("delta") else {
+        return;
+    };
+    if let Some(text) = delta.get("text").and_then(serde_json::Value::as_str) {
+        state.completion_text.push_str(text);
+    }
+    if let Some(partial_json) = delta
+        .get("partial_json")
+        .and_then(serde_json::Value::as_str)
+    {
+        state.completion_text.push_str(partial_json);
+    }
+}
+
 fn finalize_stream_completion_estimate(state: &mut AiRequestState) {
     if state.stream_terminal == crate::usage::StreamTerminalState::Complete
         && state.usage.completion_tokens.is_none()
@@ -704,8 +995,8 @@ impl PluginHandler for AiProxyPlugin {
     }
 
     fn priority(&self) -> i32 {
-        // Kong ai-proxy 优先级 770
-        770
+        // `ai-context-compression`(770) 先保存策略，本插件再选定 Provider 并应用。
+        769
     }
 
     fn version(&self) -> &str {
@@ -732,6 +1023,7 @@ impl PluginHandler for AiProxyPlugin {
                 plugin_name: "ai-proxy".to_string(),
                 message: "request body is empty".to_string(),
             })?;
+        let original_body_bytes = body_str.len();
 
         // 检查请求体大小限制
         if body_str.len() > cfg.max_request_body_size * 1024 {
@@ -995,6 +1287,12 @@ impl PluginHandler for AiProxyPlugin {
                 })?;
 
             // 覆盖上游路径为 /v1/responses（configure_upstream 默认返回 /v1/chat/completions）
+            let compression_target = ProviderTarget {
+                scheme: upstream.scheme.clone(),
+                host: upstream.host.clone(),
+                port: upstream.port,
+                path: "/v1/responses".to_string(),
+            };
             ctx.upstream_target_host = Some(upstream.host);
             ctx.upstream_target_port = Some(upstream.port);
             ctx.upstream_scheme = Some(upstream.scheme);
@@ -1006,6 +1304,21 @@ impl PluginHandler for AiProxyPlugin {
                 .push(("Content-Type".to_string(), "application/json".to_string()));
             for (k, v) in &upstream.headers {
                 ctx.upstream_headers_to_set.push((k.clone(), v.clone()));
+            }
+
+            if !self
+                .apply_context_compression(
+                    ctx,
+                    Some(CompressionProtocol::OpenAiResponses),
+                    compression_target,
+                    stream_mode,
+                    estimated_prompt_tokens,
+                    original_body_bytes,
+                    ClientProtocol::OpenAi,
+                )
+                .await?
+            {
+                return Ok(());
             }
 
             debug!(
@@ -1052,6 +1365,7 @@ impl PluginHandler for AiProxyPlugin {
                 is_first_stream_event: true,
                 responses_mode: false,
                 responses_pass_through: true,
+                anthropic_pass_through: false,
                 responses_event_state: None,
                 stripped_tools: None,
                 stream_tool_call_count: 0,
@@ -1066,6 +1380,142 @@ impl PluginHandler for AiProxyPlugin {
                 "responses-pass-through".to_string(),
             ));
 
+            return Ok(());
+        }
+
+        // Anthropic 客户端直达 Anthropic Provider 时保留原生 Messages wire。
+        // 经过 OpenAI Chat 中间模型会丢失 tools、tool_use/tool_result 和扩展字段，
+        // 既破坏 Provider 兼容性，也会让 Headroom 无法建立可取回的 CCR marker。
+        let is_anthropic_pass_through =
+            effective_protocol == "anthropic" && driver.provider_type() == "anthropic";
+        if is_anthropic_pass_through {
+            let mut upstream_body: serde_json::Value =
+                serde_json::from_str(body_str).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to prepare Anthropic request body: {e}"),
+                })?;
+            let body_object =
+                upstream_body
+                    .as_object_mut()
+                    .ok_or_else(|| KongError::PluginError {
+                        plugin_name: "ai-proxy".to_string(),
+                        message: "Anthropic request body must be a JSON object".to_string(),
+                    })?;
+            body_object.insert(
+                "model".to_string(),
+                serde_json::Value::String(ai_model.model_name.clone()),
+            );
+            let requested_stream = body_object
+                .get("stream")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let stream_mode = match cfg.response_streaming.as_str() {
+                "always" => true,
+                "deny" => false,
+                _ => requested_stream,
+            };
+            body_object.insert("stream".to_string(), serde_json::Value::Bool(stream_mode));
+            let upstream_body =
+                serde_json::to_string(&upstream_body).map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to serialize Anthropic request body: {e}"),
+                })?;
+
+            let estimated_prompt_tokens = match crate::token::global_registry() {
+                Some(registry) => {
+                    registry
+                        .count_prompt_from_body(
+                            &provider_config.provider_type,
+                            &ai_model.model_name,
+                            &upstream_body,
+                        )
+                        .await
+                }
+                None => crate::token::TokenCounter::count_estimate(&upstream_body),
+            };
+            let upstream = driver
+                .configure_upstream(&ai_model, &provider_config, stream_mode)
+                .map_err(|e| KongError::PluginError {
+                    plugin_name: "ai-proxy".to_string(),
+                    message: format!("failed to configure upstream: {e}"),
+                })?;
+            let compression_target = ProviderTarget {
+                scheme: upstream.scheme.clone(),
+                host: upstream.host.clone(),
+                port: upstream.port,
+                path: upstream.path.clone(),
+            };
+            ctx.upstream_target_host = Some(upstream.host);
+            ctx.upstream_target_port = Some(upstream.port);
+            ctx.upstream_scheme = Some(upstream.scheme);
+            ctx.upstream_path = Some(upstream.path);
+            ctx.upstream_body = Some(upstream_body);
+            ctx.upstream_headers_to_set
+                .push(("Content-Type".to_string(), "application/json".to_string()));
+            for (name, value) in &upstream.headers {
+                ctx.upstream_headers_to_set
+                    .push((name.clone(), value.clone()));
+            }
+
+            if !self
+                .apply_context_compression(
+                    ctx,
+                    Some(CompressionProtocol::AnthropicMessages),
+                    compression_target,
+                    stream_mode,
+                    estimated_prompt_tokens,
+                    original_body_bytes,
+                    ClientProtocol::Anthropic,
+                )
+                .await?
+            {
+                return Ok(());
+            }
+
+            crate::usage::collector::observe_model_selection(
+                ctx,
+                &ai_model,
+                &provider_config,
+                stream_mode,
+            );
+            ctx.extensions.insert(AiRequestState {
+                driver,
+                model: ai_model,
+                provider_config,
+                stream_mode,
+                client_protocol: ClientProtocol::Anthropic,
+                sse_parser: None,
+                stream_utf8_buffer: Vec::new(),
+                usage: TokenUsage::default(),
+                estimated_completion_tokens: None,
+                completion_text: String::new(),
+                completion_text_by_choice: Default::default(),
+                completion_observation_invalid: false,
+                response_buffer: None,
+                request_start: Instant::now(),
+                ttft: None,
+                valid_stream_event_seen: false,
+                stream_terminal: if stream_mode {
+                    crate::usage::StreamTerminalState::Pending
+                } else {
+                    crate::usage::StreamTerminalState::NotStreaming
+                },
+                first_stream_event_at: None,
+                route_type: cfg.route_type.clone(),
+                is_first_stream_event: true,
+                responses_mode: false,
+                responses_pass_through: false,
+                anthropic_pass_through: true,
+                responses_event_state: None,
+                stripped_tools: None,
+                stream_tool_call_count: 0,
+                estimated_prompt_tokens,
+            });
+            ctx.upstream_force_http1 = true;
+            ctx.response_headers_to_set.push((
+                "X-Kong-AI-Route-Type".to_string(),
+                "anthropic-pass-through".to_string(),
+            ));
             return Ok(());
         }
 
@@ -1101,6 +1551,12 @@ impl PluginHandler for AiProxyPlugin {
             })?;
 
         // 10. 设置上游连接参数
+        let compression_target = ProviderTarget {
+            scheme: upstream.scheme.clone(),
+            host: upstream.host.clone(),
+            port: upstream.port,
+            path: upstream.path.clone(),
+        };
         ctx.upstream_target_host = Some(upstream.host);
         ctx.upstream_target_port = Some(upstream.port);
         ctx.upstream_scheme = Some(upstream.scheme);
@@ -1137,6 +1593,26 @@ impl PluginHandler for AiProxyPlugin {
             None => crate::token::estimate_from_request(&chat_request),
         };
 
+        let compression_protocol = match provider_config.provider_type.as_str() {
+            "openai" | "openai_compat" => Some(CompressionProtocol::OpenAiChat),
+            "anthropic" => Some(CompressionProtocol::AnthropicMessages),
+            _ => None,
+        };
+        if !self
+            .apply_context_compression(
+                ctx,
+                compression_protocol,
+                compression_target,
+                stream_mode,
+                estimated_prompt_tokens,
+                original_body_bytes,
+                client_protocol,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+
         // 11. 存储跨阶段状态
         let responses_mode = is_responses_route;
         crate::usage::collector::observe_model_selection(
@@ -1172,6 +1648,7 @@ impl PluginHandler for AiProxyPlugin {
             is_first_stream_event: true,
             responses_mode,
             responses_pass_through: false,
+            anthropic_pass_through: false,
             responses_event_state: if responses_mode {
                 Some(ResponsesEventState::new())
             } else {
@@ -1218,11 +1695,7 @@ impl PluginHandler for AiProxyPlugin {
             .get("content-type")
             .cloned()
             .unwrap_or_default();
-        let media_type = content_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim();
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
         let is_ndjson = media_type.eq_ignore_ascii_case("application/x-ndjson")
             || media_type.eq_ignore_ascii_case("application/stream+json");
         let is_stream = media_type.eq_ignore_ascii_case("text/event-stream") || is_ndjson;
@@ -1241,9 +1714,7 @@ impl PluginHandler for AiProxyPlugin {
             } else {
                 crate::codec::SseFormat::Standard
             };
-            ai_state.sse_parser = Some(crate::codec::SseParser::new(
-                stream_format,
-            ));
+            ai_state.sse_parser = Some(crate::codec::SseParser::new(stream_format));
             ai_state.response_buffer = Some(String::new());
 
             // 设置客户端响应 Content-Type 为 SSE
@@ -1254,7 +1725,7 @@ impl PluginHandler for AiProxyPlugin {
                 "ai-proxy header_filter: detected streaming response, content-type={}",
                 content_type
             );
-        } else if !ai_state.responses_pass_through {
+        } else if !ai_state.responses_pass_through && !ai_state.anthropic_pass_through {
             // Translation paths always emit JSON. Queue this before Pingora sends
             // the downstream headers; body_filter runs too late to change them.
             ctx.response_headers_to_set
@@ -1283,6 +1754,69 @@ impl PluginHandler for AiProxyPlugin {
             Some(s) => s,
             None => return Ok(()),
         };
+
+        // ---- Anthropic Messages 原生透传：只观察 usage/终态，不改写 wire ----
+        if state.anthropic_pass_through {
+            if state.stream_mode {
+                let mut events = Vec::new();
+                if let Some(chunk) = body.as_ref() {
+                    let (chunk, invalid) = decode_stream_chunk(state, chunk);
+                    state.completion_observation_invalid |= invalid;
+                    if let Some(chunk) = chunk {
+                        if let Some(ref mut parser) = state.sse_parser {
+                            events.extend(parser.feed(&chunk));
+                        }
+                    }
+                }
+                if end_of_stream {
+                    state.completion_observation_invalid |= discard_incomplete_stream_utf8(state);
+                    if let Some(ref mut parser) = state.sse_parser {
+                        events.extend(parser.flush());
+                    }
+                }
+                for event in &events {
+                    state.observe_stream_event(event);
+                    if let Some(usage) = state.driver.extract_stream_usage(event) {
+                        merge_token_usage(&mut state.usage, usage);
+                    }
+                    match serde_json::from_str::<serde_json::Value>(&event.data) {
+                        Ok(value) => append_anthropic_stream_completion_text(state, &value),
+                        Err(_) if !event.is_done() => {
+                            state.completion_observation_invalid = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if end_of_stream {
+                    finalize_stream_completion_estimate(state);
+                }
+            } else {
+                if let Some(chunk) = body.as_ref() {
+                    let chunk_str = String::from_utf8_lossy(chunk);
+                    match state.response_buffer.as_mut() {
+                        Some(buffer) => buffer.push_str(&chunk_str),
+                        None => state.response_buffer = Some(chunk_str.into_owned()),
+                    }
+                }
+                if end_of_stream {
+                    let full_body = state.response_buffer.take().unwrap_or_default();
+                    if let Some(usage) = state.driver.extract_usage(&full_body) {
+                        state.usage = usage;
+                    }
+                    if state.usage.completion_tokens.is_none() {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&full_body) {
+                            let mut text = String::new();
+                            if let Some(content) = value.get("content") {
+                                collect_content_text(content, &mut text);
+                            }
+                            state.estimated_completion_tokens =
+                                Some(estimate_completion(&state.model.model_name, &text));
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
 
         // ---- v1/responses pass-through 分支：只提取 usage，不做格式转换 ----
         if state.responses_pass_through {
@@ -1558,10 +2092,7 @@ impl PluginHandler for AiProxyPlugin {
                                 }
                             }
                             Err(error) => {
-                                warn!(
-                                    "ai-proxy body_filter: Anthropic 终态编码失败: {}",
-                                    error
-                                );
+                                warn!("ai-proxy body_filter: Anthropic 终态编码失败: {}", error);
                                 mark_response_transform_error(
                                     &mut ctx.lifecycle,
                                     ctx.response_status,
@@ -1866,6 +2397,19 @@ impl PluginHandler for AiProxyPlugin {
                     (existing.as_object_mut(), ai_log.as_object())
                 {
                     for (k, v) in ai_obj {
+                        if k == "ai" {
+                            let target = existing_obj
+                                .entry(k.clone())
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let (Some(target), Some(source)) =
+                                (target.as_object_mut(), v.as_object())
+                            {
+                                for (field, value) in source {
+                                    target.insert(field.clone(), value.clone());
+                                }
+                                continue;
+                            }
+                        }
                         existing_obj.insert(k.clone(), v.clone());
                     }
                 }
@@ -1881,10 +2425,7 @@ impl PluginHandler for AiProxyPlugin {
 
 #[cfg(test)]
 mod completion_estimate_tests {
-    use super::{
-        estimate_completion, estimate_completion_segments, merge_token_usage,
-        TokenUsage,
-    };
+    use super::{estimate_completion, estimate_completion_segments, merge_token_usage, TokenUsage};
 
     #[test]
     fn completion_estimate_sums_choices_independently() {

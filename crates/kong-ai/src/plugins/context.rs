@@ -62,6 +62,8 @@ pub struct AiRequestState {
     pub responses_mode: bool,
     /// v1/responses pass-through 模式（OpenAI provider 时启用）
     pub responses_pass_through: bool,
+    /// Anthropic Messages 原生透传模式（Anthropic 客户端直达 Anthropic provider）
+    pub anthropic_pass_through: bool,
     /// v1/responses 流式事件状态机
     pub responses_event_state: Option<ResponsesEventState>,
     /// 被剥离的不支持的工具类型（用于非流式响应中回填 metadata.warnings）

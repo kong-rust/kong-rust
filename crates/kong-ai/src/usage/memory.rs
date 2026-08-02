@@ -303,7 +303,8 @@ mod tests {
 
     use super::*;
     use crate::usage::model::{
-        AiUsageFilter, AiUsageOutcome, CacheStatus, CostStatus, PricingStatus, UsageSource,
+        AiUsageFilter, AiUsageOutcome, CacheStatus, ContextCompressionUsage, CostStatus,
+        PricingStatus, UsageSource,
     };
 
     fn fact(request_id: &str, workspace_id: Uuid) -> AiUsageFact {
@@ -357,6 +358,7 @@ mod tests {
             upstream_attempted: false,
             stream: None,
             cache_status: CacheStatus::NotConfigured,
+            context_compression: None,
         }
     }
 
@@ -455,6 +457,94 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, AiUsageError::SnapshotExpired(_)));
+    }
+
+    #[tokio::test]
+    async fn summary_and_details_preserve_context_compression_facts() {
+        let workspace_id = Uuid::new_v4();
+        let store = MemoryAiUsageStore::new(Uuid::new_v4(), 10).unwrap();
+        let mut first = fact("00000000000000000000000000000001", workspace_id);
+        first.context_compression = Some(ContextCompressionUsage {
+            status: "applied".to_string(),
+            reason: "applied".to_string(),
+            backend: Some("headroom".to_string()),
+            ccr: true,
+            tokens_before: Some(100),
+            tokens_after: Some(40),
+            tokens_saved: Some(60),
+            hop_latency_ms: Some(12),
+        });
+        let mut second = fact("00000000000000000000000000000002", workspace_id);
+        second.context_compression = Some(ContextCompressionUsage {
+            status: "applied".to_string(),
+            reason: "applied".to_string(),
+            backend: Some("headroom".to_string()),
+            ccr: true,
+            tokens_before: Some(300),
+            tokens_after: Some(270),
+            tokens_saved: Some(30),
+            hop_latency_ms: Some(20),
+        });
+        let mut bypassed = fact("00000000000000000000000000000003", workspace_id);
+        bypassed.context_compression = Some(ContextCompressionUsage {
+            status: "bypassed".to_string(),
+            reason: "streaming".to_string(),
+            backend: None,
+            ccr: false,
+            tokens_before: None,
+            tokens_after: None,
+            tokens_saved: None,
+            hop_latency_ms: None,
+        });
+        store
+            .insert_batch(&[first, second, bypassed])
+            .await
+            .unwrap();
+
+        let filter = filter(workspace_id);
+        let snapshot = store.snapshot(&filter).await.unwrap();
+        let summary = store
+            .summary(&AiUsageSummaryQuery {
+                filter: filter.clone(),
+                snapshot: snapshot.clone(),
+                breakdown: None,
+                timezone: None,
+                limit: None,
+                order_by: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.totals.context_compression.applied_requests, 2);
+        assert_eq!(summary.totals.context_compression.bypassed_requests, 1);
+        assert_eq!(summary.totals.context_compression.metrics_known_requests, 2);
+        assert_eq!(summary.totals.context_compression.tokens_saved_sum, "90");
+        assert_eq!(
+            summary
+                .totals
+                .context_compression
+                .weighted_compression_ratio
+                .as_deref(),
+            Some("0.225000")
+        );
+
+        let page = store
+            .list(&AiUsageListQuery {
+                filter,
+                snapshot,
+                offset: None,
+                size: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.data.len(), 3);
+        assert!(page
+            .data
+            .iter()
+            .any(
+                |record| record.context_compression.as_ref().is_some_and(|value| {
+                    value.backend.as_deref() == Some("headroom") && value.tokens_saved == Some(60)
+                })
+            ));
     }
 
     #[tokio::test(start_paused = true)]

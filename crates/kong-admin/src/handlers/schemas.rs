@@ -9,9 +9,7 @@ use serde_json::json;
 use crate::AdminState;
 
 /// GET /schemas/{entity_name} — Return a minimal entity schema (Kong-compatible). — GET /schemas/{entity_name} — 返回最小化的实体 schema（Kong 兼容）。
-pub async fn get_entity_schema(
-    Path(entity_name): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_entity_schema(Path(entity_name): Path<String>) -> impl IntoResponse {
     // Return a minimal but valid schema object for known entity types — 对已知实体类型返回最小但有效的 schema 对象
     let schema = match entity_name.as_str() {
         "services" => json!({
@@ -228,22 +226,59 @@ pub async fn get_entity_schema(
 
 /// All known Kong bundled plugin names — 所有已知的 Kong 内置插件名
 const BUNDLED_PLUGINS: &[&str] = &[
-    "key-auth", "basic-auth", "rate-limiting", "cors",
-    "tcp-log", "file-log", "http-log", "udp-log",
-    "ip-restriction", "request-transformer", "response-transformer",
-    "pre-function", "post-function",
-    "acl", "bot-detection", "correlation-id", "jwt", "hmac-auth",
-    "oauth2", "ldap-auth", "session",
-    "request-size-limiting", "request-termination", "response-ratelimiting",
-    "syslog", "loggly", "datadog", "statsd", "prometheus",
-    "zipkin", "opentelemetry", "grpc-gateway", "grpc-web",
-    "aws-lambda", "azure-functions", "proxy-cache", "request-debug",
+    "key-auth",
+    "basic-auth",
+    "rate-limiting",
+    "cors",
+    "tcp-log",
+    "file-log",
+    "http-log",
+    "udp-log",
+    "ip-restriction",
+    "request-transformer",
+    "response-transformer",
+    "pre-function",
+    "post-function",
+    "acl",
+    "bot-detection",
+    "correlation-id",
+    "jwt",
+    "hmac-auth",
+    "oauth2",
+    "ldap-auth",
+    "session",
+    "request-size-limiting",
+    "request-termination",
+    "response-ratelimiting",
+    "syslog",
+    "loggly",
+    "datadog",
+    "statsd",
+    "prometheus",
+    "zipkin",
+    "opentelemetry",
+    "grpc-gateway",
+    "grpc-web",
+    "aws-lambda",
+    "azure-functions",
+    "proxy-cache",
+    "request-debug",
     // Test/dev plugins — 测试/开发插件
-    "rewriter", "dummy", "error-generator", "error-generator-last", "short-circuit",
-    "ctx-checker", "ctx-checker-last", "enable-buffering", "enable-buffering-response", "mocking",
+    "rewriter",
+    "dummy",
+    "error-generator",
+    "error-generator-last",
+    "short-circuit",
+    "ctx-checker",
+    "ctx-checker-last",
+    "enable-buffering",
+    "enable-buffering-response",
+    "mocking",
     "admin-api-method",
     // Kong-Rust native AI plugins — Kong-Rust 原生 AI 插件
-    "ai-key-auth", "ai-rate-limit",
+    "ai-key-auth",
+    "ai-rate-limit",
+    "ai-context-compression",
 ];
 
 /// Return schema for Rust native plugins (no Lua schema.lua needed) — 返回 Rust 原生插件的 schema（无需 Lua schema.lua）
@@ -329,6 +364,25 @@ fn rust_native_plugin_schema(name: &str) -> Option<serde_json::Value> {
             ],
             "name": "ai-rate-limit",
         })),
+        "ai-context-compression" => Some(json!({
+            "fields": [
+                {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["http", "https"]}, "default": ["http", "https"]}},
+                {"config": {"type": "record", "required": true, "fields": [
+                    {"min_input_tokens": {"type": "integer", "default": 2000, "between": [0, 2147483647]}},
+                    {"max_input_bytes": {"type": "integer", "default": 4194304, "between": [1, 16777216]}},
+                    {"on_unavailable": {"type": "string", "default": "pass_through", "one_of": ["pass_through", "reject"]}},
+                    {"streaming": {
+                        "type": "string",
+                        "default": "bypass",
+                        "one_of": ["bypass"],
+                        "description": "Headroom 0.33.0 does not provide transparent streaming CCR; streaming requests bypass compression."
+                    }},
+                    {"expose_metrics_headers": {"type": "boolean", "default": false}},
+                ]}},
+            ],
+            "entity_checks": [],
+            "name": "ai-context-compression",
+        })),
         "ai-cache" | "ai-prompt-guard" => Some(json!({
             "fields": [
                 {"protocols": {"type": "set", "elements": {"type": "string", "one_of": ["grpc", "grpcs", "http", "https"]}, "default": ["grpc", "grpcs", "http", "https"]}},
@@ -403,6 +457,13 @@ fn get_plugin_config_schema(name: &str) -> serde_json::Value {
             {"header_name": {"type": "string", "default": "X-AI-Key", "deprecated": true}},
             {"error_code": {"type": "integer", "default": 429, "between": [0, 65535]}},
             {"error_message": {"type": "string", "default": "AI rate limit exceeded"}},
+        ]),
+        "ai-context-compression" => json!([
+            {"min_input_tokens": {"type": "integer", "default": 2000, "between": [0, 2147483647]}},
+            {"max_input_bytes": {"type": "integer", "default": 4194304, "between": [1, 16777216]}},
+            {"on_unavailable": {"type": "string", "default": "pass_through", "one_of": ["pass_through", "reject"]}},
+            {"streaming": {"type": "string", "default": "bypass", "one_of": ["bypass"]}},
+            {"expose_metrics_headers": {"type": "boolean", "default": false}},
         ]),
         "cors" => json!([
             {"origins": {"type": "array", "elements": {"type": "string"}}},
@@ -790,28 +851,27 @@ pub async fn get_plugin_schema(
 }
 
 /// GET /schemas/vaults/{name} — Return vault schema — GET /schemas/vaults/{name} — 返回 vault schema
-pub async fn get_vault_schema(
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_vault_schema(Path(name): Path<String>) -> impl IntoResponse {
     match name.as_str() {
-        "env" => {
-            (StatusCode::OK, Json(json!({
+        "env" => (
+            StatusCode::OK,
+            Json(json!({
                 "fields": [
                     {"config": {"type": "record", "fields": [
                         {"prefix": {"type": "string", "description": "Environment variable prefix"}}
                     ]}}
                 ],
                 "name": "env",
-            }))).into_response()
-        }
-        _ => {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "message": format!("No vault named '{}'", name),
-                })),
-            ).into_response()
-        }
+            })),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": format!("No vault named '{}'", name),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -830,7 +890,8 @@ pub async fn validate_vault_schema(
                     "code": 2,
                     "fields": {"name": "required field missing"},
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -846,7 +907,8 @@ pub async fn validate_vault_schema(
                     "code": 2,
                     "fields": {"name": "required field missing"},
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -855,36 +917,33 @@ pub async fn validate_vault_schema(
         "env" => {
             // Validate prefix is present — 验证 prefix 字段
             match body.get("prefix").and_then(|v| v.as_str()) {
-                Some(p) if !p.is_empty() => {
-                    (
-                        StatusCode::OK,
-                        Json(json!({"message": "schema validation successful"})),
-                    ).into_response()
-                }
-                _ => {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "message": "schema violation (prefix: required field missing)",
-                            "name": "schema violation",
-                            "code": 2,
-                            "fields": {"prefix": "required field missing"},
-                        })),
-                    ).into_response()
-                }
+                Some(p) if !p.is_empty() => (
+                    StatusCode::OK,
+                    Json(json!({"message": "schema validation successful"})),
+                )
+                    .into_response(),
+                _ => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "message": "schema violation (prefix: required field missing)",
+                        "name": "schema violation",
+                        "code": 2,
+                        "fields": {"prefix": "required field missing"},
+                    })),
+                )
+                    .into_response(),
             }
         }
-        _ => {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "message": format!("No vault named '{}'", vault_name),
-                    "name": "schema violation",
-                    "code": 2,
-                    "fields": {"name": format!("No vault named '{}'", vault_name)},
-                })),
-            ).into_response()
-        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("No vault named '{}'", vault_name),
+                "name": "schema violation",
+                "code": 2,
+                "fields": {"name": format!("No vault named '{}'", vault_name)},
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -904,7 +963,8 @@ pub async fn validate_plugin_schema(
                     "code": 2,
                     "fields": {"name": "required field missing"},
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -920,7 +980,8 @@ pub async fn validate_plugin_schema(
                     "code": 2,
                     "fields": {"name": "required field missing"},
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -938,13 +999,22 @@ pub async fn validate_plugin_schema(
                 "code": 2,
                 "fields": {"name": format!("No plugin named '{}'", plugin_name)},
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     if plugin_name == "ai-rate-limit" {
         let config = body.get("config").unwrap_or(&serde_json::Value::Null);
         if let Err(error) =
             kong_plugin_system::config_validation::validate_ai_rate_limit_config(config)
+        {
+            return ai_rate_limit_schema_violation(error).into_response();
+        }
+    }
+    if plugin_name == "ai-context-compression" {
+        let config = body.get("config").unwrap_or(&serde_json::Value::Null);
+        if let Err(error) =
+            kong_plugin_system::config_validation::validate_ai_context_compression_config(config)
         {
             return ai_rate_limit_schema_violation(error).into_response();
         }
@@ -969,7 +1039,8 @@ pub async fn validate_plugin_schema(
                             "code": 2,
                             "fields": {"config": {key.clone(): "unknown field"}},
                         })),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
             }
         }
@@ -978,51 +1049,290 @@ pub async fn validate_plugin_schema(
     (
         StatusCode::OK,
         Json(json!({"message": "schema validation successful"})),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Extract known config field names from a plugin's schema definition — 从插件 schema 定义中提取已知 config 字段名
 fn get_known_config_fields(plugin_name: &str) -> Vec<&'static str> {
     match plugin_name {
-        "key-auth" => vec!["key_names", "key_in_body", "key_in_header", "key_in_query", "hide_credentials", "anonymous", "run_on_preflight"],
+        "key-auth" => vec![
+            "key_names",
+            "key_in_body",
+            "key_in_header",
+            "key_in_query",
+            "hide_credentials",
+            "anonymous",
+            "run_on_preflight",
+        ],
         "basic-auth" => vec!["hide_credentials", "anonymous"],
-        "rate-limiting" => vec!["second", "minute", "hour", "day", "month", "year", "limit_by", "policy", "fault_tolerant", "hide_client_headers", "redis_host", "redis_port", "redis_password", "redis_timeout", "redis_database", "header_name", "path", "redis_ssl", "redis_ssl_verify", "redis_server_name", "error_code", "error_message", "sync_rate"],
-        "ai-rate-limit" => vec!["limit_by", "tpm_limit", "rpm_limit", "header_name", "error_code", "error_message"],
-        "cors" => vec!["origins", "methods", "headers", "exposed_headers", "credentials", "max_age", "preflight_continue", "private_network"],
+        "rate-limiting" => vec![
+            "second",
+            "minute",
+            "hour",
+            "day",
+            "month",
+            "year",
+            "limit_by",
+            "policy",
+            "fault_tolerant",
+            "hide_client_headers",
+            "redis_host",
+            "redis_port",
+            "redis_password",
+            "redis_timeout",
+            "redis_database",
+            "header_name",
+            "path",
+            "redis_ssl",
+            "redis_ssl_verify",
+            "redis_server_name",
+            "error_code",
+            "error_message",
+            "sync_rate",
+        ],
+        "ai-rate-limit" => vec![
+            "limit_by",
+            "tpm_limit",
+            "rpm_limit",
+            "header_name",
+            "error_code",
+            "error_message",
+        ],
+        "ai-context-compression" => vec![
+            "min_input_tokens",
+            "max_input_bytes",
+            "on_unavailable",
+            "streaming",
+            "expose_metrics_headers",
+        ],
+        "cors" => vec![
+            "origins",
+            "methods",
+            "headers",
+            "exposed_headers",
+            "credentials",
+            "max_age",
+            "preflight_continue",
+            "private_network",
+        ],
         "tcp-log" => vec!["host", "port", "timeout", "keepalive", "tls", "tls_sni"],
         "udp-log" => vec!["host", "port", "timeout"],
-        "http-log" => vec!["http_endpoint", "method", "content_type", "timeout", "keepalive", "flush_timeout", "retry_count", "queue_size", "custom_fields_by_lua"],
+        "http-log" => vec![
+            "http_endpoint",
+            "method",
+            "content_type",
+            "timeout",
+            "keepalive",
+            "flush_timeout",
+            "retry_count",
+            "queue_size",
+            "custom_fields_by_lua",
+        ],
         "file-log" => vec!["path", "reopen", "custom_fields_by_lua"],
         "ip-restriction" => vec!["allow", "deny", "status", "message"],
-        "request-transformer" => vec!["http_method", "remove", "rename", "replace", "add", "append"],
+        "request-transformer" => vec![
+            "http_method",
+            "remove",
+            "rename",
+            "replace",
+            "add",
+            "append",
+        ],
         "response-transformer" => vec!["remove", "rename", "replace", "add", "append"],
         "acl" => vec!["allow", "deny", "hide_groups_header"],
-        "hmac-auth" => vec!["hide_credentials", "clock_skew", "algorithms", "enforce_headers", "validate_request_body"],
-        "jwt" => vec!["uri_param_names", "cookie_names", "header_names", "key_claim_name", "secret_is_base64", "claims_to_verify", "anonymous", "run_on_preflight", "maximum_expiration"],
-        "request-size-limiting" => vec!["allowed_payload_size", "size_unit", "require_content_length"],
-        "request-termination" => vec!["status_code", "message", "body", "content_type", "trigger", "echo"],
+        "hmac-auth" => vec![
+            "hide_credentials",
+            "clock_skew",
+            "algorithms",
+            "enforce_headers",
+            "validate_request_body",
+        ],
+        "jwt" => vec![
+            "uri_param_names",
+            "cookie_names",
+            "header_names",
+            "key_claim_name",
+            "secret_is_base64",
+            "claims_to_verify",
+            "anonymous",
+            "run_on_preflight",
+            "maximum_expiration",
+        ],
+        "request-size-limiting" => vec![
+            "allowed_payload_size",
+            "size_unit",
+            "require_content_length",
+        ],
+        "request-termination" => vec![
+            "status_code",
+            "message",
+            "body",
+            "content_type",
+            "trigger",
+            "echo",
+        ],
         "bot-detection" => vec!["allow", "deny"],
         "correlation-id" => vec!["header_name", "generator", "echo_downstream"],
-        "prometheus" => vec!["per_consumer", "status_code_metrics", "latency_metrics", "bandwidth_metrics", "upstream_health_metrics"],
-        "oauth2" => vec!["scopes", "mandatory_scope", "provision_key", "token_expiration", "enable_authorization_code", "enable_client_credentials", "enable_implicit_grant", "enable_password_grant", "hide_credentials", "accept_http_if_already_terminated", "anonymous", "global_credentials", "auth_header_name", "refresh_token_ttl", "reuse_refresh_token", "persistent_refresh_token"],
-        "ldap-auth" => vec!["ldap_host", "ldap_port", "start_tls", "verify_ldap_host", "base_dn", "attribute", "cache_ttl", "timeout", "keepalive", "anonymous", "header_type", "hide_credentials"],
-        "session" => vec!["secret", "cookie_name", "cookie_lifetime", "cookie_path", "cookie_domain", "cookie_samesite", "cookie_httponly", "cookie_secure", "storage"],
-        "response-ratelimiting" => vec!["header_name", "limit_by", "policy", "fault_tolerant", "hide_client_headers", "redis_host", "redis_port", "redis_password", "redis_timeout", "redis_database", "block_on_first_violation", "limits"],
-        "syslog" => vec!["successful_severity", "client_errors_severity", "server_errors_severity", "log_level"],
-        "loggly" => vec!["host", "port", "key", "tags", "timeout", "successful_severity", "client_errors_severity", "server_errors_severity", "log_level"],
+        "prometheus" => vec![
+            "per_consumer",
+            "status_code_metrics",
+            "latency_metrics",
+            "bandwidth_metrics",
+            "upstream_health_metrics",
+        ],
+        "oauth2" => vec![
+            "scopes",
+            "mandatory_scope",
+            "provision_key",
+            "token_expiration",
+            "enable_authorization_code",
+            "enable_client_credentials",
+            "enable_implicit_grant",
+            "enable_password_grant",
+            "hide_credentials",
+            "accept_http_if_already_terminated",
+            "anonymous",
+            "global_credentials",
+            "auth_header_name",
+            "refresh_token_ttl",
+            "reuse_refresh_token",
+            "persistent_refresh_token",
+        ],
+        "ldap-auth" => vec![
+            "ldap_host",
+            "ldap_port",
+            "start_tls",
+            "verify_ldap_host",
+            "base_dn",
+            "attribute",
+            "cache_ttl",
+            "timeout",
+            "keepalive",
+            "anonymous",
+            "header_type",
+            "hide_credentials",
+        ],
+        "session" => vec![
+            "secret",
+            "cookie_name",
+            "cookie_lifetime",
+            "cookie_path",
+            "cookie_domain",
+            "cookie_samesite",
+            "cookie_httponly",
+            "cookie_secure",
+            "storage",
+        ],
+        "response-ratelimiting" => vec![
+            "header_name",
+            "limit_by",
+            "policy",
+            "fault_tolerant",
+            "hide_client_headers",
+            "redis_host",
+            "redis_port",
+            "redis_password",
+            "redis_timeout",
+            "redis_database",
+            "block_on_first_violation",
+            "limits",
+        ],
+        "syslog" => vec![
+            "successful_severity",
+            "client_errors_severity",
+            "server_errors_severity",
+            "log_level",
+        ],
+        "loggly" => vec![
+            "host",
+            "port",
+            "key",
+            "tags",
+            "timeout",
+            "successful_severity",
+            "client_errors_severity",
+            "server_errors_severity",
+            "log_level",
+        ],
         "datadog" => vec!["host", "port", "prefix", "metrics"],
         "statsd" => vec!["host", "port", "prefix", "metrics"],
-        "zipkin" => vec!["http_endpoint", "sample_ratio", "default_service_name", "include_credential", "traceid_byte_count", "header_type", "default_header_type", "tags_header", "static_tags"],
+        "zipkin" => vec![
+            "http_endpoint",
+            "sample_ratio",
+            "default_service_name",
+            "include_credential",
+            "traceid_byte_count",
+            "header_type",
+            "default_header_type",
+            "tags_header",
+            "static_tags",
+        ],
         "grpc-gateway" => vec!["proto"],
         "grpc-web" => vec!["proto", "pass_stripped_path", "allow_origin_header"],
-        "aws-lambda" => vec!["aws_key", "aws_secret", "aws_region", "function_name", "qualifier", "invocation_type", "log_type", "timeout", "port", "keepalive", "forward_request_method", "forward_request_headers", "forward_request_body", "forward_request_uri", "is_proxy_integration", "unhandled_status", "skip_large_bodies", "base64_encode_body"],
-        "proxy-cache" => vec!["response_code", "request_method", "content_type", "cache_ttl", "strategy", "cache_control", "storage_ttl", "memory", "vary_headers", "vary_query_params"],
-        "pre-function" | "post-function" => vec!["certificate", "rewrite", "access", "header_filter", "body_filter", "log", "ws_handshake", "ws_client_frame", "ws_upstream_frame", "ws_close"],
-        "dummy" => vec!["resp_header_value", "resp_code", "append_body", "resp_headers", "old_field", "new_field"],
+        "aws-lambda" => vec![
+            "aws_key",
+            "aws_secret",
+            "aws_region",
+            "function_name",
+            "qualifier",
+            "invocation_type",
+            "log_type",
+            "timeout",
+            "port",
+            "keepalive",
+            "forward_request_method",
+            "forward_request_headers",
+            "forward_request_body",
+            "forward_request_uri",
+            "is_proxy_integration",
+            "unhandled_status",
+            "skip_large_bodies",
+            "base64_encode_body",
+        ],
+        "proxy-cache" => vec![
+            "response_code",
+            "request_method",
+            "content_type",
+            "cache_ttl",
+            "strategy",
+            "cache_control",
+            "storage_ttl",
+            "memory",
+            "vary_headers",
+            "vary_query_params",
+        ],
+        "pre-function" | "post-function" => vec![
+            "certificate",
+            "rewrite",
+            "access",
+            "header_filter",
+            "body_filter",
+            "log",
+            "ws_handshake",
+            "ws_client_frame",
+            "ws_upstream_frame",
+            "ws_close",
+        ],
+        "dummy" => vec![
+            "resp_header_value",
+            "resp_code",
+            "append_body",
+            "resp_headers",
+            "old_field",
+            "new_field",
+        ],
         "short-circuit" => vec!["status", "message"],
         "error-generator" => vec!["access", "header_filter", "log", "rewrite"],
         "error-generator-last" => vec!["access", "header_filter", "log", "rewrite"],
-        "ctx-checker" | "ctx-checker-last" => vec!["ctx_kind", "ctx_set_field", "ctx_set_value", "ctx_check_field", "ctx_check_value", "ctx_throw_error"],
+        "ctx-checker" | "ctx-checker-last" => vec![
+            "ctx_kind",
+            "ctx_set_field",
+            "ctx_set_value",
+            "ctx_check_field",
+            "ctx_check_value",
+            "ctx_throw_error",
+        ],
         "enable-buffering" | "enable-buffering-response" => vec!["phase", "mode"],
         "mocking" => vec!["api_specification"],
         "rewriter" => vec!["value"],

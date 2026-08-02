@@ -1,0 +1,215 @@
+{
+  "_format_version": "3.0",
+  "services": [
+    {
+      "id": "14000000-0000-0000-0000-000000000001",
+      "name": "headroom-responses-contract",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 19090,
+      "path": "/v1/responses"
+    },
+    {
+      "id": "14000000-0000-0000-0000-000000000002",
+      "name": "headroom-anthropic-contract",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 19090,
+      "path": "/v1/messages"
+    },
+    {
+      "id": "14000000-0000-0000-0000-000000000003",
+      "name": "headroom-failure-contract",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 19090,
+      "path": "/v1/responses"
+    },
+    {
+      "id": "14000000-0000-0000-0000-000000000004",
+      "name": "headroom-bypass-contract",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 19090,
+      "path": "/v1/responses"
+    }
+  ],
+  "routes": [
+    {
+      "id": "24000000-0000-0000-0000-000000000001",
+      "name": "headroom-responses-contract",
+      "protocols": ["http", "https"],
+      "methods": ["POST"],
+      "paths": ["/headroom/responses"],
+      "strip_path": true,
+      "service": {"id": "14000000-0000-0000-0000-000000000001"}
+    },
+    {
+      "id": "24000000-0000-0000-0000-000000000002",
+      "name": "headroom-anthropic-contract",
+      "protocols": ["http", "https"],
+      "methods": ["POST"],
+      "paths": ["/headroom/messages"],
+      "strip_path": true,
+      "service": {"id": "14000000-0000-0000-0000-000000000002"}
+    },
+    {
+      "id": "24000000-0000-0000-0000-000000000003",
+      "name": "headroom-failure-contract",
+      "protocols": ["http", "https"],
+      "methods": ["POST"],
+      "paths": ["/headroom/fail"],
+      "strip_path": true,
+      "service": {"id": "14000000-0000-0000-0000-000000000003"}
+    },
+    {
+      "id": "24000000-0000-0000-0000-000000000004",
+      "name": "headroom-bypass-contract",
+      "protocols": ["http", "https"],
+      "methods": ["POST"],
+      "paths": ["/headroom/bypass"],
+      "strip_path": true,
+      "service": {"id": "14000000-0000-0000-0000-000000000004"}
+    }
+  ],
+  "plugins": [
+    {
+      "id": "34000000-0000-0000-0000-000000000001",
+      "name": "ai-proxy",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000001"},
+      "config": {
+        "model": "contract-model",
+        "model_source": "config",
+        "route_type": "llm/v1/responses",
+        "client_protocol": "openai",
+        "response_streaming": "deny",
+        "timeout": 180000,
+        "max_request_body_size": 1024,
+        "provider": {
+          "provider_type": "openai",
+          "endpoint_url": "http://host.docker.internal:19090/v1/responses",
+          "auth_config": {"header_value": "provider-secret"}
+        }
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000002",
+      "name": "ai-context-compression",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000001"},
+      "config": {
+        "min_input_tokens": 0,
+        "max_input_bytes": 4194304,
+        "on_unavailable": "reject",
+        "streaming": "bypass",
+        "expose_metrics_headers": true
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000003",
+      "name": "ai-proxy",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000002"},
+      "config": {
+        "model": "contract-model",
+        "model_source": "config",
+        "route_type": "llm/v1/chat",
+        "client_protocol": "anthropic",
+        "response_streaming": "deny",
+        "timeout": 180000,
+        "max_request_body_size": 1024,
+        "provider": {
+          "provider_type": "anthropic",
+          "endpoint_url": "http://host.docker.internal:19090/v1/messages",
+          "auth_config": {"header_value": "provider-secret"}
+        }
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000004",
+      "name": "ai-context-compression",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000002"},
+      "config": {
+        "min_input_tokens": 0,
+        "max_input_bytes": 4194304,
+        "on_unavailable": "reject",
+        "streaming": "bypass",
+        "expose_metrics_headers": true
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000005",
+      "name": "prometheus",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000006",
+      "name": "ai-proxy",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000003"},
+      "config": {
+        "model": "fail-after-dispatch",
+        "model_source": "config",
+        "route_type": "llm/v1/responses",
+        "client_protocol": "openai",
+        "response_streaming": "deny",
+        "timeout": 180000,
+        "max_request_body_size": 1024,
+        "provider": {
+          "provider_type": "openai",
+          "endpoint_url": "http://host.docker.internal:19090/v1/responses",
+          "auth_config": {"header_value": "provider-secret"}
+        }
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000007",
+      "name": "ai-context-compression",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000003"},
+      "config": {
+        "min_input_tokens": 0,
+        "max_input_bytes": 4194304,
+        "on_unavailable": "reject",
+        "streaming": "bypass",
+        "expose_metrics_headers": true
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000008",
+      "name": "ai-proxy",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000004"},
+      "config": {
+        "model": "contract-model",
+        "model_source": "config",
+        "route_type": "llm/v1/responses",
+        "client_protocol": "openai",
+        "response_streaming": "allow",
+        "timeout": 180000,
+        "max_request_body_size": 1024,
+        "provider": {
+          "provider_type": "openai",
+          "endpoint_url": "http://127.0.0.1:19090/v1/responses",
+          "auth_config": {"header_value": "provider-secret"}
+        }
+      }
+    },
+    {
+      "id": "34000000-0000-0000-0000-000000000009",
+      "name": "ai-context-compression",
+      "enabled": true,
+      "route": {"id": "24000000-0000-0000-0000-000000000004"},
+      "config": {
+        "min_input_tokens": 0,
+        "max_input_bytes": 4194304,
+        "on_unavailable": "reject",
+        "streaming": "bypass",
+        "expose_metrics_headers": true
+      }
+    }
+  ]
+}

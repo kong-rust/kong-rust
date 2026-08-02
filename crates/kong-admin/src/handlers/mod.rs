@@ -899,6 +899,37 @@ fn format_memory(bytes: u64, unit: Option<&str>, scale: usize) -> Value {
     }
 }
 
+/// 只公开低敏的 Headroom 配置能力，不返回 URL，也不把静态配置当成健康探测。
+fn context_compression_status(config: &kong_config::KongConfig) -> Value {
+    let configured = config
+        .ai_context_compression_headroom_url
+        .as_deref()
+        .and_then(|value| url::Url::parse(value).ok())
+        .is_some_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+
+    json!({
+        "configuration_status": if configured { "configured" } else { "unavailable" },
+        "backend": if configured { Value::String("headroom_proxy".to_string()) } else { Value::Null },
+        "transparent_ccr": configured,
+        "protocols": if configured {
+            json!(["openai_responses", "anthropic_messages"])
+        } else {
+            json!([])
+        },
+        "streaming": false,
+        // 未有共享 store capability probe 前始终保守公布为 local。
+        "store_scope": "local",
+        "health": "not_probed",
+    })
+}
+
 /// GET /status — Service status — GET /status — 服务状态
 pub async fn status_info(
     State(state): State<AdminState>,
@@ -973,6 +1004,7 @@ pub async fn status_info(
     }
     body["ai_usage_writer"] =
         ai_usage::writer_stats_snapshot(&state.ai_usage).map_or(Value::Null, |stats| json!(stats));
+    body["ai_context_compression"] = context_compression_status(&state.config);
 
     Json(body).into_response()
 }
@@ -1141,8 +1173,18 @@ pub async fn post_config(
             )
                 .into_response();
         }
-        // Trigger proxy cache refresh — 触发代理缓存刷新
-        let _ = state.refresh_tx.send("config");
+        // 声明式配置会原子替换全部实体；刷新器按实体类型工作，不能发送无效的
+        // `config` 占位信号，否则 Admin 已更新而 8000 仍使用旧路由。
+        for entity_type in [
+            "services",
+            "routes",
+            "plugins",
+            "upstreams",
+            "certificates",
+            "ca_certificates",
+        ] {
+            let _ = state.refresh_tx.send(entity_type);
+        }
         // The store was rebuilt wholesale, so cached virtual keys may no longer exist
         // 存储已被全量重建，缓存的虚拟密钥可能已不存在
         state.virtual_key_auth.invalidate_all();
@@ -1413,6 +1455,14 @@ pub async fn status_metrics(State(state): State<AdminState>) -> Response {
                     metrics.push('\n');
                 }
                 metrics.push_str(&writer_metrics);
+            }
+            let compression_metrics =
+                kong_ai::context_compression::context_compression_prometheus_metrics();
+            if !compression_metrics.is_empty() {
+                if !metrics.ends_with('\n') {
+                    metrics.push('\n');
+                }
+                metrics.push_str(&compression_metrics);
             }
             let mut response = metrics.into_response();
             response.headers_mut().insert(
@@ -2407,14 +2457,12 @@ pub(crate) async fn do_update<T: Entity + Serialize + Send + Sync + 'static>(
                 .and_then(|value| value.as_str())
                 .map(str::to_owned)
             {
-                if name == "ai-rate-limit" {
+                if matches!(name.as_str(), "ai-rate-limit" | "ai-context-compression") {
                     if !obj.get("config").map(Value::is_object).unwrap_or(false) {
                         obj.insert("config".to_string(), json!({}));
                     }
                     if let Some(config) = obj.get_mut("config").and_then(Value::as_object_mut) {
-                        kong_plugin_system::config_validation::apply_ai_rate_limit_config_defaults(
-                            config,
-                        );
+                        apply_plugin_config_defaults(&name, config);
                     }
                 }
                 if let Some(config) = obj.get("config") {
@@ -4579,6 +4627,11 @@ fn apply_plugin_config_defaults(name: &str, config: &mut serde_json::Map<String,
         "ai-rate-limit" => {
             kong_plugin_system::config_validation::apply_ai_rate_limit_config_defaults(config);
         }
+        "ai-context-compression" => {
+            kong_plugin_system::config_validation::apply_ai_context_compression_config_defaults(
+                config,
+            );
+        }
         "cors" => {
             config.entry("origins".to_string()).or_insert(Value::Null);
             config.entry("methods".to_string()).or_insert_with(|| {
@@ -4876,6 +4929,11 @@ fn validate_plugin_config_for_admin(
         "rate-limiting" => validate_rate_limiting_config(config),
         "ai-rate-limit" => {
             kong_plugin_system::config_validation::validate_ai_rate_limit_config(config)
+                .err()
+                .map(schemas::ai_rate_limit_schema_violation)
+        }
+        "ai-context-compression" => {
+            kong_plugin_system::config_validation::validate_ai_context_compression_config(config)
                 .err()
                 .map(schemas::ai_rate_limit_schema_violation)
         }

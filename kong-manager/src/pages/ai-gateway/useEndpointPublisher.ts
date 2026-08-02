@@ -2,6 +2,7 @@ import { apiService } from '@/services/apiService'
 import type { AiModel, AiProvider, KongPageResponse } from './types'
 import type {
   AiEndpoint,
+  ContextCompressionCapability,
   EndpointDraft,
   EndpointModelDraft,
   GatewayPlugin,
@@ -28,10 +29,26 @@ interface CreatedResources {
   route: string
   plugin: string
   authPlugin: string
+  contextCompressionPlugin: string
 }
 
 // Virtual key authentication plugin — 虚拟密钥认证插件
 const authPluginName = 'ai-key-auth'
+const contextCompressionPluginName = 'ai-context-compression'
+
+interface GatewayStatus {
+  ai_context_compression?: ContextCompressionCapability
+}
+
+const unavailableContextCompressionCapability: ContextCompressionCapability = {
+  configuration_status: 'unavailable',
+  backend: null,
+  transparent_ccr: false,
+  protocols: [],
+  streaming: false,
+  store_scope: 'local',
+  health: 'not_probed',
+}
 
 const listAll = async <T>(endpoint: string) => {
   const records: T[] = []
@@ -85,15 +102,24 @@ const routeSlug = (route?: GatewayRoute, fallback = 'endpoint') => {
 }
 
 export const loadEndpointResources = async () => {
-  const [services, routes, plugins, models, providers] = await Promise.all([
+  const [services, routes, plugins, models, providers, status] = await Promise.all([
     listAll<GatewayService>('services'),
     listAll<GatewayRoute>('routes'),
     listAll<GatewayPlugin>('plugins'),
     listAll<AiModel>('ai-models'),
     listAll<AiProvider>('ai-providers'),
+    apiService.get<GatewayStatus>('status'),
   ])
 
-  return { services, routes, plugins, models, providers }
+  return {
+    services,
+    routes,
+    plugins,
+    models,
+    providers,
+    contextCompressionCapability: status.data.ai_context_compression
+      ?? unavailableContextCompressionCapability,
+  }
 }
 
 export type EndpointResources = Awaited<ReturnType<typeof loadEndpointResources>>
@@ -122,6 +148,11 @@ export const buildEndpoints = (resources: EndpointResources) => {
       const authPlugin = resources.plugins.find(item => (
         item.route?.id === route?.id
         && item.name === authPluginName
+        && endpointIdFromTags(item.tags) === id
+      ))
+      const contextCompressionPlugin = resources.plugins.find(item => (
+        item.route?.id === route?.id
+        && item.name === contextCompressionPluginName
         && endpointIdFromTags(item.tags) === id
       ))
       const modelGroup = plugin?.config.model_group ?? endpointModelGroup(id)
@@ -153,6 +184,8 @@ export const buildEndpoints = (resources: EndpointResources) => {
         route,
         plugin,
         authPlugin,
+        contextCompressionPlugin,
+        contextCompressionCapability: resources.contextCompressionCapability,
         models: endpointModels,
         providers: endpointProviders,
       }]
@@ -204,6 +237,22 @@ const validateDraft = (draft: EndpointDraft) => {
 
   if (totalWeight <= 0) {
     throw new Error('At least one model weight must be greater than zero')
+  }
+
+  if (
+    !Number.isInteger(draft.contextCompression.minInputTokens)
+    || draft.contextCompression.minInputTokens < 0
+    || draft.contextCompression.minInputTokens > 2_147_483_647
+  ) {
+    throw new Error('Context compression minimum tokens must be a whole number between 0 and 2147483647')
+  }
+
+  if (
+    !Number.isInteger(draft.contextCompression.maxInputBytes)
+    || draft.contextCompression.maxInputBytes < 1
+    || draft.contextCompression.maxInputBytes > 16 * 1024 * 1024
+  ) {
+    throw new Error('Context compression maximum bytes must be a whole number between 1 and 16777216')
   }
 
   return slug
@@ -295,6 +344,9 @@ const serviceFieldsForProvider = (provider: AiProvider) => {
 
 const rollbackCreated = async (created: CreatedResources) => {
   const steps = [
+    ...(created.contextCompressionPlugin
+      ? [{ endpoint: 'plugins', id: created.contextCompressionPlugin }]
+      : []),
     ...(created.authPlugin ? [{ endpoint: 'plugins', id: created.authPlugin }] : []),
     ...(created.plugin ? [{ endpoint: 'plugins', id: created.plugin }] : []),
     ...(created.route ? [{ endpoint: 'routes', id: created.route }] : []),
@@ -323,6 +375,7 @@ const emptyCreatedResources = (): CreatedResources => ({
   route: '',
   plugin: '',
   authPlugin: '',
+  contextCompressionPlugin: '',
 })
 
 // Attach the virtual key authentication plugin to a route — 为 route 挂载虚拟密钥认证插件
@@ -344,6 +397,33 @@ const createAuthPlugin = async (
   })
 
   return createdId(data, 'auth plugin')
+}
+
+// 为 route 挂载 Headroom 上下文压缩策略；后端地址只来自 kong.conf。
+const createContextCompressionPlugin = async (
+  id: string,
+  routeId: string,
+  enabled: boolean,
+  tags: string[],
+  draft: EndpointDraft,
+) => {
+  const { contextCompression } = draft
+  const { data } = await apiService.post('plugins', {
+    name: contextCompressionPluginName,
+    instance_name: `kr-ai-endpoint-context-compression-${id}`,
+    route: { id: routeId },
+    enabled,
+    tags,
+    config: {
+      min_input_tokens: contextCompression.minInputTokens,
+      max_input_bytes: contextCompression.maxInputBytes,
+      on_unavailable: contextCompression.onUnavailable,
+      streaming: 'bypass',
+      expose_metrics_headers: contextCompression.exposeMetricsHeaders,
+    },
+  })
+
+  return createdId(data, 'context compression plugin')
 }
 
 export const createEndpoint = async (draft: EndpointDraft) => {
@@ -399,6 +479,16 @@ export const createEndpoint = async (draft: EndpointDraft) => {
 
     if (draft.requireAuth) {
       created.authPlugin = await createAuthPlugin(id, created.route, draft.enabled, tags)
+    }
+
+    if (draft.contextCompression.enabled) {
+      created.contextCompressionPlugin = await createContextCompressionPlugin(
+        id,
+        created.route,
+        draft.enabled,
+        tags,
+        draft,
+      )
     }
 
     return id
@@ -474,6 +564,36 @@ export const updateEndpoint = async (endpoint: AiEndpoint, draft: EndpointDraft)
       await apiService.delete(`plugins/${endpoint.authPlugin.id}`)
     }
 
+    const contextCompressionConfig = {
+      min_input_tokens: draft.contextCompression.minInputTokens,
+      max_input_bytes: draft.contextCompression.maxInputBytes,
+      on_unavailable: draft.contextCompression.onUnavailable,
+      streaming: 'bypass',
+      expose_metrics_headers: draft.contextCompression.exposeMetricsHeaders,
+    }
+
+    // 将上下文压缩插件对齐到 Endpoint 草稿；关闭时删除，避免留下隐式策略。
+    if (draft.contextCompression.enabled && !endpoint.contextCompressionPlugin) {
+      created.contextCompressionPlugin = await createContextCompressionPlugin(
+        endpoint.id,
+        endpoint.route.id,
+        draft.enabled,
+        tags,
+        draft,
+      )
+    } else if (draft.contextCompression.enabled && endpoint.contextCompressionPlugin) {
+      await apiService.patch(`plugins/${endpoint.contextCompressionPlugin.id}`, {
+        enabled: draft.enabled,
+        tags,
+        config: {
+          ...endpoint.contextCompressionPlugin.config,
+          ...contextCompressionConfig,
+        },
+      })
+    } else if (!draft.contextCompression.enabled && endpoint.contextCompressionPlugin) {
+      await apiService.delete(`plugins/${endpoint.contextCompressionPlugin.id}`)
+    }
+
     for (const model of endpoint.models) {
       await apiService.delete(`ai-models/${model.id}`)
     }
@@ -512,6 +632,9 @@ export const updateEndpoint = async (endpoint: AiEndpoint, draft: EndpointDraft)
 
 export const deleteEndpoint = async (endpoint: AiEndpoint) => {
   const steps = [
+    ...(endpoint.contextCompressionPlugin
+      ? [{ endpoint: 'plugins', id: endpoint.contextCompressionPlugin.id }]
+      : []),
     ...(endpoint.authPlugin ? [{ endpoint: 'plugins', id: endpoint.authPlugin.id }] : []),
     ...(endpoint.plugin ? [{ endpoint: 'plugins', id: endpoint.plugin.id }] : []),
     ...(endpoint.route ? [{ endpoint: 'routes', id: endpoint.route.id }] : []),

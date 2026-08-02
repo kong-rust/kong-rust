@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -16,7 +17,13 @@ fn create_test_app() -> axum::Router {
 
 fn create_test_app_with_store(store: Arc<DblessStore>) -> axum::Router {
     let config = Arc::new(kong_config::KongConfig::default());
+    create_test_app_with_store_and_config(store, config)
+}
 
+fn create_test_app_with_store_and_config(
+    store: Arc<DblessStore>,
+    config: Arc<kong_config::KongConfig>,
+) -> axum::Router {
     let (refresh_tx, _refresh_rx) = tokio::sync::mpsc::unbounded_channel();
     let dns_resolver = std::sync::Arc::new(kong_proxy::dns::DnsResolver::new(&config));
     let proxy = kong_proxy::KongProxy::new(
@@ -77,6 +84,43 @@ fn create_test_app_with_store(store: Arc<DblessStore>) -> axum::Router {
     };
 
     build_admin_router(state)
+}
+
+#[tokio::test]
+async fn test_status_exposes_only_safe_context_compression_capability() {
+    let mut config = kong_config::KongConfig::default();
+    config.ai_context_compression_headroom_url = Some("http://127.0.0.1:8787/headroom".to_string());
+    config.ai_context_compression_store_scope = "cluster".to_string();
+    let app = create_test_app_with_store_and_config(Arc::new(DblessStore::new()), Arc::new(config));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["ai_context_compression"]["configuration_status"],
+        "configured"
+    );
+    assert_eq!(value["ai_context_compression"]["backend"], "headroom_proxy");
+    assert_eq!(value["ai_context_compression"]["transparent_ccr"], true);
+    assert_eq!(
+        value["ai_context_compression"]["protocols"],
+        json!(["openai_responses", "anthropic_messages"])
+    );
+    assert_eq!(value["ai_context_compression"]["streaming"], false);
+    assert_eq!(value["ai_context_compression"]["store_scope"], "local");
+    let serialized = serde_json::to_string(&value).unwrap();
+    assert!(!serialized.contains("127.0.0.1:8787"));
 }
 
 fn create_test_app_with_ai_rate_limit() -> axum::Router {
@@ -235,6 +279,87 @@ async fn test_plugin_schema_ai_rate_limit() {
     assert!(config_field("rpm_limit")["default"].is_null());
     assert_eq!(config_field("header_name")["deprecated"], true);
     assert!(!value["entity_checks"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_plugin_schema_and_validation_for_context_compression() {
+    let app = create_test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/schemas/plugins/ai-context-compression")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["name"], "ai-context-compression");
+    let fields = value["fields"][1]["config"]["fields"].as_array().unwrap();
+    assert!(fields
+        .iter()
+        .any(|field| field.get("min_input_tokens").is_some()));
+    assert!(fields
+        .iter()
+        .any(|field| field.get("on_unavailable").is_some()));
+
+    let valid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schemas/plugins/validate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "ai-context-compression",
+                        "config": {
+                            "min_input_tokens": 2000,
+                            "max_input_bytes": 4194304,
+                            "on_unavailable": "pass_through",
+                            "streaming": "bypass",
+                            "expose_metrics_headers": false
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), StatusCode::OK);
+
+    for config in [
+        json!({"max_input_bytes": 0}),
+        json!({"on_unavailable": "retry"}),
+        json!({"streaming": "compress"}),
+        json!({"unexpected": true}),
+    ] {
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/schemas/plugins/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "ai-context-compression",
+                            "config": config
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[tokio::test]

@@ -18,13 +18,13 @@
 | 12 | 协议与 TLS 进阶 | 1 | 1 | 0 |
 | 13 | 数据库兼容与 WebSocket | 2 | 2 | 0 |
 | 14 | QA 测试与 Bug 修复 | 4 | 4 | 0 |
-| 15 | AI Gateway — 协议与管理面 | 5 | 5 | 0 |
+| 15 | AI Gateway — 协议与管理面 | 7 | 5 | 2 |
 | 16 | Admin API 补全 | 5 | 5 | 0 |
 | 17 | 协议与代理进阶 | 2 | 2 | 0 |
 | 18 | 安全与运维 | 3 | 0 | 3 |
 | 19 | 可观测性与性能 | 2 | 0 | 2 |
 | 20 | 优雅生命周期管理 | 1 | 1 | 0 |
-| **合计** | | **89** | **84** | **5** |
+| **合计** | | **91** | **84** | **7** |
 
 > **2026-04-19 审计修正**（见下方任务描述中标注的 ⚠️）：
 > - **阶段 8 任务数 19 → 20**：补入 8.12a（busted 兼容层）子任务，此前未计入概览表。
@@ -452,6 +452,24 @@
     | 运行模式 | Traditional、DB-less、Hybrid capability/unsupported | 🟡 契约/投影通过，独立进程矩阵待补 |
     | 容量/故障 | 热点 key、pool 饱和、heartbeat、commit unknown、高基数/长 SSE | 🟡 Memory 10k 基准通过，其余待发布档位证据 |
     | 差异 | `git diff --check`、新增 Rust 文件 rustfmt check | 🟢 通过 |
+
+- [x] **15.7** 基于 Headroom 的上下文压缩与 CCR（REQ-AI-014）`[R10]`（**P0，
+  功能验收通过 / 生产晋级阻塞**）
+  - 用户已授权先行启动；需求分析与方案设计门禁于 2026-08-01 定稿，已完成
+    核心编码与冻结镜像真实 CCR contract，不混入 REQ-AI-003 剩余发布验证代码
+  - 首版采用原生 `ai-context-compression` 插件 + 官方 Headroom proxy adapter，
+    由受控内层 Provider hop 完成真实 CCR；只调用 `/v1/compress` 无法完成响应侧
+    retrieve/continuation，已明确排除
+  - 支持非流式 OpenAI Responses 和 Anthropic Messages；冻结版本的 OpenAI/
+    OpenAI-compatible Chat 因不会透明续接 CCR 固定旁路，streaming/native Gemini
+    同样旁路，TPM/模型窗口按原文保守准入
+  - 需求分析：`docs/pm/REQ-AI-014/analysis.md`；方案设计：
+    `docs/pm/REQ-AI-014/design.md`
+  - 实现记录：
+    `docs/implementation-logs/req-ai-014_2026-08-01_headroom-context-compression.md`
+  - 验收报告：`docs/pm/REQ-AI-014/acceptance.md`；14 条 AC 功能证据已收口
+  - [ ] 生产门禁解除：固定 Headroom digest 扫描有 1 Critical + 2 High 未修复漏洞；
+    需新 digest 通过同等回归或安全负责人限时风险接受，期间保持 opt-in
 
 ## 阶段 16：Admin API 补全
 

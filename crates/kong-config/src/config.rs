@@ -234,6 +234,16 @@ pub struct KongConfig {
     /// Gemini API key(为空时 Gemini 永远走字符估算)
     pub ai_tokenizer_gemini_api_key: Option<String>,
 
+    // ========== AI Context Compression — AI 上下文压缩 ==========
+    /// Headroom proxy 根地址；空值表示未配置上下文压缩后端。
+    pub ai_context_compression_headroom_url: Option<String>,
+    /// Headroom `/readyz` 单次探测超时（毫秒）。
+    pub ai_context_compression_health_timeout_ms: u64,
+    /// 健康结果缓存时间（毫秒）。
+    pub ai_context_compression_health_ttl_ms: u64,
+    /// CCR store 能力声明：local | cluster。
+    pub ai_context_compression_store_scope: String,
+
     // ========== AI Usage Analytics — AI 调用统计 ==========
     /// 请求热路径到后台 writer 的有界队列容量。
     pub ai_usage_queue_capacity: usize,
@@ -492,6 +502,12 @@ impl Default for KongConfig {
             ai_tokenizer_anthropic_api_key: None,
             ai_tokenizer_gemini_endpoint: None,
             ai_tokenizer_gemini_api_key: None,
+
+            // AI Context Compression
+            ai_context_compression_headroom_url: None,
+            ai_context_compression_health_timeout_ms: 200,
+            ai_context_compression_health_ttl_ms: 1000,
+            ai_context_compression_store_scope: "local".to_string(),
 
             // AI Usage Analytics
             ai_usage_queue_capacity: 8192,
@@ -807,6 +823,20 @@ impl KongConfig {
                 self.ai_tokenizer_gemini_api_key = none_if_empty(value)
             }
 
+            // AI Context Compression — AI 上下文压缩配置
+            "ai_context_compression_headroom_url" => {
+                self.ai_context_compression_headroom_url = none_if_empty(value)
+            }
+            "ai_context_compression_health_timeout_ms" => {
+                self.ai_context_compression_health_timeout_ms = value.parse().unwrap_or(200)
+            }
+            "ai_context_compression_health_ttl_ms" => {
+                self.ai_context_compression_health_ttl_ms = value.parse().unwrap_or(1000)
+            }
+            "ai_context_compression_store_scope" => {
+                self.ai_context_compression_store_scope = value.to_ascii_lowercase()
+            }
+
             // AI Usage Analytics — AI 调用统计
             "ai_usage_queue_capacity" => self.ai_usage_queue_capacity = value.parse().unwrap_or(0),
             "ai_usage_batch_size" => self.ai_usage_batch_size = value.parse().unwrap_or(0),
@@ -1028,6 +1058,8 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "ai-key-auth",
     // Kong-Rust native — AI request/token rate limiting — Kong-Rust 原生 — AI 请求/Token 限流
     "ai-rate-limit",
+    // Kong-Rust native — Headroom context compression with CCR
+    "ai-context-compression",
     "ai-request-transformer",
     "ai-response-transformer",
     "proxy-cache",
@@ -1152,6 +1184,32 @@ mod tests {
         assert_eq!(config.pg_port, 5433);
         assert!(config.pg_ssl);
         assert!(config.is_dbless());
+    }
+
+    #[test]
+    fn test_headroom_context_compression_config() {
+        let mut config = KongConfig::default();
+        assert!(config.ai_context_compression_headroom_url.is_none());
+        assert_eq!(config.ai_context_compression_health_timeout_ms, 200);
+        assert_eq!(config.ai_context_compression_health_ttl_ms, 1000);
+        assert_eq!(config.ai_context_compression_store_scope, "local");
+
+        config.set(
+            "ai_context_compression_headroom_url",
+            "http://127.0.0.1:8787",
+        );
+        config.set("ai_context_compression_health_timeout_ms", "350");
+        config.set("ai_context_compression_health_ttl_ms", "2500");
+        config.set("ai_context_compression_store_scope", "CLUSTER");
+
+        assert_eq!(
+            config.ai_context_compression_headroom_url.as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+        assert_eq!(config.ai_context_compression_health_timeout_ms, 350);
+        assert_eq!(config.ai_context_compression_health_ttl_ms, 2500);
+        assert_eq!(config.ai_context_compression_store_scope, "cluster");
+        assert!(BUNDLED_PLUGINS.contains(&"ai-context-compression"));
     }
 
     #[test]

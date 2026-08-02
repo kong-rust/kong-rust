@@ -18,6 +18,7 @@
 10. [精确 prompt-token 计数](#10-精确-prompt-token-计数tokenizer-registry)
 11. [调用统计与成本估算](#11-调用统计与成本估算)
 12. [Virtual Key 配额与预算执行](#12-virtual-key-配额与预算执行)
+13. [Headroom 上下文压缩与 CCR 部署](#13-headroom-上下文压缩与-ccr-部署)
 
 ---
 
@@ -158,7 +159,7 @@ AI Virtual Key 是一种面向用户/团队的虚拟 API Key，用于：
 
 Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，此后只存储 SHA256 哈希。
 
-### 五个插件及优先级
+### 六个插件及优先级
 
 插件按优先级从高到低执行（数字大者先执行）：
 
@@ -168,7 +169,8 @@ Virtual Key 格式为 `sk-kr-<uuid32>`，创建时一次性返回原始密钥，
 | ai-prompt-guard | 773 | 安全检查：拒绝/允许模式匹配、消息长度限制 |
 | ai-cache | 772 | 语义缓存：计算缓存键、命中时短路 |
 | ai-rate-limit | 771 | 限流：RPM / TPM 计数、预扣修正 |
-| ai-proxy | 770 | 核心代理：协议转换、上游路由、token 统计 |
+| ai-context-compression | 770 | 保存 Route 压缩策略并观察 Headroom/CCR 结果 |
+| ai-proxy | 769 | 核心代理：协议转换、上游路由、token 统计 |
 
 ---
 
@@ -526,6 +528,57 @@ ai_virtual_keys:
 
 ---
 
+### 3.6 ai-context-compression
+
+该原生 Route 插件启用 Headroom 上下文压缩与透明 CCR。插件以优先级 770 保存策略；
+`ai-proxy` 选定唯一 Provider 并生成 Provider 原生请求后，注入的 Headroom adapter
+才会替换这一次上游跳转。认证、Prompt Guard、缓存键、保守配额准入、Provider
+选择、凭据与最终用量结算仍由 Kong-Rust 负责。
+
+#### 配置字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `min_input_tokens` | integer | `2000` | 原文保守估值低于该值时旁路，范围 `0..=2^31-1` |
+| `max_input_bytes` | integer | `4194304` | 原始请求体超过该值时旁路，范围 `1..=16777216` |
+| `on_unavailable` | string | `pass_through` | 派发前不可用时 `pass_through`，或返回协议兼容的 503 `reject` |
+| `streaming` | string | `bypass` | 当前版本固定为 `bypass`，因为 Headroom 尚不支持透明流式 CCR |
+| `expose_metrics_headers` | boolean | `false` | 只公开稳定的 Kong before/after/saved 响应头；Headroom 内部响应头始终移除 |
+
+将它挂载到与 `ai-proxy` 相同的 Route：
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-context-compression",
+    "route": {"id": "<ROUTE_ID>"},
+    "config": {
+      "min_input_tokens": 2000,
+      "max_input_bytes": 4194304,
+      "on_unavailable": "pass_through",
+      "streaming": "bypass",
+      "expose_metrics_headers": false
+    }
+  }'
+```
+
+首版支持非流式 OpenAI Responses 与 Anthropic Messages。Kong 为冻结版本的
+Responses transport 注入扁平 `headroom_retrieve` 定义，原文取回与 Provider 续调由
+Headroom 完成。OpenAI Chat 与 OpenAI-compatible Chat 固定以
+`unsupported_protocol` 旁路：Headroom 0.33.0 的 direct transport 会注入工具，但
+不会拦截返回的内部调用。Native Gemini、流式、不兼容的 `tool_choice`、过大/过短
+请求，以及无法安全重建路径的目标也按固定低基数 reason 旁路。请求一旦进入
+Headroom，Kong-Rust 不再直连 Provider 重试，因为 Headroom 可能已经调用 Provider，
+重放会造成重复成本或副作用。
+
+所有客户端提供的 `x-headroom-*` 请求头都会移除。目标 base URL/path 仅由服务端
+生成，调用方不能重定向携带凭据的流量，也不能自行开关压缩/CCR。`GET /status`
+仅公开脱敏的配置能力（`configured`/`unavailable`、backend、支持协议、CCR、
+streaming 与 store scope），不会公开 Headroom URL，也不是逐请求健康探测。
+
+---
+
 ## 4. Admin API 参考
 
 所有 AI Gateway 专属端点均以 `/ai-` 前缀开头，基础路径为 Admin API 地址（默认 `http://localhost:8001`）。
@@ -720,13 +773,14 @@ curl -X POST http://localhost:8000/v1/messages \
 
 ## 7. 插件组合示例
 
-下面展示一个完整的生产级配置，将全部 4 个 AI 插件组合使用。
+下面展示一组生产配置，将代理策略链与可选的 Headroom 上下文压缩组合使用。
 
 ### 目标
 
 - **ai-prompt-guard**：屏蔽敏感词，限制消息长度（安全第一）
 - **ai-cache**：对相同问题缓存 5 分钟（降低成本）
 - **ai-rate-limit**：每个 Consumer 每分钟最多 60 次请求、6 万 Token（配额管理）
+- **ai-context-compression**：通过透明 CCR 压缩较长的非流式上下文
 - **ai-proxy**：路由到 OpenAI gpt-4o（核心代理）
 
 ### 步骤
@@ -796,7 +850,22 @@ curl -X POST http://localhost:8001/plugins \
   }'
 ```
 
-**第五步**：挂载 ai-proxy（优先级 770，最后执行）
+**第五步**：挂载 ai-context-compression（优先级 770）
+
+```bash
+curl -X POST http://localhost:8001/plugins \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ai-context-compression",
+    "route": {"name": "ai-full-stack"},
+    "config": {
+      "min_input_tokens": 2000,
+      "on_unavailable": "pass_through"
+    }
+  }'
+```
+
+**第六步**：挂载 ai-proxy（优先级 769，最后执行）
 
 ```bash
 curl -X POST http://localhost:8001/plugins \
@@ -826,10 +895,11 @@ curl -X POST http://localhost:8001/plugins \
   → ai-prompt-guard (773): 内容安全检查 → 违规则 400 返回
   → ai-cache (772):        缓存键计算，命中则直接返回缓存
   → ai-rate-limit (771):   RPM/TPM 检查 → 超限则 429 返回
-  → ai-proxy (770):        转换协议，发往 OpenAI，返回结果
+  → ai-context-compression (770): 保存策略；ai-proxy 选定 Provider 后应用
+  → ai-proxy (769):        转换协议，经 Headroom 或直连 Provider
   → ai-cache (772) log:    缓存回写（Redis 集成后生效）
   → ai-rate-limit (771) log: TPM 预扣修正
-  → ai-proxy (770) log:    写入 token 统计日志
+  → ai-proxy (769) log:    写入 token 统计日志
 ```
 
 ---
@@ -1537,3 +1607,122 @@ Elasticsearch/OpenSearch、ClickHouse 或 Kafka usage/log backend；外部
 analytics、retention 和迁移由 REQ-AI-013 交付。预算账本必须继续使用满足原子
 事务、幂等、审计和 reconciliation 的强一致 Store，不能用 Redis 或 ES 直接
 替代。
+
+---
+
+## 13. Headroom 上下文压缩与 CCR 部署
+
+### 13.1 冻结的上游与镜像
+
+本接入契约冻结到 Apache-2.0 上游 commit
+`6d5516dcb878b6ffd139a1c7b3d480a1c8c1beb9`（源码版本 `0.33.0`）。2026-08-01
+解析到与该 commit 一致的官方 non-root 多架构 OCI index 为：
+
+```text
+ghcr.io/headroomlabs-ai/headroom@sha256:800a7ead087a791d54b7253c6cd5f98e5964f20fcde42872838f987244e090cc
+```
+
+镜像 OCI revision label 与上述完整 commit 相同。生产身份必须使用 digest，不能使用
+可变 tag。请先把该 digest 镜像同步到部署 registry，保留 Apache-2.0 LICENSE/NOTICE，
+按组织发布策略校验 provenance/attestation、生成 SBOM 并扫描后再晋级。
+
+2026-08-02 对上述精确 digest 的验收扫描发现 1 个 Critical 和 2 个 High
+的 Debian `perl 5.40.1-6` 未修复漏洞，因此当前禁止生产晋级，除非新
+digest 通过同等验收，或安全负责人完成可达性分析并签署限时风险接受。
+镜像内嵌 CycloneDX 1.5 SBOM（405 个 components），SHA-256 为
+`4e6b9d60b216b145a46b783d122763a05dbde23d89fc0c66633d911d09cde4d6`。完整扫描、
+负载数据和已知限制见 [REQ-AI-014 验收报告](pm/REQ-AI-014/acceptance.md)。
+
+### 13.2 单节点 sidecar 基线
+
+Kong-Rust 与 Headroom 应位于不暴露 Headroom 公网端口或 Service 的专用私有容器
+网络，并为 `/home/nonroot/.headroom` 提供可写的加密卷：
+
+```bash
+docker run -d --name headroom --restart unless-stopped \
+  --network kong-ai-internal \
+  -v headroom-ccr:/home/nonroot/.headroom \
+  -e HEADROOM_CCR_BACKEND=sqlite \
+  -e HEADROOM_CCR_SQLITE_PATH=/home/nonroot/.headroom/ccr_store.db \
+  -e HEADROOM_CCR_TTL_SECONDS=1800 \
+  -e HEADROOM_LOG_MESSAGES=0 \
+  -e HEADROOM_SKIP_UPSTREAM_CHECK=1 \
+  -e HEADROOM_RETRY_MAX_ATTEMPTS=1 \
+  ghcr.io/headroomlabs-ai/headroom@sha256:800a7ead087a791d54b7253c6cd5f98e5964f20fcde42872838f987244e090cc \
+  --host 0.0.0.0 --port 8787 --mode token --no-cache --no-rate-limit
+```
+
+`HEADROOM_RETRY_MAX_ATTEMPTS=1` 是禁止重复派发契约的一部分：Headroom 可能已经
+调用 Provider 后，两层都不能隐式重试 Provider。
+`HEADROOM_SKIP_UPSTREAM_CHECK=1` 是刻意设置：Kong 每请求提供服务端选定的动态
+Provider origin，Headroom 没有唯一静态 Provider 可探测。Kong 仍在派发前请求官方
+`/readyz`。保持 `HEADROOM_NO_CCR` 未设置；设置它会关闭可逆取回。必须显式使用上述
+CLI 开关，因为冻结版本的 Click 入口不会读取 `HEADROOM_CACHE_ENABLED` 或
+`HEADROOM_RATE_LIMIT_ENABLED`。该拓扑不要启用 Headroom response cache、rate
+limit、budget、memory、learn 或完整消息日志，因为这些治理能力由 Kong-Rust 负责。
+`--mode token` 是本 CCR contract 已验证的 token 节省档位；改用 cache mode 属于独立
+发布决策，必须按实际负载重新评测。
+本地 128k 稳态验收中，Kong + Headroom 在 4 并发下约为 4.04 QPS、
+p95 1.325s；sidecar 约占 0.84 CPU core，RSS 观测到 388–444 MiB。这只是
+单机实验基线，生产必须按实际语料压测、设置 CPU/内存 limit 和饱和告警，
+不能按 Kong 直连容量估算 sidecar。
+
+本冻结接入禁止设置 `HEADROOM_PROXY_TOKEN`。Headroom 0.33.0 会先读取请求的
+`Authorization`，再读取 `x-headroom-proxy-token`；OpenAI Provider 的 Bearer 凭据
+会因此被误判为 sidecar token，所有请求返回 401。应通过同 Pod loopback、专用网络加
+NetworkPolicy/防火墙，或保持 Provider 请求头的 mTLS service mesh 策略保护该跳转。
+sidecar 绝不能被公网或租户直接访问。
+
+配置 Kong-Rust 后重启网关进程：
+
+```ini
+ai_context_compression_headroom_url = http://headroom:8787
+ai_context_compression_health_timeout_ms = 200
+ai_context_compression_health_ttl_ms = 1000
+ai_context_compression_store_scope = local
+```
+
+启用 Route 插件前检查 sidecar 与 Admin 脱敏能力：
+
+```bash
+curl -fsS http://headroom:8787/readyz
+curl -fsS http://localhost:8001/status | jq .ai_context_compression
+```
+
+Admin status 只反映配置；请求日志和可选的稳定响应头才是运行时
+`applied`、`bypassed`、`degraded` 的证据。
+
+### 13.3 CCR 存储与水平扩展
+
+SQLite 可跨重启，并可由共享同一文件的 worker 使用，但能力范围仍只是本节点。此处
+默认 TTL 为 1800 秒，应用文档不得承诺超过该时间仍可取回。卷内可能包含原始提示词
+或工具结果，应限制为 UID 1000 访问、静态加密，并从普通日志和备份中排除（除非有
+明确审批），同时验证过期清理。
+
+即使请求配置 `ai_context_compression_store_scope=cluster`，Kong-Rust 也会保守报告
+`store_scope=local`。多 Pod 只有安装共享 Headroom CCR backend（或验证过的会话
+粘滞）、进行 tenant prefix 隔离，并通过跨节点 compress/retrieve 与重启 contract
+test 后，才能声明集群可取回。最终一致的分析/日志存储不能承担 CCR 或预算决策。
+
+### 13.4 升级、回滚与故障排查
+
+- 新 digest 晋级前，必须通过非流式 Responses/Messages、业务 tools 与
+  `headroom_retrieve` 共存、response continuation、内部头清理、失败策略，以及冻结
+  语料的质量/成本评测。只有真实 direct transport 测试证明内部 retrieve 调用被拦截
+  并续调后，才能重新启用 Chat。
+- 替换 sidecar 前先排空旧请求。兼容回滚时保留加密 CCR 卷；删除卷会让已有 marker
+  无法取回。
+- 持续出现 `backend_unhealthy`，通常是 `/readyz` 非 200、私有网络无法访问 8787，
+  或 200 ms 超时不适合当前部署。
+- `backend_not_configured` 表示 Kong URL 为空/非法；`streaming`、
+  `below_threshold`、`body_too_large`、`unsupported_protocol`、
+  `tool_choice_unsupported` 与 `unsupported_path` 是预期旁路。
+- 业务响应成功但出现 `compression_failed` 表示 Headroom 内部降级；不要重放
+  Provider 请求。客户端不应看到任何内部 `x-headroom-*` 响应头。
+- 无 `Content-Length` 的 chunked 请求 body 超过 64 KiB 时会显式失败；
+  已知长度的大 body 可完整通过。入口应规范化 `Content-Length`，不要把
+  未完整 body 降级为 Provider 请求。
+- 若观测到 sidecar 在离线 eval 或长时运行后 RSS/空闲 CPU 异常上升，应先摘流、
+  保留诊断证据并重建 sidecar，不应在资源无上限时继续放量。
+- 立即回滚可禁用/删除 `ai-context-compression`；使用
+  `on_unavailable=pass_through` 时，停止 Headroom 也会在派发前保留直通流量。

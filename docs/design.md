@@ -1137,11 +1137,37 @@ Token usage 优先采用 provider 响应值。选定 provider/model 后，`Token
 | 773 | `ai-prompt-guard` | `access`：检查 user 消息长度、deny/allow 正则；可阻断或仅记录 |
 | 772 | `ai-cache` | `access`：处理 skip header，按最后一条或全部 user 消息计算 SHA-256 cache key；`log` 当前不写缓存 |
 | 771 | `ai-rate-limit` | `access`：通过异步 `RateLimitStore` 联合预扣 RPM/TPM；`virtual_key` 模式读取已认证 key 自身额度并先检查权威预算状态；`header_filter` 注入 quota snapshot |
-| 770 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；预算启用时冻结 pricing snapshot；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
+| 770 | `ai-context-compression` | `access`：保存 Route 级压缩策略；`header_filter/log`：采集并脱敏 Headroom/CCR 结果，不处理正文 |
+| 769 | `ai-proxy` | `access`：解析、选模、转换并覆写 Pingora 上游；选定 Provider 后按策略通过 Headroom adapter 或直连；预算启用时冻结 pricing snapshot；`header_filter`：识别流式响应；`body_filter`：转换完整 JSON 或逐事件转换 SSE；`log`：注入 AI 日志字段 |
 
 插件间通过 `RequestCtx.extensions` 传递类型化的 `AiAuthContext`、
-`AiRequestState`、限流上下文和缓存上下文。`AiRequestState` 保存 driver、
+`ContextCompressionContext`、`AiRequestState`、限流上下文和缓存上下文。
+`AiRequestState` 保存 driver、
 model/provider、协议模式、SSE parser、usage、响应缓冲和计时状态。
+
+上下文压缩采用可替换 `ContextCompressionBackend` trait；首版
+`HeadroomProxyAdapter` 只接收 Kong 已解析的 Provider target，通过官方
+Headroom proxy 完成压缩、CCR store、`headroom_retrieve` 拦截和 continuation。
+冻结的 0.33.0 契约首版只为非流式 OpenAI Responses 与 Anthropic Messages 声明
+透明 CCR；Kong 为 Responses 补入固定的扁平 retrieve tool。OpenAI Chat direct
+transport 因不能拦截内部 tool call 而以 `unsupported_protocol` 旁路。客户端
+`x-headroom-*` 头会被清理，Headroom URL 只来自进程配置；sidecar 依赖私有网络或
+mTLS 边界，不能使用会与 Provider `Authorization` 冲突的 Headroom proxy token。
+两个支持协议都保留 Provider-native body：Responses 只做确定性 retrieve tool
+覆盖/注入；Anthropic Messages 原生透传 tools、tool use/result、content parts 与
+metadata，不经内部 Chat 中间模型损失结构。
+流式、native Gemini、不兼容的 tool choice、阈值以下、过大或路径不安全的请求显式
+旁路；Headroom 派发前不可用可直通或 503，进入 sidecar 后不自动重放 Provider。
+部署契约同时固定 `HEADROOM_RETRY_MAX_ATTEMPTS=1`，防止 sidecar 在结果不确定时
+再次派发 Provider。
+原文在压缩前完成 guard、cache key 与 TPM/预算保守准入，Headroom token 统计只作为
+事后观测值。详细边界见
+`docs/pm/REQ-AI-014/design.md`。
+
+为支持长上下文，Pingora 对已知 `Content-Length` 的 body 完整预读，但只为
+最后 64 KiB 开启传输重试缓冲，避免把几 MiB 原文复制到重试内存。没有
+`Content-Length` 的 chunked body 超过 64 KiB 时返回显式 `ReadError`，不使用
+不完整 body 进行压缩或 Provider 转发。
 
 代理同时维护与插件无关的 `RequestLifecycle`，以单一 request ID、UTC 起点和单调
 时钟覆盖 Route/Service 快照、策略短路、上游尝试、上下游状态、transport error

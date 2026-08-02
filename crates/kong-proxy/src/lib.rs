@@ -194,6 +194,10 @@ pub struct KongProxy {
 }
 
 impl KongProxy {
+    // Pingora 0.8 的请求重试缓冲区固定为 64 KiB。access 阶段预读大请求时，
+    // 只捕获正文尾部作为代理循环的“有正文”触发器；真正转发的仍是下方保留的完整正文。
+    const PINGORA_RETRY_TRIGGER_BYTES: usize = 64 * 1024;
+
     pub fn new(
         routes: &[Route],
         router_flavor: &str,
@@ -800,30 +804,57 @@ impl KongProxy {
         plugin_ctx: &mut RequestCtx,
         request_body_buf: &mut Option<SpillableBuffer>,
     ) -> pingora_core::Result<()> {
-        let has_request_body = session
+        let content_length = session
             .req_header()
             .headers
             .get("content-length")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .map(|len| len > 0)
-            .unwrap_or_else(|| {
-                session
-                    .req_header()
-                    .headers
-                    .contains_key("transfer-encoding")
-            });
+            .and_then(|value| value.parse::<usize>().ok());
+        let has_request_body = content_length.map(|len| len > 0).unwrap_or_else(|| {
+            session
+                .req_header()
+                .headers
+                .contains_key("transfer-encoding")
+        });
 
         if !has_request_body {
             return Ok(());
         }
 
-        // Let Pingora reuse the captured downstream body when it opens the upstream request. — 让 Pingora 在建立上游请求时复用已经捕获的下游请求体。
-        session.as_mut().enable_retry_buffering();
-
         let mut body_buf = request_body_buf.take().unwrap_or_else(SpillableBuffer::new);
-        while let Some(chunk) = session.read_request_body().await? {
+        let mut bytes_read = 0usize;
+        let mut retry_capture_enabled = false;
+        if content_length.is_none() {
+            session.as_mut().enable_retry_buffering();
+            retry_capture_enabled = true;
+        }
+        loop {
+            // Pingora 在代理循环启动时只会为非空且未截断的 retry buffer 调用
+            // request_body_filter。已知 Content-Length 时延后到最后 64 KiB 才开启，
+            // 避免大请求令固定缓冲区截断后整段正文被跳过。
+            if !retry_capture_enabled
+                && content_length.is_some_and(|length| {
+                    length.saturating_sub(bytes_read) <= Self::PINGORA_RETRY_TRIGGER_BYTES
+                })
+            {
+                session.as_mut().enable_retry_buffering();
+                retry_capture_enabled = true;
+            }
+
+            let Some(chunk) = session.read_request_body().await? else {
+                break;
+            };
+            bytes_read = bytes_read.saturating_add(chunk.len());
             body_buf.extend(&chunk);
+        }
+
+        // 无 Content-Length 的小型 chunked 请求沿用 Pingora 的 retry buffer；大型
+        // chunked 正文无法在 Pingora 0.8 中安全回放，明确报错，避免仅发送请求头后挂起。
+        if content_length.is_none() && session.as_ref().retry_buffer_truncated() {
+            return Err(pingora_core::Error::explain(
+                pingora_core::ErrorType::ReadError,
+                "chunked request body cannot be replayed after access-phase buffering",
+            ));
         }
 
         let body_bytes = body_buf.finish();

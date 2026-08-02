@@ -18,8 +18,8 @@ use super::model::{
     AggregateMetrics, AiUsageBreakdown, AiUsageError, AiUsageFact, AiUsageListQuery, AiUsageMeta,
     AiUsageMode, AiUsageOffset, AiUsagePage, AiUsageRecord, AiUsageResult, AiUsageSnapshot,
     AiUsageSummary, AiUsageSummaryQuery, BatchWriteResult, BreakdownItem, BreakdownType,
-    CostStatusCounts, DimensionRef, OutcomeCounts, PriceSnapshot, PricingStatusCounts,
-    SummaryOrder, TokenAggregate, TokenField,
+    ContextCompressionAggregate, ContextCompressionUsage, CostStatusCounts, DimensionRef,
+    OutcomeCounts, PriceSnapshot, PricingStatusCounts, SummaryOrder, TokenAggregate, TokenField,
 };
 use super::store::{AiUsageStore, TimeBucketPlan};
 
@@ -101,11 +101,15 @@ impl AiUsageStore for PgAiUsageStore {
                  output_price_effective_to, pricing_status, pricing_unsupported_reasons, \
                  cost_usd, cost_status, cost_unavailable_reasons, status_code, \
                  upstream_status_code, outcome, e2e_ms, ttft_ms, upstream_attempted, stream, \
-                 cache_status) ",
+                 cache_status, context_compression_status, context_compression_reason, \
+                 context_compression_backend, context_compression_ccr, \
+                 context_compression_tokens_before, context_compression_tokens_after, \
+                 context_compression_tokens_saved, context_compression_hop_latency_ms) ",
             );
             query.push_values(rows, |mut values, fact| {
                 let input = fact.input_price.as_ref();
                 let output = fact.output_price.as_ref();
+                let compression = fact.context_compression.as_ref();
                 values
                     .push_bind(fact.id)
                     .push_bind(&fact.request_id)
@@ -164,7 +168,15 @@ impl AiUsageStore for PgAiUsageStore {
                     .push_bind(fact.ttft_ms)
                     .push_bind(fact.upstream_attempted)
                     .push_bind(fact.stream)
-                    .push_bind(fact.cache_status.as_str());
+                    .push_bind(fact.cache_status.as_str())
+                    .push_bind(compression.map(|value| value.status.as_str()))
+                    .push_bind(compression.map(|value| value.reason.as_str()))
+                    .push_bind(compression.and_then(|value| value.backend.as_deref()))
+                    .push_bind(compression.map(|value| value.ccr))
+                    .push_bind(compression.and_then(|value| value.tokens_before))
+                    .push_bind(compression.and_then(|value| value.tokens_after))
+                    .push_bind(compression.and_then(|value| value.tokens_saved))
+                    .push_bind(compression.and_then(|value| value.hop_latency_ms));
             });
             query.push(" ON CONFLICT (request_id) DO NOTHING");
             let inserted = query
@@ -590,7 +602,31 @@ ROUND(AVG(e2e_ms)::numeric, 3)::text AS avg_e2e_ms, \
 ROUND((percentile_cont(0.95) WITHIN GROUP (ORDER BY e2e_ms))::numeric, 3)::text \
 AS p95_e2e_ms, \
 ROUND(AVG(ttft_ms)::numeric, 3)::text AS avg_ttft_ms, \
-COUNT(*) FILTER (WHERE cache_status = 'hit')::bigint AS cache_hits";
+COUNT(*) FILTER (WHERE cache_status = 'hit')::bigint AS cache_hits, \
+COUNT(*) FILTER (WHERE context_compression_status = 'applied')::bigint \
+AS compression_applied_requests, \
+COUNT(*) FILTER (WHERE context_compression_status = 'bypassed')::bigint \
+AS compression_bypassed_requests, \
+COUNT(*) FILTER (WHERE context_compression_status = 'degraded')::bigint \
+AS compression_degraded_requests, \
+COUNT(*) FILTER (WHERE context_compression_status = 'rejected')::bigint \
+AS compression_rejected_requests, \
+COUNT(*) FILTER (WHERE context_compression_status = 'pending')::bigint \
+AS compression_pending_requests, \
+COUNT(*) FILTER (WHERE context_compression_status IS NULL)::bigint \
+AS compression_unknown_requests, \
+COUNT(context_compression_tokens_before)::bigint AS compression_metrics_known_requests, \
+COALESCE(SUM(context_compression_tokens_before), 0::numeric)::text \
+AS compression_tokens_before_sum, \
+COALESCE(SUM(context_compression_tokens_after), 0::numeric)::text \
+AS compression_tokens_after_sum, \
+COALESCE(SUM(context_compression_tokens_saved), 0::numeric)::text \
+AS compression_tokens_saved_sum, \
+CASE WHEN COALESCE(SUM(context_compression_tokens_before), 0::numeric) = 0::numeric \
+THEN NULL ELSE ROUND( \
+SUM(context_compression_tokens_saved)::numeric / \
+SUM(context_compression_tokens_before)::numeric, 6)::text \
+END AS compression_weighted_ratio";
 
 const AGGREGATE_COLUMNS: &str = "\
 requests, outcome_success, outcome_gateway_rejected, outcome_gateway_error, \
@@ -600,7 +636,12 @@ completion_known_requests, total_known_sum, total_known_requests, attempted_requ
 cost_usd_calculable_sum, pricing_matched, pricing_unmatched, pricing_unsupported, \
 pricing_not_applicable, cost_calculated, cost_estimated, cost_not_incurred, \
 cost_unavailable, estimated_usage_ratio, pricing_coverage, \
-cost_calculable_coverage, avg_e2e_ms, p95_e2e_ms, avg_ttft_ms, cache_hits";
+cost_calculable_coverage, avg_e2e_ms, p95_e2e_ms, avg_ttft_ms, cache_hits, \
+compression_applied_requests, compression_bypassed_requests, \
+compression_degraded_requests, compression_rejected_requests, \
+compression_pending_requests, compression_unknown_requests, \
+compression_metrics_known_requests, compression_tokens_before_sum, \
+compression_tokens_after_sum, compression_tokens_saved_sum, compression_weighted_ratio";
 
 #[derive(FromRow)]
 struct AggregateSqlRow {
@@ -634,6 +675,17 @@ struct AggregateSqlRow {
     p95_e2e_ms: Option<String>,
     avg_ttft_ms: Option<String>,
     cache_hits: i64,
+    compression_applied_requests: i64,
+    compression_bypassed_requests: i64,
+    compression_degraded_requests: i64,
+    compression_rejected_requests: i64,
+    compression_pending_requests: i64,
+    compression_unknown_requests: i64,
+    compression_metrics_known_requests: i64,
+    compression_tokens_before_sum: String,
+    compression_tokens_after_sum: String,
+    compression_tokens_saved_sum: String,
+    compression_weighted_ratio: Option<String>,
 }
 
 impl AggregateSqlRow {
@@ -740,6 +792,53 @@ impl AggregateSqlRow {
             p95_e2e_ms: sql_optional_fixed_decimal(self.p95_e2e_ms.as_deref(), 3, "p95_e2e_ms")?,
             avg_ttft_ms: sql_optional_fixed_decimal(self.avg_ttft_ms.as_deref(), 3, "avg_ttft_ms")?,
             cache_hits: sql_count(self.cache_hits, "cache_hits")?,
+            context_compression: ContextCompressionAggregate {
+                applied_requests: sql_count(
+                    self.compression_applied_requests,
+                    "context_compression.applied_requests",
+                )?,
+                bypassed_requests: sql_count(
+                    self.compression_bypassed_requests,
+                    "context_compression.bypassed_requests",
+                )?,
+                degraded_requests: sql_count(
+                    self.compression_degraded_requests,
+                    "context_compression.degraded_requests",
+                )?,
+                rejected_requests: sql_count(
+                    self.compression_rejected_requests,
+                    "context_compression.rejected_requests",
+                )?,
+                pending_requests: sql_count(
+                    self.compression_pending_requests,
+                    "context_compression.pending_requests",
+                )?,
+                unknown_requests: sql_count(
+                    self.compression_unknown_requests,
+                    "context_compression.unknown_requests",
+                )?,
+                metrics_known_requests: sql_count(
+                    self.compression_metrics_known_requests,
+                    "context_compression.metrics_known_requests",
+                )?,
+                tokens_before_sum: sql_integer(
+                    &self.compression_tokens_before_sum,
+                    "context_compression.tokens_before_sum",
+                )?,
+                tokens_after_sum: sql_integer(
+                    &self.compression_tokens_after_sum,
+                    "context_compression.tokens_after_sum",
+                )?,
+                tokens_saved_sum: sql_integer(
+                    &self.compression_tokens_saved_sum,
+                    "context_compression.tokens_saved_sum",
+                )?,
+                weighted_compression_ratio: sql_optional_fixed_decimal(
+                    self.compression_weighted_ratio.as_deref(),
+                    6,
+                    "context_compression.weighted_compression_ratio",
+                )?,
+            },
         })
     }
 }
@@ -1004,7 +1103,10 @@ output_price_per_million, output_price_source, output_price_version, \
 output_price_snapshot_date, output_price_effective_from, output_price_effective_to, \
 pricing_status, pricing_unsupported_reasons, cost_usd, cost_status, \
 cost_unavailable_reasons, status_code, upstream_status_code, outcome, e2e_ms, ttft_ms, \
-upstream_attempted, stream, cache_status";
+upstream_attempted, stream, cache_status, context_compression_status, \
+context_compression_reason, context_compression_backend, context_compression_ccr, \
+context_compression_tokens_before, context_compression_tokens_after, \
+context_compression_tokens_saved, context_compression_hop_latency_ms";
 
 #[derive(FromRow)]
 struct UsageRow {
@@ -1068,10 +1170,28 @@ struct UsageRow {
     upstream_attempted: bool,
     stream: Option<bool>,
     cache_status: String,
+    context_compression_status: Option<String>,
+    context_compression_reason: Option<String>,
+    context_compression_backend: Option<String>,
+    context_compression_ccr: Option<bool>,
+    context_compression_tokens_before: Option<i64>,
+    context_compression_tokens_after: Option<i64>,
+    context_compression_tokens_saved: Option<i64>,
+    context_compression_hop_latency_ms: Option<i64>,
 }
 
 impl UsageRow {
     fn into_fact(self) -> AiUsageResult<AiUsageFact> {
+        let context_compression = context_compression_usage(
+            self.context_compression_status,
+            self.context_compression_reason,
+            self.context_compression_backend,
+            self.context_compression_ccr,
+            self.context_compression_tokens_before,
+            self.context_compression_tokens_after,
+            self.context_compression_tokens_saved,
+            self.context_compression_hop_latency_ms,
+        )?;
         Ok(AiUsageFact {
             id: self.id,
             ingest_seq: Some(self.ingest_seq),
@@ -1135,7 +1255,63 @@ impl UsageRow {
             upstream_attempted: self.upstream_attempted,
             stream: self.stream,
             cache_status: parse_enum(&self.cache_status, "cache_status")?,
+            context_compression,
         })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn context_compression_usage(
+    status: Option<String>,
+    reason: Option<String>,
+    backend: Option<String>,
+    ccr: Option<bool>,
+    tokens_before: Option<i64>,
+    tokens_after: Option<i64>,
+    tokens_saved: Option<i64>,
+    hop_latency_ms: Option<i64>,
+) -> AiUsageResult<Option<ContextCompressionUsage>> {
+    match (status, reason, ccr) {
+        (None, None, None)
+            if backend.is_none()
+                && tokens_before.is_none()
+                && tokens_after.is_none()
+                && tokens_saved.is_none()
+                && hop_latency_ms.is_none() =>
+        {
+            Ok(None)
+        }
+        (Some(status), Some(reason), Some(ccr)) => {
+            let token_bundle_valid = match (tokens_before, tokens_after, tokens_saved) {
+                (None, None, None) => true,
+                (Some(before), Some(after), Some(saved)) => {
+                    before >= 0
+                        && after >= 0
+                        && saved >= 0
+                        && after <= before
+                        && before.checked_sub(after) == Some(saved)
+                }
+                _ => false,
+            };
+            if !token_bundle_valid || hop_latency_ms.is_some_and(|value| value < 0) {
+                return Err(AiUsageError::Internal(
+                    "数据库 context compression 数值约束被破坏".to_string(),
+                ));
+            }
+            Ok(Some(ContextCompressionUsage {
+                status,
+                reason,
+                backend,
+                ccr,
+                tokens_before,
+                tokens_after,
+                tokens_saved,
+                hop_latency_ms,
+            }))
+        }
+        _ => Err(AiUsageError::Internal(
+            "数据库 context compression bundle 原子约束被破坏".to_string(),
+        )),
     }
 }
 
@@ -1289,6 +1465,7 @@ mod tests {
             upstream_attempted: true,
             stream: Some(false),
             cache_status: CacheStatus::Hit,
+            context_compression: None,
         }
     }
 
@@ -1346,6 +1523,7 @@ mod tests {
             upstream_attempted: false,
             stream: None,
             cache_status: CacheStatus::NotConfigured,
+            context_compression: None,
         }
     }
 
@@ -1391,32 +1569,54 @@ mod tests {
         let first_request_id = Uuid::new_v4().simple().to_string();
         let second_request_id = Uuid::new_v4().simple().to_string();
         let rejected_request_id = Uuid::new_v4().simple().to_string();
+        let mut first = attempted_fact(
+            &first_request_id,
+            workspace_id,
+            Some(first_provider),
+            "first",
+            now - Duration::minutes(20),
+            TokenFieldSource::Provider,
+            UsageSource::Provider,
+            CostStatus::Calculated,
+            Decimal::new(1, 3),
+            100,
+        );
+        first.context_compression = Some(ContextCompressionUsage {
+            status: "applied".to_string(),
+            reason: "applied".to_string(),
+            backend: Some("headroom".to_string()),
+            ccr: true,
+            tokens_before: Some(100),
+            tokens_after: Some(40),
+            tokens_saved: Some(60),
+            hop_latency_ms: Some(12),
+        });
+        let mut second = attempted_fact(
+            &second_request_id,
+            workspace_id,
+            None,
+            "second, provider",
+            now - Duration::minutes(10),
+            TokenFieldSource::Estimated,
+            UsageSource::Estimated,
+            CostStatus::Estimated,
+            Decimal::new(2, 3),
+            200,
+        );
+        second.context_compression = Some(ContextCompressionUsage {
+            status: "bypassed".to_string(),
+            reason: "below_threshold".to_string(),
+            backend: None,
+            ccr: false,
+            tokens_before: None,
+            tokens_after: None,
+            tokens_saved: None,
+            hop_latency_ms: None,
+        });
         store
             .insert_batch(&[
-                attempted_fact(
-                    &first_request_id,
-                    workspace_id,
-                    Some(first_provider),
-                    "first",
-                    now - Duration::minutes(20),
-                    TokenFieldSource::Provider,
-                    UsageSource::Provider,
-                    CostStatus::Calculated,
-                    Decimal::new(1, 3),
-                    100,
-                ),
-                attempted_fact(
-                    &second_request_id,
-                    workspace_id,
-                    None,
-                    "second, provider",
-                    now - Duration::minutes(10),
-                    TokenFieldSource::Estimated,
-                    UsageSource::Estimated,
-                    CostStatus::Estimated,
-                    Decimal::new(2, 3),
-                    200,
-                ),
+                first,
+                second,
                 rejected_fact(&rejected_request_id, workspace_id, now),
             ])
             .await
@@ -1445,6 +1645,18 @@ mod tests {
         assert_eq!(category.totals.prompt_tokens.unknown_requests, 0);
         assert_eq!(category.totals.cost_usd_calculable_sum, "0.003000000000");
         assert_eq!(category.totals.p95_e2e_ms.as_deref(), Some("190.000"));
+        assert_eq!(category.totals.context_compression.applied_requests, 1);
+        assert_eq!(category.totals.context_compression.bypassed_requests, 1);
+        assert_eq!(category.totals.context_compression.unknown_requests, 1);
+        assert_eq!(category.totals.context_compression.tokens_saved_sum, "60");
+        assert_eq!(
+            category
+                .totals
+                .context_compression
+                .weighted_compression_ratio
+                .as_deref(),
+            Some("0.600000")
+        );
         let category = category.breakdown.unwrap();
         let canonical =
             serde_json::to_vec(&("provider", [Some("second, provider"), Some("openai")])).unwrap();
@@ -1458,8 +1670,8 @@ mod tests {
 
         let time = store
             .summary(&AiUsageSummaryQuery {
-                filter,
-                snapshot,
+                filter: filter.clone(),
+                snapshot: snapshot.clone(),
                 breakdown: Some(BreakdownType::Hour),
                 timezone: Some("America/New_York".parse().unwrap()),
                 limit: None,
@@ -1476,6 +1688,21 @@ mod tests {
                 .sum::<u64>(),
             3
         );
+        let detail = store
+            .list(&AiUsageListQuery {
+                filter,
+                snapshot,
+                offset: None,
+                size: 10,
+            })
+            .await
+            .unwrap();
+        assert!(detail.data.iter().any(|record| {
+            record.request_id == first_request_id
+                && record.context_compression.as_ref().is_some_and(|value| {
+                    value.backend.as_deref() == Some("headroom") && value.tokens_saved == Some(60)
+                })
+        }));
         pool.close().await;
     }
 }

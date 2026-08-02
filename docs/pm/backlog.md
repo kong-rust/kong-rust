@@ -19,6 +19,7 @@
 | [REQ-AI-001](#req-ai-001) | Virtual Key 运行时认证 | P0 | ✅ 已完成 | M | 无 |
 | [REQ-AI-002](#req-ai-002) | Token 成本核算与用量事实表 | P0 | ✅ 已完成 | L | 无 |
 | [REQ-AI-003](#req-ai-003) | Virtual Key 配额与预算控制 | P0 | 🧪 主链路完成 / 发布验证中 | L | 001, 002 |
+| [REQ-AI-014](#req-ai-014) | 基于 Headroom 的上下文压缩与 CCR | **P0** | ✅ 功能验收 / ⛔ 生产晋级阻塞 | L | 无硬依赖 |
 | [REQ-AI-004](#req-ai-004) | AI 可观测性对齐（Prometheus + TTFT） | P1 | 📋 待启动 | S | 无 |
 | [REQ-AI-005](#req-ai-005) | 模型健康回报与故障重试 | P1 | 📋 待启动 | M | 无 |
 | [REQ-AI-006](#req-ai-006) | AI 策略插件 schema 补全与 Manager 表单 | P1 | 📋 待启动 | S | 003 |
@@ -33,6 +34,8 @@
 **里程碑规划：**
 
 - **M1 — Key 治理与成本闭环**（Phase 2b 真正完成）：REQ-AI-001 → 002 → 003，穿插 quick win 004 / 005。交付后 Virtual Key 从「管理面记录」变为具备明确 local 能力边界的单节点 enforcement，摘掉前端警告 banner。
+- **M1C — 上下文成本优化**：REQ-AI-014。用户已明确把本需求提升为当前 P0 并
+  授权先行启动；REQ-AI-003 剩余发布档位验证仍保留，但不混入本需求变更集。
 - **M1E — AI 配额与用量存储规模化**：REQ-AI-009 + 013。完成后仅表示 RPM/TPM 具备多副本 Redis 配额、usage/log 具备外部存储能力；不代表 Hybrid、预算账本或整个数据面已经完成水平扩展。
 - **M2 — 策略插件功能与配置闭环**：REQ-AI-006 → 007 → 010。多副本配额与外部用量存储能力仍以 M1E 为准。
 - **M3 — 进阶与新子网关**：REQ-AI-008、011、012。
@@ -444,6 +447,38 @@ REQ-AI-002 当前把 usage fact 写入未分区、无 retention 的 PostgreSQL
 6. sink 与 query backend 使用不同实现的组合通过 contract test；状态/API 分别
    返回部署模式、durability 和 backend ID，切换前生成的 cursor 按版本化规则
    继续可用或返回确定性失效错误
+
+---
+
+## REQ-AI-014
+
+### 基于 Headroom 的上下文压缩与 CCR（Headroom-based Context Compression with CCR）
+
+- **优先级 / Effort：** **P0** / L
+- **状态：** ✅ 功能验收通过（2026-08-02）；⛔ 生产晋级受固定镜像漏洞阻塞
+- **依赖：** 功能上无硬依赖；用户已授权先行启动，不混入 REQ-AI-003 代码
+- **📄 需求分析：** [REQ-AI-014/analysis.md](REQ-AI-014/analysis.md)
+  （8 组 FR、14 条验收标准、10 项已定稿决策）
+- **📄 方案设计：** [REQ-AI-014/design.md](REQ-AI-014/design.md)
+- **✅ 验收报告：** [REQ-AI-014/acceptance.md](REQ-AI-014/acceptance.md)
+- **📝 实现记录：**
+  [req-ai-014_2026-08-01_headroom-context-compression.md](../implementation-logs/req-ai-014_2026-08-01_headroom-context-compression.md)
+- **上游基线：** [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom)
+  commit `6d5516dcb878b6ffd139a1c7b3d480a1c8c1beb9` / source `0.33.0`
+  （Apache-2.0）
+
+**摘要**：新增 route-scoped `ai-context-compression` 原生插件，以受控 adapter 把
+官方 Headroom proxy 作为 Kong-Rust 与已选 Provider 之间的内层传输跳点，在非流式
+OpenAI Responses 和 Anthropic Messages 上交付真实 Compress-Cache-Retrieve 循环。
+冻结版本的 OpenAI/OpenAI-compatible Chat transport 不会透明续接 retrieve tool call，
+因此固定以 `unsupported_protocol` 旁路。Kong-Rust 继续拥有认证、安全、缓存键、
+Provider/Model 选择、配额、预算、协议转换和日志；所有客户端 `x-headroom-*` 控制头
+必须剥离。streaming 和 native Gemini 同样固定旁路；TPM/模型窗口按原文保守准入，
+Provider usage 按实际压缩后用量结算。
+
+功能、真实 CCR、质量、负载、故障与管理面验收已完成。固定镜像扫描发现
+1 个 Critical 和 2 个 High 的未修复基础镜像漏洞；在新 digest 通过同等验收
+或正式风险接受前，功能保持 opt-in，不得生产默认开启。
 
 ---
 

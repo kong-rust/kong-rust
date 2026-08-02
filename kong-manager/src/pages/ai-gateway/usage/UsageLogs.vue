@@ -168,6 +168,22 @@
                     / {{ localizedValue(log.usage.completion_source) }}
                     / {{ localizedValue(log.usage.total_source) }}
                   </small>
+                  <div
+                    v-if="log.context_compression"
+                    class="ai-usage-inline-badges"
+                  >
+                    <UsageStatusBadge :value="log.context_compression.status" />
+                  </div>
+                  <small
+                    v-if="log.context_compression?.tokens_saved !== null
+                      && log.context_compression?.tokens_saved !== undefined"
+                  >
+                    {{
+                      t('aiUsage.logs.contextCompressionSaved', {
+                        tokens: formatIntegerString(log.context_compression.tokens_saved),
+                      })
+                    }}
+                  </small>
                 </td>
                 <td>
                   <strong>{{ formatUsd(log.cost.usd) }}</strong>
@@ -357,6 +373,44 @@
             <DetailRow
               :label="t('aiUsage.fields.reasons')"
               :value="compactReasons(selectedLog.usage.unavailable_reasons)"
+            />
+          </DetailGroup>
+
+          <DetailGroup
+            v-if="selectedLog.context_compression"
+            :title="t('aiUsage.detail.contextCompression')"
+          >
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionStatus')"
+              :value="valueWithCode(selectedLog.context_compression.status)"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionReason')"
+              :value="valueWithCode(selectedLog.context_compression.reason)"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionBackend')"
+              :value="selectedLog.context_compression.backend || '—'"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionCcr')"
+              :value="valueWithCode(String(selectedLog.context_compression.ccr))"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionTokensBefore')"
+              :value="formatIntegerString(selectedLog.context_compression.tokens_before)"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionTokensAfter')"
+              :value="formatIntegerString(selectedLog.context_compression.tokens_after)"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionSavedTokens')"
+              :value="formatIntegerString(selectedLog.context_compression.tokens_saved)"
+            />
+            <DetailRow
+              :label="t('aiUsage.fields.contextCompressionHopLatency')"
+              :value="formatLatency(selectedLog.context_compression.hop_latency_ms)"
             />
           </DetailGroup>
 

@@ -10,12 +10,15 @@ use kong_plugin_system::{RequestLifecycleObserver, ResolvedPlugin};
 use uuid::Uuid;
 
 use crate::auth::AiAuthContext;
+use crate::context_compression::observe_context_compression;
 use crate::models::{AiModel, AiProviderConfig};
+use crate::plugins::ai_context_compression::ContextCompressionContext;
 use crate::plugins::context::AiRequestState;
 
 use super::cursor::normalize_millis;
 use super::model::{
-    AiUsageFact, AiUsageOutcome, CacheStatus, FrozenPricingSnapshot, PricingStatus,
+    AiUsageFact, AiUsageOutcome, CacheStatus, ContextCompressionUsage, FrozenPricingSnapshot,
+    PricingStatus,
 };
 use super::normalizer::{UsageAccumulator, UsageObservation};
 use super::pricing::{
@@ -368,6 +371,46 @@ impl AiUsageCollector {
                     .and_then(|duration| i64::try_from(duration.as_millis()).ok())
             })
             .flatten();
+        let context_compression =
+            ctx.extensions
+                .get::<ContextCompressionContext>()
+                .map(|compression| {
+                    let observed_tokens = match (
+                        compression.outcome.tokens_before,
+                        compression.outcome.tokens_after,
+                        compression.outcome.tokens_saved,
+                    ) {
+                        (Some(before), Some(after), Some(saved)) => Some((before, after, saved)),
+                        _ => None,
+                    };
+                    observe_context_compression(
+                        provider_type.as_deref().unwrap_or("unknown"),
+                        compression.outcome.status.as_str(),
+                        compression.outcome.reason.as_str(),
+                        observed_tokens,
+                        compression.outcome.hop_latency_ms,
+                    );
+                    let persisted_tokens = observed_tokens.and_then(|(before, after, saved)| {
+                        Some((
+                            i64::try_from(before).ok()?,
+                            i64::try_from(after).ok()?,
+                            i64::try_from(saved).ok()?,
+                        ))
+                    });
+                    ContextCompressionUsage {
+                        status: compression.outcome.status.as_str().to_string(),
+                        reason: compression.outcome.reason.as_str().to_string(),
+                        backend: compression.outcome.backend.map(str::to_string),
+                        ccr: compression.outcome.ccr,
+                        tokens_before: persisted_tokens.map(|tokens| tokens.0),
+                        tokens_after: persisted_tokens.map(|tokens| tokens.1),
+                        tokens_saved: persisted_tokens.map(|tokens| tokens.2),
+                        hop_latency_ms: compression
+                            .outcome
+                            .hop_latency_ms
+                            .and_then(|value| i64::try_from(value).ok()),
+                    }
+                });
         let fact = Arc::new(AiUsageFact {
             id: draft.fact_id,
             ingest_seq: None,
@@ -421,6 +464,7 @@ impl AiUsageCollector {
             upstream_attempted: ctx.lifecycle.upstream_attempted,
             stream,
             cache_status: draft.gateway_cache_status,
+            context_compression,
         });
         ctx.extensions.insert(Arc::clone(&fact));
         self.writer.try_enqueue(fact);

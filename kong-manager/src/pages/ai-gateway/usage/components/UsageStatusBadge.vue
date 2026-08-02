@@ -16,11 +16,17 @@ const props = defineProps<{
 const { t } = useI18n()
 
 const appearance = computed(() => {
-  if (['success', 'matched', 'calculated', 'hit'].includes(props.value)) {
+  if (['success', 'matched', 'calculated', 'hit', 'applied'].includes(props.value)) {
     return 'success' as const
   }
 
-  if (['gateway_rejected', 'estimated', 'not_incurred', 'not_applicable'].includes(props.value)) {
+  if ([
+    'gateway_rejected',
+    'estimated',
+    'not_incurred',
+    'not_applicable',
+    'bypassed',
+  ].includes(props.value)) {
     return 'warning' as const
   }
 
@@ -32,6 +38,8 @@ const appearance = computed(() => {
     'unmatched',
     'unsupported',
     'unavailable',
+    'degraded',
+    'rejected',
   ].includes(props.value)) {
     return 'danger' as const
   }

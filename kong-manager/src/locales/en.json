@@ -346,6 +346,16 @@
       "totalTokens": "Known total tokens",
       "estimatedRatio": "Estimated usage ratio",
       "pricingCoverage": "Pricing coverage",
+      "contextCompressionSavedTokens": "Context tokens saved",
+      "contextCompressionRatio": "Weighted compression ratio",
+      "contextCompressionBypassRatio": "Context compression bypass ratio",
+      "contextCompressionStatus": "Compression status",
+      "contextCompressionReason": "Compression reason",
+      "contextCompressionBackend": "Compression backend",
+      "contextCompressionCcr": "Transparent CCR",
+      "contextCompressionTokensBefore": "Tokens before compression",
+      "contextCompressionTokensAfter": "Tokens after compression",
+      "contextCompressionHopLatency": "Headroom hop latency",
       "time": "Time",
       "coverage": "Coverage",
       "name": "Name",
@@ -390,7 +400,10 @@
       "successFailure": "{success} successful · {failed} failed",
       "knownCoverage": "{unknown} attempted calls unknown · {coverage} coverage",
       "estimatedHint": "Share of known usage that includes an estimate",
-      "unpriced": "{count} calls are unmatched or use unsupported pricing"
+      "unpriced": "{count} calls are unmatched or use unsupported pricing",
+      "contextCompressionKnown": "{count} requests include Headroom token metrics",
+      "contextCompressionTokenFlow": "{before} before · {after} after",
+      "contextCompressionBypassed": "{bypassed} of {total} evaluated requests bypassed"
     },
     "trend": {
       "title": "Usage trend",
@@ -424,7 +437,8 @@
       "body": "Metadata only; prompts, responses, headers, credentials, and raw keys are never stored here.",
       "snapshot": "Snapshot",
       "page": "Page {page}",
-      "detailEyebrow": "Request fact"
+      "detailEyebrow": "Request fact",
+      "contextCompressionSaved": "Headroom saved {tokens} tokens"
     },
     "detail": {
       "request": "Request",
@@ -432,6 +446,7 @@
       "ai": "Provider and model snapshots",
       "identity": "Identity snapshot",
       "usage": "Usage",
+      "contextCompression": "Context compression and CCR",
       "pricing": "Pricing and cost",
       "result": "Result"
     },
@@ -456,6 +471,11 @@
       "bypass": "Bypass",
       "miss": "Miss",
       "hit": "Hit",
+      "applied": "Applied",
+      "bypassed": "Bypassed",
+      "degraded": "Degraded",
+      "rejected": "Rejected",
+      "pending": "Pending",
       "builtin": "Built-in price",
       "override": "Custom override",
       "true": "Yes",

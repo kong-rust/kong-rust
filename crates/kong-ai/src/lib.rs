@@ -2,16 +2,17 @@
 //!
 //! 包含 AI Provider 抽象、协议编解码、Token 计数、限流器和 4 个 AI 插件
 
-pub mod models;
-pub mod dao;
 pub mod auth;
-pub mod provider;
-pub mod codec;
-pub mod enforcement;
 pub mod budget;
-pub mod token;
-pub mod ratelimit;
+pub mod codec;
+pub mod context_compression;
+pub mod dao;
+pub mod enforcement;
+pub mod models;
 pub mod plugins;
+pub mod provider;
+pub mod ratelimit;
+pub mod token;
 pub mod usage;
 
 /// 解析插件配置 JSON — 统一错误处理

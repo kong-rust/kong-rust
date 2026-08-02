@@ -579,6 +579,7 @@ mod tests {
             upstream_attempted: false,
             stream: None,
             cache_status: CacheStatus::NotConfigured,
+            context_compression: None,
         })
     }
 

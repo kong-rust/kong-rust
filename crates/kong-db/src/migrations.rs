@@ -52,6 +52,10 @@ const CORE_MIGRATIONS: &[Migration] = &[
         name: "008_ai_budget_overflow_idempotency",
         sql: include_str!("../migrations/core/008_ai_budget_overflow_idempotency.sql"),
     },
+    Migration {
+        name: "009_ai_context_compression_usage",
+        sql: include_str!("../migrations/core/009_ai_context_compression_usage.sql"),
+    },
 ];
 
 /// schema_meta subsystem identifier — schema_meta 的 subsystem 标识
@@ -389,7 +393,7 @@ mod tests {
     fn ai_virtual_key_budget_migration_is_registered_and_reset_in_dependency_order() {
         assert_eq!(
             CORE_MIGRATIONS.last().map(|migration| migration.name),
-            Some("008_ai_budget_overflow_idempotency")
+            Some("009_ai_context_compression_usage")
         );
 
         let positions = [
@@ -407,6 +411,29 @@ mod tests {
         });
 
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn ai_context_compression_usage_has_a_strict_forward_migration() {
+        let migration = CORE_MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == "009_ai_context_compression_usage")
+            .expect("context compression usage migration must be registered");
+
+        for fragment in [
+            "ADD COLUMN context_compression_status TEXT",
+            "ADD COLUMN context_compression_tokens_saved BIGINT",
+            "ai_usage_logs_context_compression_bundle_consistency",
+            "ai_usage_logs_context_compression_token_bundle",
+            "context_compression_tokens_before - context_compression_tokens_after",
+            "ai_usage_logs_context_compression_hop_latency_nonnegative",
+        ] {
+            assert!(
+                migration.sql.contains(fragment),
+                "missing migration fragment: {fragment}"
+            );
+        }
+        assert!(!migration.sql.contains("IF NOT EXISTS"));
     }
 
     #[test]
@@ -783,7 +810,7 @@ mod tests {
         let state = schema_state(pool)
             .await
             .map_err(|error| format!("读取升级后的 schema_meta 失败: {error}"))?;
-        if state.executed.last().map(String::as_str) != Some("008_ai_budget_overflow_idempotency")
+        if state.executed.last().map(String::as_str) != Some("009_ai_context_compression_usage")
             || !state.new_migrations.is_empty()
         {
             return Err(format!("升级后 migration 状态不正确: {state:?}"));

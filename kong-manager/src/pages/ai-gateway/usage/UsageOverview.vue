@@ -136,6 +136,52 @@
             }}
           </small>
         </KCard>
+
+        <template v-if="compressionVisible && compression">
+          <KCard class="ai-usage-kpi">
+            <span>{{ t('aiUsage.fields.contextCompressionSavedTokens') }}</span>
+            <strong>
+              {{
+                compression.metrics_known_requests
+                  ? formatIntegerString(compression.tokens_saved_sum)
+                  : '—'
+              }}
+            </strong>
+            <small>
+              {{
+                t('aiUsage.kpi.contextCompressionKnown', {
+                  count: compression.metrics_known_requests,
+                })
+              }}
+            </small>
+          </KCard>
+
+          <KCard class="ai-usage-kpi">
+            <span>{{ t('aiUsage.fields.contextCompressionRatio') }}</span>
+            <strong>{{ formatCoverage(compression.weighted_compression_ratio) }}</strong>
+            <small>
+              {{
+                t('aiUsage.kpi.contextCompressionTokenFlow', {
+                  before: formatIntegerString(compression.tokens_before_sum),
+                  after: formatIntegerString(compression.tokens_after_sum),
+                })
+              }}
+            </small>
+          </KCard>
+
+          <KCard class="ai-usage-kpi">
+            <span>{{ t('aiUsage.fields.contextCompressionBypassRatio') }}</span>
+            <strong>{{ formatCoverage(compressionBypassRatio) }}</strong>
+            <small>
+              {{
+                t('aiUsage.kpi.contextCompressionBypassed', {
+                  bypassed: compression.bypassed_requests,
+                  total: compressionEvaluatedRequests,
+                })
+              }}
+            </small>
+          </KCard>
+        </template>
       </div>
 
       <KCard class="ai-usage-panel">
@@ -295,6 +341,36 @@ const {
 } = props.controller
 
 const totals = computed(() => summary.value?.totals ?? null)
+const compression = computed(() => totals.value?.context_compression ?? null)
+const compressionEvaluatedRequests = computed(() => {
+  const value = compression.value
+  if (!value) {
+    return 0
+  }
+
+  return value.applied_requests
+    + value.bypassed_requests
+    + value.degraded_requests
+    + value.rejected_requests
+})
+const compressionVisible = computed(() => {
+  const value = compression.value
+
+  return Boolean(value && (
+    compressionEvaluatedRequests.value > 0
+    || value.pending_requests > 0
+    || value.metrics_known_requests > 0
+  ))
+})
+const compressionBypassRatio = computed(() => {
+  const value = compression.value
+  const total = compressionEvaluatedRequests.value
+  if (!value || total === 0) {
+    return null
+  }
+
+  return (value.bypassed_requests / total).toFixed(6)
+})
 
 const tokenCards = computed(() => {
   if (!totals.value) {

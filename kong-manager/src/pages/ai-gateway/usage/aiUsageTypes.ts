@@ -116,6 +116,17 @@ export interface AiUsageModelSnapshot {
   actual: string | null
 }
 
+export interface AiUsageContextCompression {
+  status: string
+  reason: string
+  backend: string | null
+  ccr: boolean
+  tokens_before: number | null
+  tokens_after: number | null
+  tokens_saved: number | null
+  hop_latency_ms: number | null
+}
+
 export interface AiUsagePriceDirection {
   usd_per_million: string
   source: 'builtin' | 'override' | string
@@ -178,6 +189,7 @@ export interface AiUsageFact {
     stream: boolean | null
     cache_status: AiCacheStatus
   }
+  context_compression: AiUsageContextCompression | null
 }
 
 export interface AiUsagePage {
@@ -218,6 +230,20 @@ export interface AiCostStatusCounts {
   unavailable: number
 }
 
+export interface AiUsageContextCompressionAggregate {
+  applied_requests: number
+  bypassed_requests: number
+  degraded_requests: number
+  rejected_requests: number
+  pending_requests: number
+  unknown_requests: number
+  metrics_known_requests: number
+  tokens_before_sum: string
+  tokens_after_sum: string
+  tokens_saved_sum: string
+  weighted_compression_ratio: string | null
+}
+
 export interface AiUsageAggregateMetrics {
   requests: number
   successful_requests: number
@@ -236,6 +262,7 @@ export interface AiUsageAggregateMetrics {
   p95_e2e_ms: string | null
   avg_ttft_ms: string | null
   cache_hits: number
+  context_compression?: AiUsageContextCompressionAggregate
 }
 
 export interface AiUsageBreakdownDimension {

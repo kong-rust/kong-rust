@@ -1505,6 +1505,7 @@ mod tests {
             upstream_attempted: true,
             stream: Some(false),
             cache_status: CacheStatus::NotConfigured,
+            context_compression: None,
         }
     }
 

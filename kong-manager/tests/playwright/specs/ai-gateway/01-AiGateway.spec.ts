@@ -34,6 +34,11 @@ interface KongEntity {
   config?: {
     model?: string
     model_group?: string
+    min_input_tokens?: number
+    max_input_bytes?: number
+    on_unavailable?: string
+    streaming?: string
+    expose_metrics_headers?: boolean
   }
 }
 
@@ -204,6 +209,8 @@ test.describe('AI Gateway manager', () => {
     await page.getByLabel('Service URL').fill(mockUpstreamEndpoint)
     await page.getByLabel('API key (optional)').fill('test-only-placeholder')
     await page.getByLabel('Model name').fill('pw-model')
+    await page.getByLabel('Enable Headroom context compression and CCR').check()
+    await page.getByLabel('Minimum input tokens').fill('0')
     await expect(page.getByText('Config JSON')).toHaveCount(0)
     await page.getByRole('button', { name: 'Publish Endpoint' }).click()
 
@@ -211,19 +218,28 @@ test.describe('AI Gateway manager', () => {
     await expect(endpointCard).toContainText('Running')
     await expect(endpointCard).toContainText('pw-model')
     await expect(endpointCard).toContainText('100%')
+    await expect(endpointCard).toContainText('Context compression: unavailable')
 
     const createdRoute = (await listEntities('routes'))
       .find(route => route.name === `ai-${endpointSlug}`)
     const createdService = (await listEntities('services'))
       .find(service => service.name === `ai-${endpointSlug}`)
     const createdPlugin = (await listEntities('plugins'))
-      .find(plugin => plugin.route?.id === createdRoute?.id)
+      .find(plugin => plugin.route?.id === createdRoute?.id && plugin.name === 'ai-proxy')
+    const contextCompressionPlugin = (await listEntities('plugins'))
+      .find(plugin => (
+        plugin.route?.id === createdRoute?.id
+        && plugin.name === 'ai-context-compression'
+      ))
     endpointOwnershipTag = createdService?.tags
       ?.find(tag => tag.startsWith('kr-ai-endpoint:')) ?? ''
 
     expect(createdService?.enabled).toBe(true)
     expect(createdRoute?.response_buffering).toBe(false)
     expect(createdPlugin?.enabled).toBe(true)
+    expect(contextCompressionPlugin?.enabled).toBe(true)
+    expect(contextCompressionPlugin?.config?.min_input_tokens).toBe(0)
+    expect(contextCompressionPlugin?.config?.streaming).toBe('bypass')
     expect(endpointOwnershipTag).not.toBe('')
 
     const endpointUrl = `http://127.0.0.1:8000/ai/${endpointSlug}/v1/chat/completions`
@@ -248,11 +264,16 @@ test.describe('AI Gateway manager', () => {
     await page.getByLabel('Endpoint name').fill(updatedEndpointName)
     await page.getByLabel('Path name').fill(updatedEndpointSlug)
     await page.getByLabel('Model name').fill('pw-model-v2')
+    await expect(page.getByLabel('Enable Headroom context compression and CCR')).toBeChecked()
+    await page.getByLabel('Maximum input bytes').fill('1048576')
     await page.getByRole('button', { name: 'Save changes' }).click()
 
     const updatedCard = page.getByRole('article').filter({ hasText: updatedEndpointName })
     await expect(updatedCard).toContainText('pw-model-v2')
     await expect(updatedCard).toContainText(`/ai/${updatedEndpointSlug}/v1/chat/completions`)
+    const updatedContextCompressionPlugin = (await listEntities('plugins'))
+      .find(plugin => plugin.id === contextCompressionPlugin?.id)
+    expect(updatedContextCompressionPlugin?.config?.max_input_bytes).toBe(1048576)
 
     await expect.poll(async () => {
       const oldPathResponse = await page.request.post(endpointUrl, {

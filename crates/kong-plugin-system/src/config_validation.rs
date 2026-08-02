@@ -9,6 +9,8 @@ use serde_json::{Map, Value};
 
 /// AI 配额字段允许的最大值。
 pub const AI_RATE_LIMIT_MAX_LIMIT: u64 = i32::MAX as u64;
+pub const AI_CONTEXT_COMPRESSION_MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+pub const AI_CONTEXT_COMPRESSION_DEFAULT_MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 单个插件配置校验错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,25 @@ pub fn apply_ai_rate_limit_config_defaults(config: &mut Map<String, Value>) {
         .or_insert_with(|| Value::String("AI rate limit exceeded".to_string()));
 }
 
+/// 为上下文压缩插件应用 schema 默认值。
+pub fn apply_ai_context_compression_config_defaults(config: &mut Map<String, Value>) {
+    config
+        .entry("min_input_tokens".to_string())
+        .or_insert_with(|| Value::from(2_000));
+    config
+        .entry("max_input_bytes".to_string())
+        .or_insert_with(|| Value::from(AI_CONTEXT_COMPRESSION_DEFAULT_MAX_INPUT_BYTES));
+    config
+        .entry("on_unavailable".to_string())
+        .or_insert_with(|| Value::String("pass_through".to_string()));
+    config
+        .entry("streaming".to_string())
+        .or_insert_with(|| Value::String("bypass".to_string()));
+    config
+        .entry("expose_metrics_headers".to_string())
+        .or_insert_with(|| Value::Bool(false));
+}
+
 /// 校验已知 Rust 原生插件配置。
 ///
 /// 未知或尚无专用规则的插件保持原有行为。
@@ -75,8 +96,105 @@ pub fn validate_plugin_config(
 ) -> Result<(), PluginConfigValidationError> {
     match plugin_name {
         "ai-rate-limit" => validate_ai_rate_limit_config(config),
+        "ai-context-compression" => validate_ai_context_compression_config(config),
         _ => Ok(()),
     }
+}
+
+/// 校验 `ai-context-compression` 的完整配置。
+pub fn validate_ai_context_compression_config(
+    config: &Value,
+) -> Result<(), PluginConfigValidationError> {
+    let config = config
+        .as_object()
+        .ok_or_else(|| PluginConfigValidationError::new("", "expected a record"))?;
+    const KNOWN_FIELDS: &[&str] = &[
+        "min_input_tokens",
+        "max_input_bytes",
+        "on_unavailable",
+        "streaming",
+        "expose_metrics_headers",
+    ];
+    if let Some(field) = config
+        .keys()
+        .find(|field| !KNOWN_FIELDS.contains(&field.as_str()))
+    {
+        return Err(PluginConfigValidationError::new(field, "unknown field"));
+    }
+
+    if let Some(value) = config.get("min_input_tokens") {
+        let valid = value
+            .as_u64()
+            .map(|value| value <= i32::MAX as u64)
+            .unwrap_or(false);
+        if !valid {
+            return Err(PluginConfigValidationError::new(
+                "min_input_tokens",
+                format!("expected an integer between 0 and {}", i32::MAX),
+            ));
+        }
+    }
+
+    if let Some(value) = config.get("max_input_bytes") {
+        let valid = value
+            .as_u64()
+            .map(|value| (1..=AI_CONTEXT_COMPRESSION_MAX_INPUT_BYTES).contains(&value))
+            .unwrap_or(false);
+        if !valid {
+            return Err(PluginConfigValidationError::new(
+                "max_input_bytes",
+                format!(
+                    "expected an integer between 1 and {}",
+                    AI_CONTEXT_COMPRESSION_MAX_INPUT_BYTES
+                ),
+            ));
+        }
+    }
+
+    if let Some(value) = config.get("on_unavailable") {
+        match value {
+            Value::String(value) if matches!(value.as_str(), "pass_through" | "reject") => {}
+            Value::String(_) => {
+                return Err(PluginConfigValidationError::new(
+                    "on_unavailable",
+                    "expected one of: pass_through, reject",
+                ));
+            }
+            _ => {
+                return Err(PluginConfigValidationError::new(
+                    "on_unavailable",
+                    "expected a string",
+                ));
+            }
+        }
+    }
+
+    match config.get("streaming") {
+        None => {}
+        Some(Value::String(value)) if value == "bypass" => {}
+        Some(Value::String(_)) => {
+            return Err(PluginConfigValidationError::new(
+                "streaming",
+                "expected: bypass",
+            ));
+        }
+        Some(_) => {
+            return Err(PluginConfigValidationError::new(
+                "streaming",
+                "expected a string",
+            ));
+        }
+    }
+
+    if let Some(value) = config.get("expose_metrics_headers") {
+        if !value.is_boolean() {
+            return Err(PluginConfigValidationError::new(
+                "expose_metrics_headers",
+                "expected a boolean",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 校验 `ai-rate-limit` 的完整配置。
@@ -322,5 +440,30 @@ mod tests {
         assert!(config["tpm_limit"].is_null());
         assert_eq!(config["header_name"], "X-AI-Key");
         validate_ai_rate_limit_config(&Value::Object(config)).unwrap();
+    }
+
+    #[test]
+    fn validates_context_compression_config_and_defaults() {
+        let mut config = json!({"min_input_tokens": 0}).as_object().unwrap().clone();
+        apply_ai_context_compression_config_defaults(&mut config);
+        assert_eq!(config["min_input_tokens"], 0);
+        assert_eq!(
+            config["max_input_bytes"],
+            AI_CONTEXT_COMPRESSION_DEFAULT_MAX_INPUT_BYTES
+        );
+        assert_eq!(config["on_unavailable"], "pass_through");
+        validate_ai_context_compression_config(&Value::Object(config)).unwrap();
+
+        for invalid in [
+            json!({"min_input_tokens": -1}),
+            json!({"max_input_bytes": 0}),
+            json!({"max_input_bytes": AI_CONTEXT_COMPRESSION_MAX_INPUT_BYTES + 1}),
+            json!({"on_unavailable": "retry"}),
+            json!({"streaming": "compress"}),
+            json!({"expose_metrics_headers": "true"}),
+            json!({"unexpected": true}),
+        ] {
+            assert!(validate_ai_context_compression_config(&invalid).is_err());
+        }
     }
 }

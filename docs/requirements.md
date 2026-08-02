@@ -227,6 +227,14 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 8. 当启用 `ai-rate-limit` 时，系统应支持进程内固定窗口的 RPM/TPM 限流，并可按 global 或 route 维度计数；TPM 应先预扣估算值，再在日志阶段按 Provider 返回的实际用量修正
 9. 当启用 `ai-prompt-guard` 时，系统应仅检查 user 消息，支持最大消息长度、正则拒绝/允许列表，以及 block 或 log-only 行为
 10. 当使用 Kong Manager 的 `/ai-gateway` 页面时，用户应能管理 Provider、Model 和 Virtual Key，并能为 model group 创建可实际转发请求的 Chat Completions Route；页面不得读取或复制已遮蔽的 Provider 凭据
+11. 当启用 `ai-context-compression` 时，系统应通过可替换 adapter 使用版本锁定、
+    自托管的开源 Headroom 压缩符合条件的会话历史、tool result 和检索上下文；压缩
+    必须保持消息与 tool calling 结构并包含可完整取回原文的 CCR 循环。首版由
+    Kong-Rust 按原文对模型窗口和 TPM 做保守准入，只在上游发送前经 Headroom
+    压缩；Provider 实际 usage 用于结算，并提供显式旁路/拒绝策略及 before/after
+    token 可观测性。冻结的 Headroom 0.33.0 首版透明 CCR 范围为非流式 OpenAI
+    Responses 与 Anthropic Messages；OpenAI Chat、流式与不兼容 tool choice 必须
+    显式旁路，直到真实 transport contract 证明可安全续调（REQ-AI-014）
 
 #### 当前范围边界
 
@@ -240,6 +248,8 @@ Kong-Rust 是一个使用 Rust 语言和 Cloudflare Pingora 框架完全重写 K
 - `limit_by=consumer` 在存在 `ctx.consumer_id`（包括绑定 Consumer 的 Virtual
   Key）时可以隔离；缺少 Consumer 身份时仍落入遗留空桶，不能作为可靠匿名隔离
 - Prompt Guard 当前为正则和长度规则，不包含基于模型或 embedding 的语义检测
+- Headroom 上下文压缩与 CCR 已完成功能验收；固定 0.33.0 镜像的
+  Critical/High 漏洞未解除前保持 opt-in，不得生产默认开启（REQ-AI-014）
 
 ## 非功能性需求
 

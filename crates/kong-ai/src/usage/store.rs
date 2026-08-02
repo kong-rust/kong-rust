@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use super::model::{
     AggregateMetrics, AiUsageBreakdown, AiUsageFact, AiUsageListQuery, AiUsageMode, AiUsagePage,
     AiUsageResult, AiUsageSnapshot, AiUsageSummary, AiUsageSummaryQuery, BatchWriteResult,
-    BreakdownItem, BreakdownType, CacheStatus, CostStatus, DimensionRef, PricingStatus,
-    SummaryOrder, TokenAggregate, UsageSource,
+    BreakdownItem, BreakdownType, CacheStatus, ContextCompressionAggregate, CostStatus,
+    DimensionRef, PricingStatus, SummaryOrder, TokenAggregate, UsageSource,
 };
 
 #[async_trait]
@@ -66,6 +66,15 @@ pub(crate) fn aggregate(rows: &[&AiUsageFact]) -> AggregateMetrics {
     let mut e2e_values = Vec::with_capacity(rows.len());
     let mut ttft_sum = BigInt::from(0u8);
     let mut ttft_count = 0u64;
+    let mut compression = ContextCompressionAggregate {
+        tokens_before_sum: "0".to_string(),
+        tokens_after_sum: "0".to_string(),
+        tokens_saved_sum: "0".to_string(),
+        ..Default::default()
+    };
+    let mut compression_before_sum = BigInt::from(0u8);
+    let mut compression_after_sum = BigInt::from(0u8);
+    let mut compression_saved_sum = BigInt::from(0u8);
 
     for fact in rows {
         match fact.outcome {
@@ -147,6 +156,28 @@ pub(crate) fn aggregate(rows: &[&AiUsageFact]) -> AggregateMetrics {
             ttft_sum += BigInt::from(ttft);
             ttft_count += 1;
         }
+        if let Some(observation) = fact.context_compression.as_ref() {
+            match observation.status.as_str() {
+                "applied" => compression.applied_requests += 1,
+                "bypassed" => compression.bypassed_requests += 1,
+                "degraded" => compression.degraded_requests += 1,
+                "rejected" => compression.rejected_requests += 1,
+                "pending" => compression.pending_requests += 1,
+                _ => compression.unknown_requests += 1,
+            }
+            if let (Some(before), Some(after), Some(saved)) = (
+                observation.tokens_before,
+                observation.tokens_after,
+                observation.tokens_saved,
+            ) {
+                compression.metrics_known_requests += 1;
+                compression_before_sum += BigInt::from(before);
+                compression_after_sum += BigInt::from(after);
+                compression_saved_sum += BigInt::from(saved);
+            }
+        } else {
+            compression.unknown_requests += 1;
+        }
     }
 
     metrics.prompt_tokens = token_aggregate(prompt_sum, prompt_known, attempted);
@@ -163,6 +194,12 @@ pub(crate) fn aggregate(rows: &[&AiUsageFact]) -> AggregateMetrics {
     } else {
         average_3(ttft_sum, ttft_count)
     };
+    compression.tokens_before_sum = compression_before_sum.to_string();
+    compression.tokens_after_sum = compression_after_sum.to_string();
+    compression.tokens_saved_sum = compression_saved_sum.to_string();
+    compression.weighted_compression_ratio =
+        big_ratio_6(&compression_saved_sum, &compression_before_sum);
+    metrics.context_compression = compression;
     metrics
 }
 
@@ -187,6 +224,17 @@ fn ratio_6(numerator: u64, denominator: u64) -> Option<String> {
                 value.round_dp_with_strategy(6, RoundingStrategy::MidpointAwayFromZero)
             )
         })
+}
+
+fn big_ratio_6(numerator: &BigInt, denominator: &BigInt) -> Option<String> {
+    if denominator == &BigInt::from(0u8) {
+        return None;
+    }
+    Some(
+        (BigDecimal::from(numerator.clone()) / BigDecimal::from(denominator.clone()))
+            .with_scale_round(6, RoundingMode::HalfUp)
+            .to_string(),
+    )
 }
 
 fn average_3(sum: BigInt, count: u64) -> Option<String> {

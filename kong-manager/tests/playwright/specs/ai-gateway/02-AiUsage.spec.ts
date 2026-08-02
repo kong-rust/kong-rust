@@ -67,6 +67,19 @@ const aggregateMetrics = (requests = 3) => ({
   p95_e2e_ms: requests ? '180.000' : null,
   avg_ttft_ms: requests ? '24.000' : null,
   cache_hits: 0,
+  context_compression: {
+    applied_requests: requests > 1 ? requests - 1 : requests,
+    bypassed_requests: requests > 1 ? 1 : 0,
+    degraded_requests: 0,
+    rejected_requests: 0,
+    pending_requests: 0,
+    unknown_requests: 0,
+    metrics_known_requests: requests > 1 ? requests - 1 : requests,
+    tokens_before_sum: String((requests > 1 ? requests - 1 : requests) * 500),
+    tokens_after_sum: String((requests > 1 ? requests - 1 : requests) * 200),
+    tokens_saved_sum: String((requests > 1 ? requests - 1 : requests) * 300),
+    weighted_compression_ratio: requests ? '0.600000' : null,
+  },
 })
 
 const timeItem = (key: string, label: string, cost: string, tokens: string) => {
@@ -255,6 +268,16 @@ const facts = [{
     stream: false,
     cache_status: 'not_configured',
   },
+  context_compression: {
+    status: 'applied',
+    reason: 'applied',
+    backend: 'headroom_proxy',
+    ccr: true,
+    tokens_before: 100,
+    tokens_after: 40,
+    tokens_saved: 60,
+    hop_latency_ms: 18,
+  },
 }, {
   id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   request_id: 'fedcba9876543210fedcba9876543210',
@@ -308,6 +331,7 @@ const facts = [{
     stream: true,
     cache_status: 'bypass',
   },
+  context_compression: null,
 }]
 
 interface MockOptions {
@@ -447,8 +471,18 @@ test('keeps all filters in the URL and reuses one snapshot for trends and rankin
   await expect(page.getByRole('heading', { name: 'AI Usage' })).toBeVisible()
   const costKpi = page.locator('.ai-usage-kpi').filter({ hasText: 'Calculable cost subtotal' })
   const totalTokenKpi = page.locator('.ai-usage-kpi').filter({ hasText: 'Known total tokens' })
+  const savedTokenKpi = page.locator('.ai-usage-kpi').filter({ hasText: 'Context tokens saved' })
+  const compressionRatioKpi = page.locator('.ai-usage-kpi').filter({
+    hasText: 'Weighted compression ratio',
+  })
+  const compressionBypassKpi = page.locator('.ai-usage-kpi').filter({
+    hasText: 'Context compression bypass ratio',
+  })
   await expect(costKpi).toContainText('$0.12')
   await expect(totalTokenKpi).toContainText('1,200')
+  await expect(savedTokenKpi).toContainText('600')
+  await expect(compressionRatioKpi).toContainText('60%')
+  await expect(compressionBypassKpi).toContainText('33.33%')
 
   await expect.poll(() => calls.length).toBeGreaterThanOrEqual(4)
   const initialCalls = calls.slice(0, 4)
@@ -502,6 +536,7 @@ test('shows complete request facts and keeps cursor pagination stable', async ({
   await expect(page.getByText(facts[0].request_id, { exact: true })).toBeVisible()
   await expect(page.getByText('Input $5 · Built-in price')).toBeVisible()
   await expect(page.getByText('Output $30 · Custom override')).toBeVisible()
+  await expect(page.getByText('Headroom saved 60 tokens')).toBeVisible()
 
   await page.getByRole('button', { name: 'Details' }).click()
   const detail = page.getByRole('dialog', { name: facts[0].request_id })
@@ -511,6 +546,9 @@ test('shows complete request facts and keeps cursor pagination stable', async ({
   await expect(detail).toContainText('2026-07-26.1')
   await expect(detail).toContainText('model:555:output')
   await expect(detail).toContainText('Provider reported · provider')
+  await expect(detail).toContainText('Context compression and CCR')
+  await expect(detail).toContainText('headroom_proxy')
+  await expect(detail).toContainText('18 ms')
   await detail.getByRole('button', { name: 'Close' }).click()
 
   await page.getByRole('button', { name: 'Next' }).click()

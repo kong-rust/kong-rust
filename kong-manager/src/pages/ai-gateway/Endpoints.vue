@@ -65,9 +65,11 @@
 
       <TrafficPolicyEditor v-model:models="draft.models" />
 
+      <ContextCompressionEditor v-model="draft.contextCompression" />
+
       <section class="ai-endpoint-section ai-endpoint-publish-summary">
         <div class="ai-endpoint-section-heading">
-          <span class="ai-endpoint-step">4</span>
+          <span class="ai-endpoint-step">5</span>
           <div>
             <h3>{{ t('Publish') }}</h3>
             <p>{{ t('Review the public URL and model traffic before saving.') }}</p>
@@ -90,6 +92,14 @@
           <div>
             <dt>{{ t('Protocol') }}</dt>
             <dd>{{ t('OpenAI Chat Completions') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('Context compression') }}</dt>
+            <dd>
+              {{ draft.contextCompression.enabled
+                ? t('Headroom policy attached (Chat bypass)')
+                : t('Bypassed by configuration') }}
+            </dd>
           </div>
         </dl>
       </section>
@@ -152,6 +162,9 @@
             <KBadge :appearance="endpointStatus(endpoint).appearance">
               {{ endpointStatus(endpoint).label }}
             </KBadge>
+            <KBadge :appearance="contextCompressionStatus(endpoint).appearance">
+              {{ contextCompressionStatus(endpoint).label }}
+            </KBadge>
           </div>
           <div class="ai-endpoint-url">
             <span>POST</span>
@@ -192,6 +205,12 @@
           </KButton>
         </div>
       </div>
+
+      <p class="ai-endpoint-hint">
+        {{ endpoint.contextCompressionPlugin
+          ? t('Headroom CCR is configured for non-streaming OpenAI Responses and Anthropic Messages. OpenAI Chat, streaming, and constrained tool_choice requests bypass compression; admission uses original tokens.')
+          : t('Context compression is bypassed by this endpoint configuration.') }}
+      </p>
 
       <div class="ai-endpoint-model-summary">
         <div
@@ -242,6 +261,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import AiGatewayNav from './AiGatewayNav.vue'
+import ContextCompressionEditor from './components/ContextCompressionEditor.vue'
 import EndpointIdentityForm from './components/EndpointIdentityForm.vue'
 import EndpointPlayground from './components/EndpointPlayground.vue'
 import ModelPoolBuilder from './components/ModelPoolBuilder.vue'
@@ -252,6 +272,7 @@ import type { AiProvider } from './types'
 import {
   endpointPath,
   endpointToDraft,
+  newContextCompressionDraft,
   newModelDraft,
   normalizeSlug,
 } from './endpointUtils'
@@ -294,6 +315,7 @@ const initialDraft = (): EndpointDraft => {
     slug: '',
     enabled: true,
     requireAuth: false,
+    contextCompression: newContextCompressionDraft(),
     models: [model],
   }
 }
@@ -325,6 +347,7 @@ const replaceDraft = (value: EndpointDraft) => {
   draft.slug = value.slug
   draft.enabled = value.enabled
   draft.requireAuth = value.requireAuth
+  draft.contextCompression = { ...value.contextCompression }
   draft.models = value.models
 }
 
@@ -456,6 +479,27 @@ const endpointStatus = (endpoint: AiEndpoint) => {
   }
 
   return { label: t('Running'), appearance: 'success' as const }
+}
+
+const contextCompressionStatus = (endpoint: AiEndpoint) => {
+  if (!endpoint.contextCompressionPlugin || !endpoint.contextCompressionPlugin.enabled) {
+    return {
+      label: t('Context compression: bypassed by config'),
+      appearance: 'neutral' as const,
+    }
+  }
+
+  if (endpoint.contextCompressionCapability.configuration_status !== 'configured') {
+    return {
+      label: t('Context compression: unavailable'),
+      appearance: 'warning' as const,
+    }
+  }
+
+  return {
+    label: t('Context compression: policy attached'),
+    appearance: 'neutral' as const,
+  }
 }
 
 onMounted(refresh)

@@ -1,5 +1,6 @@
 import type {
   AiEndpoint,
+  ContextCompressionDraft,
   EndpointDraft,
   EndpointModelDraft,
   ProviderType,
@@ -98,6 +99,14 @@ export const newModelDraft = (): EndpointModelDraft => ({
   weight: 100,
 })
 
+export const newContextCompressionDraft = (): ContextCompressionDraft => ({
+  enabled: false,
+  minInputTokens: 2000,
+  maxInputBytes: 4 * 1024 * 1024,
+  onUnavailable: 'pass_through',
+  exposeMetricsHeaders: false,
+})
+
 export const providerAuthConfig = (providerType: ProviderType, apiKey: string) => {
   if (!apiKey) {
     return {}
@@ -139,6 +148,13 @@ export const endpointToDraft = (endpoint: AiEndpoint): EndpointDraft => ({
   slug: endpoint.slug,
   enabled: endpoint.enabled,
   requireAuth: endpoint.requireAuth,
+  contextCompression: {
+    enabled: !!endpoint.contextCompressionPlugin,
+    minInputTokens: endpoint.contextCompressionPlugin?.config.min_input_tokens ?? 2000,
+    maxInputBytes: endpoint.contextCompressionPlugin?.config.max_input_bytes ?? 4 * 1024 * 1024,
+    onUnavailable: endpoint.contextCompressionPlugin?.config.on_unavailable ?? 'pass_through',
+    exposeMetricsHeaders: endpoint.contextCompressionPlugin?.config.expose_metrics_headers ?? false,
+  },
   models: endpoint.models.map(model => ({
     clientId: model.id,
     providerMode: 'existing',

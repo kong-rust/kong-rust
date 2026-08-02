@@ -202,6 +202,21 @@ pub struct FrozenPricingSnapshot {
     pub max_prompt_tokens: Option<i64>,
 }
 
+/// 上下文压缩在单次请求结束时固化的事实。
+///
+/// 这里记录的是压缩链路观测值，不参与 Provider usage、计价或预算结算。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextCompressionUsage {
+    pub status: String,
+    pub reason: String,
+    pub backend: Option<String>,
+    pub ccr: bool,
+    pub tokens_before: Option<i64>,
+    pub tokens_after: Option<i64>,
+    pub tokens_saved: Option<i64>,
+    pub hop_latency_ms: Option<i64>,
+}
+
 /// 一次 AI 网关请求的不可变事实。
 #[derive(Debug, Clone)]
 pub struct AiUsageFact {
@@ -253,6 +268,7 @@ pub struct AiUsageFact {
     pub upstream_attempted: bool,
     pub stream: Option<bool>,
     pub cache_status: CacheStatus,
+    pub context_compression: Option<ContextCompressionUsage>,
 }
 
 /// 查询事实集合的公共过滤器。
@@ -518,6 +534,7 @@ pub struct AiUsageRecord {
     pub pricing: PricingRecord,
     pub cost: CostRecord,
     pub result: ResultRecord,
+    pub context_compression: Option<ContextCompressionUsage>,
 }
 
 impl From<&AiUsageFact> for AiUsageRecord {
@@ -613,6 +630,7 @@ impl From<&AiUsageFact> for AiUsageRecord {
                 stream: fact.stream,
                 cache_status: fact.cache_status,
             },
+            context_compression: fact.context_compression.clone(),
         }
     }
 }
@@ -668,6 +686,39 @@ pub struct TokenAggregate {
     pub coverage: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompressionAggregate {
+    pub applied_requests: u64,
+    pub bypassed_requests: u64,
+    pub degraded_requests: u64,
+    pub rejected_requests: u64,
+    pub pending_requests: u64,
+    pub unknown_requests: u64,
+    pub metrics_known_requests: u64,
+    pub tokens_before_sum: String,
+    pub tokens_after_sum: String,
+    pub tokens_saved_sum: String,
+    pub weighted_compression_ratio: Option<String>,
+}
+
+impl Default for ContextCompressionAggregate {
+    fn default() -> Self {
+        Self {
+            applied_requests: 0,
+            bypassed_requests: 0,
+            degraded_requests: 0,
+            rejected_requests: 0,
+            pending_requests: 0,
+            unknown_requests: 0,
+            metrics_known_requests: 0,
+            tokens_before_sum: "0".to_string(),
+            tokens_after_sum: "0".to_string(),
+            tokens_saved_sum: "0".to_string(),
+            weighted_compression_ratio: None,
+        }
+    }
+}
+
 impl Default for TokenAggregate {
     fn default() -> Self {
         Self {
@@ -698,6 +749,7 @@ pub struct AggregateMetrics {
     pub p95_e2e_ms: Option<String>,
     pub avg_ttft_ms: Option<String>,
     pub cache_hits: u64,
+    pub context_compression: ContextCompressionAggregate,
 }
 
 impl Default for AggregateMetrics {
@@ -720,6 +772,7 @@ impl Default for AggregateMetrics {
             p95_e2e_ms: None,
             avg_ttft_ms: None,
             cache_hits: 0,
+            context_compression: ContextCompressionAggregate::default(),
         }
     }
 }

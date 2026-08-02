@@ -269,12 +269,63 @@ fn build_plugin_registry(
         ai_models,
         ai_providers,
     ));
-    registry.register(
-        "ai-proxy",
-        Arc::new(kong_ai::plugins::AiProxyPlugin::with_model_resolver(
-            model_resolver,
-        )),
-    );
+    let requested_compression_store_scope =
+        kong_ai::context_compression::CompressionStoreScope::parse(
+            &config.ai_context_compression_store_scope,
+        );
+    if requested_compression_store_scope
+        == kong_ai::context_compression::CompressionStoreScope::Cluster
+    {
+        tracing::warn!(
+            requested_store_scope = "cluster",
+            effective_store_scope = "local",
+            "Headroom cluster CCR store capability cannot be verified; using local scope"
+        );
+    }
+    let context_compression_backend = config
+        .ai_context_compression_headroom_url
+        .as_ref()
+        .and_then(|base_url| {
+            let adapter = kong_ai::context_compression::HeadroomProxyAdapter::new(
+                kong_ai::context_compression::HeadroomProxyConfig {
+                    base_url: base_url.clone(),
+                    health_timeout: std::time::Duration::from_millis(
+                        config
+                            .ai_context_compression_health_timeout_ms
+                            .clamp(1, 5_000),
+                    ),
+                    health_ttl: std::time::Duration::from_millis(
+                        config.ai_context_compression_health_ttl_ms.min(60_000),
+                    ),
+                    // 首版没有可验证的共享 store probe，不能把部署声明冒充集群能力。
+                    store_scope: kong_ai::context_compression::CompressionStoreScope::Local,
+                },
+            );
+            match adapter {
+                Ok(adapter) => {
+                    tracing::info!(
+                        store_scope = "local",
+                        "Headroom context compression backend configured"
+                    );
+                    Some(Arc::new(adapter)
+                        as Arc<
+                            dyn kong_ai::context_compression::ContextCompressionBackend,
+                        >)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "invalid Headroom context compression configuration; backend disabled"
+                    );
+                    None
+                }
+            }
+        });
+    let mut ai_proxy = kong_ai::plugins::AiProxyPlugin::with_model_resolver(model_resolver);
+    if let Some(backend) = context_compression_backend {
+        ai_proxy = ai_proxy.with_context_compression_backend(backend);
+    }
+    registry.register("ai-proxy", Arc::new(ai_proxy));
     registry.register(
         "ai-rate-limit",
         Arc::new(kong_ai::plugins::AiRateLimitPlugin::new(
@@ -285,6 +336,10 @@ fn build_plugin_registry(
     registry.register(
         "ai-prompt-guard",
         Arc::new(kong_ai::plugins::AiPromptGuardPlugin::new()),
+    );
+    registry.register(
+        "ai-context-compression",
+        Arc::new(kong_ai::plugins::AiContextCompressionPlugin::new()),
     );
     registry.register(
         "ai-key-auth",
@@ -1024,12 +1079,53 @@ async fn init_proxy_and_admin(
                 as Arc<dyn kong_plugin_system::RequestLifecycleObserver>,
         );
 
+        // DB-less 初始声明式配置必须在监听 8000 前装入数据面；只把实体放进
+        // DblessStore 会让 Admin 可见、但代理路由表仍为空。
+        let initial_params = kong_core::traits::PageParams {
+            size: 10_000,
+            ..Default::default()
+        };
+        let initial_services = DblessDao::<Service>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_routes = DblessDao::<Route>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_plugins = DblessDao::<Plugin>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_upstreams = DblessDao::<Upstream>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_targets = DblessDao::<Target>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_certificates = DblessDao::<Certificate>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_snis = DblessDao::<Sni>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let initial_ca_certificates = DblessDao::<CaCertificate>::new(Arc::clone(&store))
+            .page(&initial_params)
+            .await?
+            .data;
+        let cert_manager = kong_proxy::tls::CertificateManager::new();
+        cert_manager.load_certificates(&initial_certificates, &initial_snis);
+
         let kong_proxy = kong_proxy::KongProxy::new(
-            &[],
+            &initial_routes,
             &config.router_flavor,
             plugin_registry,
-            kong_proxy::tls::CertificateManager::new(),
-            Vec::new(),
+            cert_manager,
+            initial_ca_certificates,
             dns_resolver,
             Arc::clone(config),
         )
@@ -1065,6 +1161,9 @@ async fn init_proxy_and_admin(
                 ),
             },
         );
+        kong_proxy.update_services(initial_services);
+        kong_proxy.update_upstreams(initial_upstreams, initial_targets);
+        kong_proxy.update_plugins(initial_plugins);
 
         let admin_state = kong_admin::AdminState {
             services: Arc::new(DblessDao::<Service>::new(Arc::clone(&store))),
